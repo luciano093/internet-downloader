@@ -5,6 +5,8 @@ import { Routes } from '@generouted/react-router'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <Routes />
+    <div className="w-full h-full">
+      <Routes />
+    </div>
   </StrictMode>,
 )
