@@ -1,10 +1,18 @@
+use std::convert::Infallible;
 use std::{process::exit, sync::Arc};
 
-use internet_downloader_backend::state_manager::StateManager;
+
+use axum::response::sse::{Event, KeepAlive};
+use axum::response::{IntoResponse, Sse};
+use axum::http::StatusCode;
+use axum::routing::get;
+use internet_downloader_backend::{download::DownloadManagerError, state_manager::StateManager};
 use internet_downloader_backend::download::DownloadManager;
 
-use reqwest::StatusCode;
+
 use serde::Deserialize;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 use tokio::{fs::File, signal, sync::Mutex};
 use axum::{extract::{Query, State}, routing::post, Router};
 use tower_http::cors::{self, CorsLayer};
@@ -32,6 +40,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/add-download", post(add_download))
+        .route("/downloads", get(download_stream))
         .with_state(download_manager)
         .layer(cors);
 
@@ -57,10 +66,29 @@ struct DownloadQuery {
 }
 
 #[axum::debug_handler] 
-async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<DownloadQuery>) -> StatusCode {
+async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<DownloadQuery>) -> impl IntoResponse {
     println!("received: {:?}", params);
 
-    manager.lock().await.add_download(&params.url).await.unwrap();
-    
-    StatusCode::OK
+    match manager.lock().await.add_download(&params.url).await {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(DownloadManagerError::Parse(err)) => {
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        },
+    }
+}
+
+async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> impl IntoResponse  {
+    let receiver = manager.lock().await.download_subscribe();
+
+    let stream = BroadcastStream::new(receiver).map(|result| -> Result<Event, Infallible> {
+        match result {
+            Ok(update) => {
+                let data = serde_json::to_string(&update).unwrap_or_else(|_| "error".to_string());
+                Ok(Event::default().data(data))
+            }
+            Err(err) => Ok(Event::default().data(format!("Data stream error: {}", err)))
+        }
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

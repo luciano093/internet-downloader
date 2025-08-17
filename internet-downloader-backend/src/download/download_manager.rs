@@ -6,18 +6,31 @@ use indexmap::IndexMap;
 use thiserror::Error;
 use tokio::fs::{create_dir_all};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::download::hosts::Host;
 use crate::state_manager::StateManager;
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DownloadUpdate {
+    url: String
+}
+
+
+#[derive(Debug, Error)]
+pub enum DownloadManagerError {
+    #[error(transparent)]
+    Parse(#[from] HostParseError)
+}
+
 #[derive(Debug)]
 pub struct DownloadManager {
     state_manager: StateManager,
     download_queue: IndexMap<String, Download>,
     task_sender: Option<mpsc::UnboundedSender<Download>>,
+    update_sender: broadcast::Sender<DownloadUpdate>,
     client: reqwest::Client,
 }
 
@@ -27,10 +40,13 @@ impl DownloadManager {
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:141.0) Gecko/20100101 Firefox/141.0")
             .build().unwrap();
 
+        let update_sender = broadcast::Sender::new(16);
+
         DownloadManager {
             state_manager,
             download_queue: IndexMap::new(),
             task_sender: None,
+            update_sender,
             client,
         }
     }
@@ -41,8 +57,10 @@ impl DownloadManager {
         self.download_queue.append(&mut restored_downloads);
     }
 
-    pub async fn add_download(&mut self, url: &str) -> Result<(), ()> {
-        let host = parse_host(url).unwrap();
+    pub async fn add_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
+        self.update_sender.send(DownloadUpdate { url: "test".to_owned() }).unwrap();
+        
+        let host = parse_host(url)?;
 
         let download_task = host.extract_download_info(url).await;
 
@@ -81,6 +99,10 @@ impl DownloadManager {
                 process_download(state_manager.clone(), client.clone(), download).await;
             }
         });
+    }
+
+    pub fn download_subscribe(&self) -> broadcast::Receiver<DownloadUpdate> {
+        self.update_sender.subscribe()
     }
 }
 
@@ -135,7 +157,7 @@ async fn download_file(file_download: &mut FileDownload, host: Host, state_manag
 }
 
 fn parse_host(url: &str) -> Result<Host, HostParseError> {
-    let url = Url::parse(url).map_err(|err| HostParseError::ParseError(err))?;
+    let url = Url::parse(url)?;
     let host = url.host_str().ok_or(HostParseError::NoHost)?;
 
     match host {
@@ -146,8 +168,8 @@ fn parse_host(url: &str) -> Result<Host, HostParseError> {
 
 #[derive(Debug, Error)]
 pub enum HostParseError {
-    #[error("Parse error: {0}")]
-    ParseError(#[from] ParseError),
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(#[from] ParseError),
      #[error("Url contains no host")]
     NoHost,
     #[error("Unknown host: {0}")]
