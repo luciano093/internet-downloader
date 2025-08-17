@@ -978,6 +978,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tower-http",
  "url",
  "xxh3",
  "xxhash-rust",

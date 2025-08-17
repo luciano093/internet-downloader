@@ -1,12 +1,13 @@
 use std::{process::exit, sync::Arc};
 
-use axum::{extract::{Query, State}, routing::post, Router};
 use internet_downloader_backend::state_manager::StateManager;
 use internet_downloader_backend::download::DownloadManager;
 
 use reqwest::StatusCode;
 use serde::Deserialize;
 use tokio::{fs::File, signal, sync::Mutex};
+use axum::{extract::{Query, State}, routing::post, Router};
+use tower_http::cors::{self, CorsLayer};
 
 #[tokio::main]
 async fn main() {
@@ -26,9 +27,13 @@ async fn main() {
 
     let download_manager = Arc::new(Mutex::new(download_manager));
 
+    let cors = CorsLayer::new()
+        .allow_origin(cors::Any);
+
     let app = Router::new()
         .route("/add-download", post(add_download))
-        .with_state(download_manager);
+        .with_state(download_manager)
+        .layer(cors);
 
     let listener = tokio::net::TcpListener::bind("localhost:3211").await.unwrap();
 
