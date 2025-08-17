@@ -59,7 +59,7 @@ impl DownloadManager {
 
     pub async fn add_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
         self.update_sender.send(DownloadUpdate { url: "test".to_owned() }).unwrap();
-        
+
         let host = parse_host(url)?;
 
         let download_task = host.extract_download_info(url).await;
@@ -107,6 +107,8 @@ impl DownloadManager {
 }
 
 async fn process_download(state_manager: StateManager, client: reqwest::Client, mut download: Download) {
+    download.status = DownloadStatus::InProgress;
+
     let mut queue = VecDeque::new();
     queue.push_back(&mut download.download_type);
 
@@ -116,6 +118,7 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
                 download_file(file_download, download.host, &state_manager, &client).await;
             },
             DownloadType::Folder(folder_download) => {
+                folder_download.status = DownloadStatus::InProgress;
                 for nested_type in &mut folder_download.files {
                     queue.push_back(nested_type);
                 }
@@ -144,6 +147,8 @@ async fn download_file(file_download: &mut FileDownload, host: Host, state_manag
 
     let mut file = tokio::fs::File::create(&file_download.relative_path()).await.unwrap();
     let mut hasher = Xxh3::with_seed(0); 
+
+    file_download.status = DownloadStatus::InProgress;
 
     println!("url: {}", file_download.url);
 
