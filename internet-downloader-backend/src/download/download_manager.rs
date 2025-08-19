@@ -119,7 +119,7 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
 
     for (&id, download_type) in &download.files {
         if let DownloadType::File(file_download) = download_type {
-            download_queue.push_back((id, file_download.url.to_owned(), file_download.relative_path.to_owned()));
+            download_queue.push_back((id, file_download.url.to_owned(), file_download.relative_path().to_owned()));
         }
     }
 
@@ -340,7 +340,7 @@ impl Download {
 
     fn process_folder_creation(folder_task: &FolderTask, parent_relative_path: &Path, current_id: &mut usize, files: &mut HashMap<usize, DownloadType>) {
         let mut children = Vec::new();
-        let mut relative_path = parent_relative_path.join(&folder_task.folder_name);
+        let mut relative_path = parent_relative_path.join(&folder_task.folder_name());
 
         for file_type in &folder_task.files {
             match file_type {
@@ -378,11 +378,11 @@ struct FileDownload {
 
 impl FileDownload {
     pub fn new(file_task: &FileTask, relative_path: &Path, id: usize) -> Self {
-        let relative_path = relative_path.join(&file_task.file_name);
+        let relative_path = relative_path.join(&file_task.file_name());
 
         Self { id,
             url: file_task.url.to_owned(),
-            file_name: file_task.file_name.to_owned(),
+            file_name: file_task.file_name().to_owned(),
             relative_path,
             status: DownloadStatus::Queued,
             hash: None,
@@ -407,10 +407,10 @@ struct FolderDownload {
 
 impl FolderDownload {
     pub fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<usize>) -> Self {
-        let relative_path = parent_relative_path.join(&folder_task.folder_name);
+        let relative_path = parent_relative_path.join(&folder_task.folder_name());
 
         Self { id,
-            folder_name: folder_task.folder_name.to_owned(),
+            folder_name: folder_task.folder_name().to_owned(),
             relative_path,
             status: DownloadStatus::Queued,
             hash: None,
