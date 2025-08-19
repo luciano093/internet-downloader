@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -7,8 +8,8 @@ use bitvec::vec::BitVec;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::fs::{create_dir_all};
-use tokio::io::AsyncWriteExt;
+use tokio::fs::{create_dir_all, File};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, mpsc};
 use url::{ParseError, Url};
@@ -21,6 +22,8 @@ use crate::state_manager::StateManager;
 pub enum DownloadUpdate {
     Status { id: usize, status: DownloadStatus },
     Hash { id: usize, hash: u128 },
+    ChunkCompleted { id: usize, chunk_index: usize },
+    FileSize { id: usize, len: usize },
 }
 
 #[derive(Debug, Error)]
@@ -139,6 +142,12 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
                         Some(DownloadUpdate::Status { id, status }) => {
                             if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
                                 file_download.status = status;
+
+                                if matches!(file_download.status, DownloadStatus::Completed) {
+                                    let hash = hash_file(file_download.relative_path()).await;
+                                    file_download.hash = Some(hash);
+                                }
+
                             } else {
                                 todo!()
                             }
@@ -150,6 +159,26 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
                                 todo!()
                             }
                         },
+                        Some(DownloadUpdate::ChunkCompleted { id, chunk_index }) => {
+                            if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
+                                if chunk_index >= file_download.chunks.len() {
+                                    file_download.chunks.resize(chunk_index, false);
+                                }
+
+                                file_download.chunks.set(chunk_index, true);
+                            } else {
+                                todo!()
+                            }
+                        }
+                        Some(DownloadUpdate::FileSize { id, len }) => {
+                            if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
+                                if file_download.chunks.len() == 0 {
+                                    file_download.chunks.resize(len, false);
+                                }
+                            } else {
+                                todo!()
+                            }
+                        }
                         None => break,
                     };
                 }
@@ -164,7 +193,11 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
     });
 
     for (id, url, path) in download_queue {
+        sender.send(DownloadUpdate::Status { id, status: DownloadStatus::InProgress }).unwrap();
+
         download_file(id, &url, &path, host, &client, &sender).await;
+
+        sender.send(DownloadUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
     }
 
     drop(sender);
@@ -183,6 +216,10 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
         .send()
         .await.unwrap();
 
+    if let Some(file_size) = response.content_length() {
+        sender.send(DownloadUpdate::FileSize { id, len: file_size.div_ceil(16384) as usize }).unwrap();
+    }
+
     println!("{}", path.to_str().unwrap());
 
     if let Some(parent_path) = path.parent() {
@@ -190,20 +227,49 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
     }
 
     let mut file = tokio::fs::File::create(&path).await.unwrap();
-    let mut hasher = Xxh3::with_seed(0);
-
-    sender.send(DownloadUpdate::Status { id, status: DownloadStatus::InProgress }).unwrap();
-
+    
     println!("url: {}", url);
 
-    while let Ok(Some(chunk)) = response.chunk().await {
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.unwrap();
+    let chunk_size = 16384; // 16 KB
+    let mut buffer = Vec::with_capacity(chunk_size * 2); // * 2 to prevent too many reallocations
+    let mut current_chunk = 0;
+
+    while let Some(chunk) = response.chunk().await.unwrap() {
+        buffer.extend_from_slice(&chunk);
+
+        while buffer.len() >= chunk_size {
+            file.write_all(&buffer[..chunk_size]).await.unwrap();
+
+            sender.send(DownloadUpdate::ChunkCompleted { id, chunk_index: current_chunk }).unwrap();
+            current_chunk += 1;
+
+            buffer.copy_within(chunk_size.., 0);
+            buffer.truncate(buffer.len() - chunk_size);
+        }
     }
 
-    sender.send(DownloadUpdate::Hash { id, hash: hasher.digest128() }).unwrap();
+    // handle remaining bytes (final chunk)
+    if !buffer.is_empty() {
+        file.write_all(&buffer).await.unwrap();
+        sender.send(DownloadUpdate::ChunkCompleted { id, chunk_index: current_chunk }).unwrap();
+    }
 
-    sender.send(DownloadUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
+    file.sync_all().await.unwrap();
+}
+
+async fn hash_file(path: &Path) -> u128 {
+    let mut file = File::open(path).await.unwrap();
+    let mut hasher = Xxh3::with_seed(0);
+    let mut buffer = vec![0u8; 8192]; // 8KB chunks
+
+    loop {
+        let bytes_read = file.read(&mut buffer).await.unwrap();
+        if bytes_read == 0 { break; }
+
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    hasher.digest128()
 }
 
 fn parse_host(url: &str) -> Result<Host, HostParseError> {
@@ -301,8 +367,6 @@ pub struct Download {
     hash: Option<u128>,
     status: DownloadStatus,
     files: HashMap<usize, DownloadType>,
-    #[bincode(with_serde)]
-    chunks: BitVec,
 }
 
 impl Download {
@@ -334,7 +398,6 @@ impl Download {
             hash: None,
             status: DownloadStatus::Queued,
             files: files,
-            chunks: BitVec::new(),
         }
     }
 
@@ -366,7 +429,7 @@ enum DownloadType {
     Folder(FolderDownload),
 }
 
-#[derive(Debug, Encode, Decode)]
+#[derive(Encode, Decode)]
 struct FileDownload {
     id: usize,
     url: String,
@@ -374,6 +437,22 @@ struct FileDownload {
     relative_path: PathBuf,
     status: DownloadStatus,
     hash: Option<u128>,
+    #[bincode(with_serde)]
+    chunks: BitVec,
+}
+
+impl Debug for FileDownload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileDownload")
+            .field("id", &self.id)
+            .field("url", &self.url)
+            .field("file_name", &self.file_name)
+            .field("relative_path", &self.relative_path)
+            .field("status", &self.status)
+            .field("hash", &self.hash)
+            .field("chunks", &self.chunks.len())
+            .finish()
+    }
 }
 
 impl FileDownload {
@@ -386,6 +465,7 @@ impl FileDownload {
             relative_path,
             status: DownloadStatus::Queued,
             hash: None,
+            chunks: BitVec::new(), 
         }
     }   
 
@@ -393,7 +473,6 @@ impl FileDownload {
         self.relative_path.as_path()
     }
 }
-
 
 #[derive(Debug, Encode, Decode)]
 struct FolderDownload {
