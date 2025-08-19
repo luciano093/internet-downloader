@@ -47,7 +47,7 @@ impl StateManager {
         Ok(())
     }
 
-    pub async fn write_download(&self, download: Download) {
+    pub async fn write_download(&self, download: &Download) {
         let url = download.url().to_string();
 
         let mut state_blob = Vec::with_capacity(512);

@@ -1,11 +1,15 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use bincode::{Decode, Encode};
+use bitvec::vec::BitVec;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs::{create_dir_all};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, mpsc};
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
@@ -13,11 +17,11 @@ use xxhash_rust::xxh3::Xxh3;
 use crate::download::hosts::Host;
 use crate::state_manager::StateManager;
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct DownloadUpdate {
-    url: String
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum DownloadUpdate {
+    Status { id: usize, status: DownloadStatus },
+    Hash { id: usize, hash: u128 },
 }
-
 
 #[derive(Debug, Error)]
 pub enum DownloadManagerError {
@@ -54,11 +58,13 @@ impl DownloadManager {
     pub async fn load_state(&mut self) {
         let mut restored_downloads = self.state_manager.load_downloads().await.unwrap();
 
+        println!("restored: {:#?}", restored_downloads);
+
         self.download_queue.append(&mut restored_downloads);
     }
 
     pub async fn add_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
-        self.update_sender.send(DownloadUpdate { url: "test".to_owned() }).unwrap();
+        // self.update_sender.send(DownloadUpdate { url: "test".to_owned() }).unwrap();
 
         let host = parse_host(url)?;
 
@@ -109,56 +115,95 @@ impl DownloadManager {
 async fn process_download(state_manager: StateManager, client: reqwest::Client, mut download: Download) {
     download.status = DownloadStatus::InProgress;
 
-    let mut queue = VecDeque::new();
-    queue.push_back(&mut download.download_type);
+    let mut download_queue = VecDeque::new();
 
-    while let Some(download_type) = queue.pop_front() {
-        match download_type {
-            DownloadType::File(file_download) => {
-                download_file(file_download, download.host, &state_manager, &client).await;
-            },
-            DownloadType::Folder(folder_download) => {
-                folder_download.status = DownloadStatus::InProgress;
-                for nested_type in &mut folder_download.files {
-                    queue.push_back(nested_type);
-                }
-                folder_download.status = DownloadStatus::Completed;
-            },
+    for (&id, download_type) in &download.files {
+        if let DownloadType::File(file_download) = download_type {
+            download_queue.push_back((id, file_download.url.to_owned(), file_download.relative_path.to_owned()));
         }
     }
+
+    let host = download.host;
+
+    let (sender, mut receiver) = mpsc::unbounded_channel::<DownloadUpdate>();
+
+    let handle = tokio::spawn(async move {
+        let state_manager = state_manager;
+        let mut download = download;
+        let mut save_interval = tokio::time::interval(Duration::from_millis(100));
+
+        loop {
+            tokio::select! {
+                update = receiver.recv() => {
+                    match update {
+                        Some(DownloadUpdate::Status { id, status }) => {
+                            if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
+                                file_download.status = status;
+                            } else {
+                                todo!()
+                            }
+                        },
+                        Some(DownloadUpdate::Hash { id, hash }) => {
+                            if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
+                                file_download.hash = Some(hash);
+                            } else {
+                                todo!()
+                            }
+                        },
+                        None => break,
+                    };
+                }
+                _ = save_interval.tick() => {
+                    state_manager.write_download(&download).await;
+                }
+            }
+        }
+
+        state_manager.write_download(&download).await;
+        (download, state_manager)
+    });
+
+    for (id, url, path) in download_queue {
+        download_file(id, &url, &path, host, &client, &sender).await;
+    }
+
+    drop(sender);
+
+    let (mut download, state_manager) = handle.await.unwrap();
     
     download.status = DownloadStatus::Completed;
 
     println!("{}", download.url());
-    state_manager.write_download(download).await;
+    state_manager.write_download(&download).await;
 }
 
-async fn download_file(file_download: &mut FileDownload, host: Host, state_manager: &StateManager, client: &reqwest::Client) {
-    let mut response = client.get(&file_download.url)
+async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &reqwest::Client, sender: &UnboundedSender<DownloadUpdate>) {
+    let mut response = client.get(url)
         .headers(host.headers())
         .send()
         .await.unwrap();
 
-    println!("{}", file_download.relative_path().to_str().unwrap());
+    println!("{}", path.to_str().unwrap());
 
-    if let Some(parent_path) = file_download.relative_path().parent() {
+    if let Some(parent_path) = path.parent() {
         create_dir_all(parent_path).await.unwrap();
     }
 
-    let mut file = tokio::fs::File::create(&file_download.relative_path()).await.unwrap();
-    let mut hasher = Xxh3::with_seed(0); 
+    let mut file = tokio::fs::File::create(&path).await.unwrap();
+    let mut hasher = Xxh3::with_seed(0);
 
-    file_download.status = DownloadStatus::InProgress;
+    sender.send(DownloadUpdate::Status { id, status: DownloadStatus::InProgress }).unwrap();
 
-    println!("url: {}", file_download.url);
+    println!("url: {}", url);
 
     while let Ok(Some(chunk)) = response.chunk().await {
         hasher.update(&chunk);
         file.write_all(&chunk).await.unwrap();
     }
 
-    file_download.hash = Some(hasher.digest128());
-    file_download.status = DownloadStatus::Completed;
+    sender.send(DownloadUpdate::Hash { id, hash: hasher.digest128() }).unwrap();
+
+    sender.send(DownloadUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
 }
 
 fn parse_host(url: &str) -> Result<Host, HostParseError> {
@@ -239,8 +284,8 @@ impl FolderTask {
     }
 }
 
-#[derive(Debug, Encode, Decode)]
-enum DownloadStatus {
+#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
+pub enum DownloadStatus {
     Queued,
     InProgress,
     Completed,
@@ -252,10 +297,12 @@ enum DownloadStatus {
 pub struct Download {
     url: String,
     relative_path: PathBuf,
-    download_type: DownloadType,
     host: Host,
-    status: DownloadStatus,
     hash: Option<u128>,
+    status: DownloadStatus,
+    files: HashMap<usize, DownloadType>,
+    #[bincode(with_serde)]
+    chunks: BitVec,
 }
 
 impl Download {
@@ -266,27 +313,50 @@ impl Download {
 
 impl Download {
     fn new(value: DownloadTask) -> Self {
-        let relative_path = PathBuf::new();
+        let mut relative_path = PathBuf::new();
 
-        let download_type = match value.task_type {
+        let mut files = HashMap::new();
+        let mut current_id = 0;
+
+        match value.task_type {
+            TaskType::File(file_task) => {
+                files.insert(current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, current_id)));
+            },
+            TaskType::Folder(folder_task) => {
+                Self::process_folder_creation(&folder_task, &mut relative_path, &mut current_id, &mut files);
+            },
+        }
+
+        Self { 
+            url: value.url,
+            relative_path: PathBuf::new(),
+            host: value.host,
+            hash: None,
+            status: DownloadStatus::Queued,
+            files: files,
+            chunks: BitVec::new(),
+        }
+    }
+
+    fn process_folder_creation(folder_task: &FolderTask, parent_relative_path: &Path, current_id: &mut usize, files: &mut HashMap<usize, DownloadType>) {
+        let mut children = Vec::new();
+        let mut relative_path = parent_relative_path.join(&folder_task.folder_name);
+
+        for file_type in &folder_task.files {
+            match file_type {
                 TaskType::File(file_task) => {
-                    let relative_path = relative_path.clone().join(file_task.file_name());
-                    DownloadType::File(FileDownload::new(file_task, relative_path))
+                    files.insert(*current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, *current_id)));
+                    children.push(*current_id);
+                    *current_id += 1;
                 },
                 TaskType::Folder(folder_task) => {
-                    let relative_path = relative_path.clone().join(folder_task.folder_name());
-                    DownloadType::Folder(FolderDownload::new(folder_task, relative_path))
+                    Self::process_folder_creation(folder_task, &mut relative_path, current_id, files);
                 },
-            };
-
-        Self {
-            url: value.url,
-            relative_path,
-            download_type,
-            host: value.host,
-            status: DownloadStatus::Queued,
-            hash: None,
+            }
         }
+
+        files.insert(*current_id, DownloadType::Folder(FolderDownload::new(&folder_task, &parent_relative_path, *current_id, children)));
+        *current_id += 1;
     }
 }
 
@@ -298,6 +368,7 @@ enum DownloadType {
 
 #[derive(Debug, Encode, Decode)]
 struct FileDownload {
+    id: usize,
     url: String,
     file_name: String,
     relative_path: PathBuf,
@@ -306,15 +377,17 @@ struct FileDownload {
 }
 
 impl FileDownload {
-    fn new(value: FileTask, relative_path: PathBuf) -> Self {
-        Self {
-            url: value.url,
-            file_name: value.file_name,
+    pub fn new(file_task: &FileTask, relative_path: &Path, id: usize) -> Self {
+        let relative_path = relative_path.join(&file_task.file_name);
+
+        Self { id,
+            url: file_task.url.to_owned(),
+            file_name: file_task.file_name.to_owned(),
             relative_path,
             status: DownloadStatus::Queued,
             hash: None,
         }
-    }
+    }   
 
     pub fn relative_path(&self) -> &Path {
         self.relative_path.as_path()
@@ -324,36 +397,24 @@ impl FileDownload {
 
 #[derive(Debug, Encode, Decode)]
 struct FolderDownload {
+    id: usize,
     folder_name: String,
     relative_path: PathBuf,
     status: DownloadStatus,
-    files: Vec<DownloadType>,
     hash: Option<u128>,
+    children: Vec<usize>,
 }
 
 impl FolderDownload {
-    fn new(value: FolderTask, relative_path: PathBuf) -> Self {
-        let files = value.files.into_iter().map(|file| {
-                match file {
-                    TaskType::File(file_task) => {
-                        let relative_path = relative_path.clone().join(file_task.file_name());
+    pub fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<usize>) -> Self {
+        let relative_path = parent_relative_path.join(&folder_task.folder_name);
 
-                        DownloadType::File(FileDownload::new(file_task, relative_path))
-                    },
-                    TaskType::Folder(folder_task) => {
-                        let relative_path = relative_path.clone().join(folder_task.folder_name());
-                        DownloadType::Folder(FolderDownload::new(folder_task, relative_path))
-                    },
-                }
-            
-            }).collect();
-
-        Self {
-            folder_name: value.folder_name,
+        Self { id,
+            folder_name: folder_task.folder_name.to_owned(),
             relative_path,
             status: DownloadStatus::Queued,
-            files,
             hash: None,
+            children
         }
     }
 }
