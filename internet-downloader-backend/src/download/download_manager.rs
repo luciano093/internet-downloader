@@ -140,16 +140,27 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
                 update = receiver.recv() => {
                     match update {
                         Some(DownloadUpdate::Status { id, status }) => {
+                            let mut completed = false;
+                            let mut parent_id = None;
+
                             if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
                                 file_download.status = status;
 
                                 if matches!(file_download.status, DownloadStatus::Completed) {
+                                    completed = true;
+                                    parent_id = file_download.parent_id;
+
                                     let hash = hash_file(file_download.relative_path()).await;
                                     file_download.hash = Some(hash);
                                 }
-
                             } else {
                                 todo!()
+                            }
+
+                            if completed {
+                                if let Some(parent_id) = parent_id {
+                                    download.try_complete_folder(parent_id);
+                                }
                             }
                         },
                         Some(DownloadUpdate::Hash { id, hash }) => {
@@ -384,10 +395,10 @@ impl Download {
 
         match value.task_type {
             TaskType::File(file_task) => {
-                files.insert(current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, current_id)));
+                files.insert(current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, current_id, None)));
             },
             TaskType::Folder(folder_task) => {
-                Self::process_folder_creation(&folder_task, &mut relative_path, &mut current_id, &mut files);
+                Self::process_folder_creation(&folder_task, &mut relative_path, &mut current_id, &mut files, None);
             },
         }
 
@@ -401,25 +412,80 @@ impl Download {
         }
     }
 
-    fn process_folder_creation(folder_task: &FolderTask, parent_relative_path: &Path, current_id: &mut usize, files: &mut HashMap<usize, DownloadType>) {
+    fn process_folder_creation(folder_task: &FolderTask, parent_relative_path: &Path, current_id: &mut usize, files: &mut HashMap<usize, DownloadType>, parent_id: Option<usize>) {
         let mut children = Vec::new();
         let mut relative_path = parent_relative_path.join(&folder_task.folder_name());
+
+        let folder_id = *current_id;
+        *current_id += 1;
 
         for file_type in &folder_task.files {
             match file_type {
                 TaskType::File(file_task) => {
-                    files.insert(*current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, *current_id)));
+                    files.insert(*current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, *current_id, Some(folder_id))));
                     children.push(*current_id);
                     *current_id += 1;
                 },
                 TaskType::Folder(folder_task) => {
-                    Self::process_folder_creation(folder_task, &mut relative_path, current_id, files);
+                    Self::process_folder_creation(folder_task, &mut relative_path, current_id, files, Some(folder_id));
                 },
             }
         }
 
-        files.insert(*current_id, DownloadType::Folder(FolderDownload::new(&folder_task, &parent_relative_path, *current_id, children)));
-        *current_id += 1;
+        files.insert(folder_id, DownloadType::Folder(FolderDownload::new(&folder_task, &parent_relative_path, folder_id, children, parent_id)));
+    }
+
+    fn try_complete_folder(&mut self, folder_id: usize) {
+        let folder = self.files.get_mut(&folder_id).unwrap();
+        let children_number;
+        let mut children_completed = 0;
+        let children;
+
+        match folder {
+            DownloadType::File(_) => unreachable!("A file can't have a file as its parent."),
+            DownloadType::Folder(folder_download) => {
+                children_number = folder_download.children.len();
+                children = folder_download.children.clone();
+            },
+        }
+
+        for child in &children {
+            match self.files.get(&child).unwrap() {
+                DownloadType::File(file_download) => {
+                    if matches!(file_download.status, DownloadStatus::Completed) {
+                        children_completed += 1;
+                    }
+                },
+                DownloadType::Folder(folder_download) => {
+                    if matches!(folder_download.status, DownloadStatus::Completed) {
+                        children_completed += 1;
+                    }
+                },
+            }
+        }
+
+        let folder = self.files.get_mut(&folder_id).unwrap();
+
+        let mut completed = false;
+        let parent_id;
+
+        match folder {
+            DownloadType::File(_) => unreachable!("A file can't have a file as its parent."),
+            DownloadType::Folder(folder_download) => {
+                parent_id = folder_download.parent_id;
+
+                if children_completed == children_number {
+                    folder_download.status = DownloadStatus::Completed;
+                    completed = true;
+                }
+            },
+        }
+
+        if completed {
+            if let Some(parent_id) = parent_id {
+                self.try_complete_folder(parent_id);
+            }
+        }
     }
 }
 
@@ -431,6 +497,7 @@ enum DownloadType {
 
 #[derive(Encode, Decode)]
 struct FileDownload {
+    parent_id: Option<usize>,
     id: usize,
     url: String,
     file_name: String,
@@ -456,10 +523,12 @@ impl Debug for FileDownload {
 }
 
 impl FileDownload {
-    pub fn new(file_task: &FileTask, relative_path: &Path, id: usize) -> Self {
+    pub fn new(file_task: &FileTask, relative_path: &Path, id: usize, parent_id: Option<usize>) -> Self {
         let relative_path = relative_path.join(&file_task.file_name());
 
-        Self { id,
+        Self { 
+            parent_id,
+            id,
             url: file_task.url.to_owned(),
             file_name: file_task.file_name().to_owned(),
             relative_path,
@@ -476,6 +545,7 @@ impl FileDownload {
 
 #[derive(Debug, Encode, Decode)]
 struct FolderDownload {
+    parent_id: Option<usize>,
     id: usize,
     folder_name: String,
     relative_path: PathBuf,
@@ -485,10 +555,12 @@ struct FolderDownload {
 }
 
 impl FolderDownload {
-    pub fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<usize>) -> Self {
+    pub fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<usize>, parent_id: Option<usize>) -> Self {
         let relative_path = parent_relative_path.join(&folder_task.folder_name());
 
-        Self { id,
+        Self { 
+            parent_id,
+            id,
             folder_name: folder_task.folder_name().to_owned(),
             relative_path,
             status: DownloadStatus::Queued,
