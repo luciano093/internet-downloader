@@ -208,7 +208,6 @@ impl DownloadSnapshot {
                 serde_json::json!({
                     "name": folder_download.folder_name,
                     "status": folder_download.status,
-                    "hash": folder_download.hash.as_ref().map(|hash| hash.to_string()),
                     "files": files,
                     "subfolders": subfolders,
                 })
@@ -654,7 +653,6 @@ struct FolderDownload {
     folder_name: String,
     relative_path: PathBuf,
     status: DownloadStatus,
-    hash: Option<u128>,
     children: Vec<usize>,
 }
 
@@ -668,7 +666,6 @@ impl FolderDownload {
             folder_name: folder_task.folder_name().to_owned(),
             relative_path,
             status: DownloadStatus::Queued,
-            hash: None,
             children
         }
     }
