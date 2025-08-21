@@ -19,6 +19,12 @@ use crate::download::hosts::Host;
 use crate::state_manager::StateManager;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum DownloadEvent {
+    DownloadUpdate(DownloadUpdate),
+    DownloadSnapshot(Download),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
     Status { id: usize, status: DownloadStatus },
     Hash { id: usize, hash: u128 },
@@ -64,6 +70,16 @@ impl DownloadManager {
         println!("restored: {:#?}", restored_downloads);
 
         self.download_queue.append(&mut restored_downloads);
+    }
+
+    pub async fn verify_downloads(&mut self) {
+        for (_, download) in &mut self.download_queue {
+            let path = download.relative_path.as_path(); 
+
+            if !matches!(download.status, DownloadStatus::Queued) && !path.exists() {
+                download.status = DownloadStatus::NotFound;
+            }
+        }
     }
 
     pub async fn add_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
@@ -113,6 +129,92 @@ impl DownloadManager {
     pub fn download_subscribe(&self) -> broadcast::Receiver<DownloadUpdate> {
         self.update_sender.subscribe()
     }
+
+    pub async fn get_snapshot(&self) -> DownloadSnapshot {
+        DownloadSnapshot(self.state_manager.load_downloads().await.unwrap())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadSnapshot(IndexMap<String, Download>);
+
+impl Serialize for DownloadSnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        self.build_tree().serialize(serializer)
+    }
+}
+
+impl DownloadSnapshot {
+    fn build_tree(&self) -> serde_json::Value {
+        let downloads = self.0.iter().map(|(_url, download)| {
+
+            let root_item_id = download.files.iter().find_map(|(&id, file_type)| match file_type {
+                DownloadType::File(file_download) if file_download.parent_id.is_none() => Some(id),
+                DownloadType::Folder(folder_download) if folder_download.parent_id.is_none() => Some(id),
+                _ => None,
+            })
+            .expect("Download must have exactly one root item");
+        
+            let mut download_json = serde_json::json!({
+                "url": download.url(),
+                "host": download.host,
+                "status": download.status,
+            });
+            
+            let root_item = self.build_node(download, root_item_id);
+
+            match download.files.get(&root_item_id).unwrap() {
+                DownloadType::File(_) => {
+                    download_json["file"] = root_item;
+                },
+                DownloadType::Folder(_) => {
+                    download_json["folder"] = root_item;
+                },
+            };
+
+            download_json
+        }).collect::<Vec<_>>();
+
+        serde_json::json!({
+            "downloads": downloads
+        })
+    }
+
+    fn build_node(&self, download: &Download, id: usize) -> serde_json::Value {
+        match &download.files.get(&id).unwrap() {
+            DownloadType::File(file_download) => {
+                
+                serde_json::json!({
+                    "name": file_download.file_name,
+                    "status": file_download.status,
+                    "url": file_download.url,
+                    "hash": file_download.hash.as_ref().map(|hash| hash.to_string()),
+                })
+            },
+            DownloadType::Folder(folder_download) => {
+                let mut files = Vec::new();
+                let mut subfolders = Vec::new();
+
+                for &child_id in &folder_download.children {
+                    let node = self.build_node(download, child_id);
+                    match download.files.get(&child_id).unwrap() {
+                        DownloadType::File(_) => files.push(node),
+                        DownloadType::Folder(_) => subfolders.push(node),
+                    }
+                }
+                
+                serde_json::json!({
+                    "name": folder_download.folder_name,
+                    "status": folder_download.status,
+                    "hash": folder_download.hash.as_ref().map(|hash| hash.to_string()),
+                    "files": files,
+                    "subfolders": subfolders,
+                })
+            },
+        }
+    }
 }
 
 async fn process_download(state_manager: StateManager, client: reqwest::Client, mut download: Download) {
@@ -154,7 +256,7 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
                                     file_download.hash = Some(hash);
                                 }
                             } else {
-                                todo!()
+                                unreachable!("File updated can't be a folder.")
                             }
 
                             if completed {
@@ -167,7 +269,7 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
                             if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
                                 file_download.hash = Some(hash);
                             } else {
-                                todo!()
+                                unreachable!("File updated can't be a folder.")
                             }
                         },
                         Some(DownloadUpdate::ChunkCompleted { id, chunk_index }) => {
@@ -178,7 +280,7 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
 
                                 file_download.chunks.set(chunk_index, true);
                             } else {
-                                todo!()
+                                unreachable!("File updated can't be a folder.")
                             }
                         }
                         Some(DownloadUpdate::FileSize { id, len }) => {
@@ -187,7 +289,7 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
                                     file_download.chunks.resize(len, false);
                                 }
                             } else {
-                                todo!()
+                                unreachable!("File updated can't be a folder.")
                             }
                         }
                         None => break,
@@ -368,9 +470,11 @@ pub enum DownloadStatus {
     Completed,
     Paused,
     Failed,
+    NotFound,
 }
 
-#[derive(Debug, Encode, Decode)]
+/// Has either a file or folder as the only item in root
+#[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
 pub struct Download {
     url: String,
     relative_path: PathBuf,
@@ -489,13 +593,13 @@ impl Download {
     }
 }
 
-#[derive(Debug, Encode, Decode)]
+#[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
 enum DownloadType {
     File(FileDownload),
     Folder(FolderDownload),
 }
 
-#[derive(Encode, Decode)]
+#[derive(Encode, Decode, Serialize, Deserialize, Clone)]
 struct FileDownload {
     parent_id: Option<usize>,
     id: usize,
@@ -543,7 +647,7 @@ impl FileDownload {
     }
 }
 
-#[derive(Debug, Encode, Decode)]
+#[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
 struct FolderDownload {
     parent_id: Option<usize>,
     id: usize,

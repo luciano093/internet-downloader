@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::time::Duration;
 use std::{process::exit, sync::Arc};
 
 
@@ -30,6 +31,8 @@ async fn main() {
     let mut download_manager = DownloadManager::new(state_manager);
 
     download_manager.load_state().await;
+
+    download_manager.verify_downloads().await;
 
     download_manager.start_processing().await;
 
@@ -78,17 +81,48 @@ async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(
 }
 
 async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> impl IntoResponse  {
-    let receiver = manager.lock().await.download_subscribe();
+    let manager_guard = manager.lock().await;
+    let receiver = manager_guard.download_subscribe();
+    let snapshot = manager_guard.get_snapshot().await;
 
-    let stream = BroadcastStream::new(receiver).map(|result| -> Result<Event, Infallible> {
-        match result {
-            Ok(update) => {
-                let data = serde_json::to_string(&update).unwrap_or_else(|_| "error".to_string());
-                Ok(Event::default().data(data))
+    println!("{:#?}", snapshot);
+
+    drop(manager_guard);
+
+    let stream   = async_stream::stream! {
+        let snapshot_json = serde_json::to_string(&snapshot).unwrap();
+        println!("json: {}", snapshot_json);
+
+        // explicit turbofish as Infallible can't be inferred automatically
+        yield Ok::<_, Infallible>(Event::default().data(snapshot_json));
+
+        let mut broadcast_stream = BroadcastStream::new(receiver);
+        let mut snapshot_interval = tokio::time::interval(Duration::from_secs(30));
+        snapshot_interval.tick().await; 
+
+        loop {
+            tokio::select! {
+                result = broadcast_stream.next() => {
+                    match result {
+                        Some(Ok(update)) => {
+                            let data = serde_json::to_string(&update).unwrap();
+                            yield Ok(Event::default().data(data));
+                        }
+                        Some(Err(err)) => {
+                            yield Ok(Event::default().event("error").data(format!("Error: {}", err)));
+                        }
+                        None => break,
+                    }
+                }
+                _ = snapshot_interval.tick() => {
+                    let snapshot = manager.lock().await.get_snapshot().await;
+                    let snapshot_json = serde_json::to_string(&snapshot).unwrap();
+
+                    yield Ok(Event::default().event("snapshot").data(snapshot_json));
+                }
             }
-            Err(err) => Ok(Event::default().data(format!("Data stream error: {}", err)))
         }
-    });
+    };
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
