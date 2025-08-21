@@ -66,11 +66,11 @@ impl StateManager {
                         .await
                         .unwrap();
 
-                    println!("saved!");
+                    // println!("saved!");
                     break;
                 }
                 Err(bincode::error::EncodeError::UnexpectedEnd) => {
-                    println!("extending {}", state_blob.capacity());
+                    // println!("extending {}", state_blob.capacity());
                     state_blob.reserve(state_blob.capacity());
                 },
                 Err(err) => {

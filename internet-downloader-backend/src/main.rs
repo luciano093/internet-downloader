@@ -85,13 +85,10 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
     let receiver = manager_guard.download_subscribe();
     let snapshot = manager_guard.get_snapshot().await;
 
-    println!("{:#?}", snapshot);
-
     drop(manager_guard);
 
     let stream   = async_stream::stream! {
         let snapshot_json = serde_json::to_string(&snapshot).unwrap();
-        println!("json: {}", snapshot_json);
 
         // explicit turbofish as Infallible can't be inferred automatically
         yield Ok::<_, Infallible>(Event::default().data(snapshot_json));

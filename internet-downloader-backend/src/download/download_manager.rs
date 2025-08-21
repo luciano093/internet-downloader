@@ -212,12 +212,16 @@ impl DownloadSnapshot {
     fn build_node(&self, download: &Download, id: usize) -> serde_json::Value {
         match &download.files.get(&id).unwrap() {
             DownloadType::File(file_download) => {
+                let total_chunks = file_download.chunks.len();
+                let downloaded_chunks = file_download.chunks.count_ones();
+                let percentage = (downloaded_chunks as f64 / total_chunks as f64) * 100.0;
                 
                 serde_json::json!({
                     "name": file_download.file_name,
                     "status": file_download.status,
                     "url": file_download.url,
                     "hash": file_download.hash.as_ref().map(|hash| hash.to_string()),
+                    "progress": format!("{:.1}%", percentage),
                 })
             },
             DownloadType::Folder(folder_download) => {
