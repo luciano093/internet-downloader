@@ -79,12 +79,12 @@ impl DownloadManager {
             for (_, download_type) in &mut download.files {
                 match download_type {
                     DownloadType::File(file_download) => {
-                        if !matches!(file_download.status, DownloadStatus::Queued) && !file_download.relative_path().exists() {
+                        if (file_download.status != DownloadStatus::Queued) && !file_download.relative_path().exists() {
                             file_download.status = DownloadStatus::NotFound;
                             fail = true;
                         }
 
-                        else if matches!(file_download.status, DownloadStatus::Completed) {
+                        else if file_download.status == DownloadStatus::Completed {
                             let hash = hash_file(file_download.relative_path()).await;
 
                             if Some(hash) != file_download.hash {
@@ -93,7 +93,7 @@ impl DownloadManager {
                         }
                     },
                     DownloadType::Folder(folder_download) => {
-                        if !matches!(folder_download.status, DownloadStatus::Queued) && !folder_download.relative_path().exists() {
+                        if (folder_download.status != DownloadStatus::Queued) && !folder_download.relative_path().exists() {
                             folder_download.status = DownloadStatus::NotFound;
                             fail = true;
                         }
@@ -133,7 +133,7 @@ impl DownloadManager {
         let (sender, mut receiver) = mpsc::unbounded_channel();
 
         while let Some((_, download)) = self.download_queue.pop() {
-            if matches!(download.status, DownloadStatus::Completed) {
+            if download.status == DownloadStatus::Completed {
                 println!("Found completed download: {:?}", download.url());
                 continue;
             }
@@ -274,7 +274,7 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
                             if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
                                 file_download.status = status;
 
-                                if matches!(file_download.status, DownloadStatus::Completed) {
+                                if file_download.status == DownloadStatus::Completed {
                                     completed = true;
                                     parent_id = file_download.parent_id;
 
@@ -489,7 +489,7 @@ impl FolderTask {
     }
 }
 
-#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DownloadStatus {
     Queued,
     InProgress,
@@ -499,7 +499,7 @@ pub enum DownloadStatus {
     NotFound,
 }
 
-#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DownloadFailureReason {
     HashMismatch,
 }
@@ -587,12 +587,12 @@ impl Download {
         for child in &children {
             match self.files.get(&child).unwrap() {
                 DownloadType::File(file_download) => {
-                    if matches!(file_download.status, DownloadStatus::Completed) {
+                    if file_download.status == DownloadStatus::Completed {
                         children_completed += 1;
                     }
                 },
                 DownloadType::Folder(folder_download) => {
-                    if matches!(folder_download.status, DownloadStatus::Completed) {
+                    if folder_download.status == DownloadStatus::Completed {
                         children_completed += 1;
                     }
                 },
