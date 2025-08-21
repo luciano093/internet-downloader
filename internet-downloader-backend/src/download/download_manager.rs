@@ -77,27 +77,19 @@ impl DownloadManager {
             let mut fail = false;
 
             for (_, download_type) in &mut download.files {
-                match download_type {
-                    DownloadType::File(file_download) => {
-                        if (file_download.status != DownloadStatus::Queued) && !file_download.relative_path().exists() {
-                            file_download.status = DownloadStatus::NotFound;
-                            fail = true;
-                        }
+                if (download_type.status() != DownloadStatus::Queued) && !download_type.relative_path().exists() {
+                    download_type.set_status(DownloadStatus::NotFound);
+                    fail = true;
+                }
 
-                        else if file_download.status == DownloadStatus::Completed {
-                            let hash = hash_file(file_download.relative_path()).await;
+                if let DownloadType::File(file_download) = download_type {
+                    if file_download.status() == DownloadStatus::Completed {
+                        let hash = hash_file(file_download.relative_path()).await;
 
-                            if Some(hash) != file_download.hash {
-                                file_download.status = DownloadStatus::Failed(DownloadFailureReason::HashMismatch);
-                            }
+                        if Some(hash) != file_download.hash {
+                            file_download.status = DownloadStatus::Failed(DownloadFailureReason::HashMismatch);
                         }
-                    },
-                    DownloadType::Folder(folder_download) => {
-                        if (folder_download.status != DownloadStatus::Queued) && !folder_download.relative_path().exists() {
-                            folder_download.status = DownloadStatus::NotFound;
-                            fail = true;
-                        }
-                    },
+                    }
                 }
             }
 
@@ -177,11 +169,13 @@ impl DownloadSnapshot {
     fn build_tree(&self) -> serde_json::Value {
         let downloads = self.0.iter().map(|(_url, download)| {
 
-            let root_item_id = download.files.iter().find_map(|(&id, file_type)| match file_type {
-                DownloadType::File(file_download) if file_download.parent_id.is_none() => Some(id),
-                DownloadType::Folder(folder_download) if folder_download.parent_id.is_none() => Some(id),
-                _ => None,
-            })
+            let root_item_id = download.files.iter().find_map(|(&id, file_type)| 
+                if file_type.parent_id().is_none() {
+                    Some(id)
+                } else {
+                    None
+                }
+            )
             .expect("Download must have exactly one root item");
         
             let mut download_json = serde_json::json!({
@@ -587,17 +581,8 @@ impl Download {
         }
 
         for child in &children {
-            match self.files.get(&child).unwrap() {
-                DownloadType::File(file_download) => {
-                    if file_download.status == DownloadStatus::Completed {
-                        children_completed += 1;
-                    }
-                },
-                DownloadType::Folder(folder_download) => {
-                    if folder_download.status == DownloadStatus::Completed {
-                        children_completed += 1;
-                    }
-                },
+            if self.files.get(&child).unwrap().status() == DownloadStatus::Completed {
+                children_completed += 1;
             }
         }
 
