@@ -74,12 +74,39 @@ impl DownloadManager {
 
     pub async fn verify_downloads(&mut self) {
         for (_, download) in &mut self.download_queue {
-            let path = download.relative_path.as_path(); 
+            let mut fail = false;
 
-            if !matches!(download.status, DownloadStatus::Queued) && !path.exists() {
-                download.status = DownloadStatus::NotFound;
+            for (_, download_type) in &mut download.files {
+                match download_type {
+                    DownloadType::File(file_download) => {
+                        if !matches!(file_download.status, DownloadStatus::Queued) && !file_download.relative_path().exists() {
+                            file_download.status = DownloadStatus::NotFound;
+                            fail = true;
+                        }
+
+                        else if matches!(file_download.status, DownloadStatus::Completed) {
+                            let hash = hash_file(file_download.relative_path()).await;
+
+                            if Some(hash) != file_download.hash {
+                                file_download.status = DownloadStatus::Failed(DownloadFailureReason::HashMismatch);
+                            }
+                        }
+                    },
+                    DownloadType::Folder(folder_download) => {
+                        if !matches!(folder_download.status, DownloadStatus::Queued) && !folder_download.relative_path().exists() {
+                            folder_download.status = DownloadStatus::NotFound;
+                            fail = true;
+                        }
+                    },
+                }
+            }
+
+            if fail {
+                download.status = DownloadStatus::Failed(DownloadFailureReason::HashMismatch);
             }
         }
+
+        println!("restored: {:#?}", self.download_queue);
     }
 
     pub async fn add_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
@@ -468,8 +495,13 @@ pub enum DownloadStatus {
     InProgress,
     Completed,
     Paused,
-    Failed,
+    Failed(DownloadFailureReason),
     NotFound,
+}
+
+#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
+pub enum DownloadFailureReason {
+    HashMismatch,
 }
 
 /// Has either a file or folder as the only item in root
@@ -507,7 +539,7 @@ impl Download {
 
         Self { 
             url: value.url,
-            relative_path: PathBuf::new(),
+            relative_path: PathBuf::from("./"),
             host: value.host,
             hash: None,
             status: DownloadStatus::Queued,
@@ -668,5 +700,9 @@ impl FolderDownload {
             status: DownloadStatus::Queued,
             children
         }
+    }
+
+    pub const fn relative_path(&self) -> &PathBuf {
+        &self.relative_path
     }
 }
