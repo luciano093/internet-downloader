@@ -265,59 +265,9 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
             tokio::select! {
                 update = receiver.recv() => {
                     match update {
-                        Some(DownloadUpdate::Status { id, status }) => {
-                            let mut completed = false;
-                            let mut parent_id = None;
-
-                            if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
-                                file_download.status = status;
-
-                                if file_download.status == DownloadStatus::Completed {
-                                    completed = true;
-                                    parent_id = file_download.parent_id;
-
-                                    let hash = hash_file(file_download.relative_path()).await;
-                                    file_download.hash = Some(hash);
-                                }
-                            } else {
-                                unreachable!("File updated can't be a folder.")
-                            }
-
-                            if completed {
-                                if let Some(parent_id) = parent_id {
-                                    download.try_complete_folder(parent_id);
-                                }
-                            }
-                        },
-                        Some(DownloadUpdate::Hash { id, hash }) => {
-                            if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
-                                file_download.hash = Some(hash);
-                            } else {
-                                unreachable!("File updated can't be a folder.")
-                            }
-                        },
-                        Some(DownloadUpdate::ChunkCompleted { id, chunk_index }) => {
-                            if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
-                                if chunk_index >= file_download.chunks.len() {
-                                    file_download.chunks.resize(chunk_index, false);
-                                }
-
-                                file_download.chunks.set(chunk_index, true);
-                            } else {
-                                unreachable!("File updated can't be a folder.")
-                            }
-                        }
-                        Some(DownloadUpdate::FileSize { id, len }) => {
-                            if let DownloadType::File(file_download) = download.files.get_mut(&id).unwrap() {
-                                if file_download.chunks.len() == 0 {
-                                    file_download.chunks.resize(len, false);
-                                }
-                            } else {
-                                unreachable!("File updated can't be a folder.")
-                            }
-                        }
+                        Some(update) => handle_download_update(&mut download, update).await,
                         None => break,
-                    };
+                    }
                 }
                 _ = save_interval.tick() => {
                     state_manager.write_download(&download).await;
@@ -345,6 +295,44 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
 
     println!("{}", download.url());
     state_manager.write_download(&download).await;
+}
+
+async fn handle_download_update(download: &mut Download, update: DownloadUpdate) {
+    match update {
+        DownloadUpdate::Status { id, status } => {
+            let file = download.get_file_mut(&id).unwrap();
+            file.set_status(status);
+
+            if file.status() == DownloadStatus::Completed {
+                let hash = hash_file(file.relative_path()).await;
+                file.hash = Some(hash);
+
+                if let Some(parent_id) = file.parent_id() {
+                    download.try_complete_folder(parent_id);
+                }
+            }
+        },
+        DownloadUpdate::Hash { id, hash } => {
+            let file = download.get_file_mut(&id).unwrap();
+            file.hash = Some(hash);
+        },
+        DownloadUpdate::ChunkCompleted { id, chunk_index } => {
+            let file = download.get_file_mut(&id).unwrap();
+
+            if chunk_index >= file.chunks.len() {
+                file.chunks.resize(chunk_index + 1, false);
+            }
+
+            file.chunks.set(chunk_index, true);
+        }
+        DownloadUpdate::FileSize { id, len } => {
+            let file = download.get_file_mut(&id).unwrap();
+
+            if file.chunks.len() == 0 {
+                file.chunks.resize(len, false);
+            }
+        }
+    };
 }
 
 async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &reqwest::Client, sender: &UnboundedSender<DownloadUpdate>) {
@@ -516,6 +504,14 @@ impl Download {
     pub const fn url(&self) -> &String {
         &self.url
     }
+
+    pub fn get_file_mut(&mut self, id: &usize) -> Result<&mut FileDownload, ()> {
+        match self.files.get_mut(id) {
+            Some(DownloadType::File(file)) => Ok(file),
+            Some(DownloadType::Folder(_)) => Err(()),
+            None => Err(()),
+        }
+    }
 }
 
 impl Download {
@@ -676,7 +672,7 @@ pub trait DownloadItem {
 }
 
 #[derive(Encode, Decode, Serialize, Deserialize, Clone)]
-struct FileDownload {
+pub struct FileDownload {
     parent_id: Option<usize>,
     id: usize,
     url: String,
@@ -729,7 +725,7 @@ impl Debug for FileDownload {
 }
 
 impl FileDownload {
-    pub fn new(file_task: &FileTask, relative_path: &Path, id: usize, parent_id: Option<usize>) -> Self {
+    pub(super) fn new(file_task: &FileTask, relative_path: &Path, id: usize, parent_id: Option<usize>) -> Self {
         let relative_path = relative_path.join(&file_task.file_name());
 
         Self { 
