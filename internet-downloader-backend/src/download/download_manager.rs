@@ -510,7 +510,6 @@ pub struct Download {
     url: String,
     relative_path: PathBuf,
     host: Host,
-    hash: Option<u128>,
     status: DownloadStatus,
     files: HashMap<usize, DownloadType>,
 }
@@ -541,7 +540,6 @@ impl Download {
             url: value.url,
             relative_path: PathBuf::from("./"),
             host: value.host,
-            hash: None,
             status: DownloadStatus::Queued,
             files: files,
         }
@@ -630,6 +628,64 @@ enum DownloadType {
     Folder(FolderDownload),
 }
 
+impl DownloadItem for DownloadType {
+    fn parent_id(&self) -> Option<usize> {
+        match self {
+            DownloadType::File(f) => f.parent_id(),
+            DownloadType::Folder(f) => f.parent_id(),
+        }
+    }
+
+    fn id(&self) -> usize {
+        match self {
+            DownloadType::File(f) => f.id(),
+            DownloadType::Folder(f) => f.id(),
+        }
+    }
+
+    fn relative_path(&self) -> &PathBuf {
+        match self {
+            DownloadType::File(f) => f.relative_path(),
+            DownloadType::Folder(f) => f.relative_path(),
+        }
+    }
+
+    fn status(&self) -> DownloadStatus {
+        match self {
+            DownloadType::File(f) => f.status(),
+            DownloadType::Folder(f) => f.status(),
+        }
+    }
+
+    fn set_status(&mut self, status: DownloadStatus) {
+        match self {
+            DownloadType::File(f) => f.set_status(status),
+            DownloadType::Folder(f) => f.set_status(status),
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            DownloadType::File(f) => f.name(),
+            DownloadType::Folder(f) => f.name(),
+        }
+    }
+}
+
+pub trait DownloadItem {
+    fn parent_id(&self) -> Option<usize>;
+
+    fn id(&self) -> usize;
+
+    fn relative_path(&self) -> &PathBuf;
+
+    fn status(&self) -> DownloadStatus;
+
+    fn set_status(&mut self, status: DownloadStatus);
+
+    fn name(&self) -> &str;
+}
+
 #[derive(Encode, Decode, Serialize, Deserialize, Clone)]
 struct FileDownload {
     parent_id: Option<usize>,
@@ -641,6 +697,32 @@ struct FileDownload {
     hash: Option<u128>,
     #[bincode(with_serde)]
     chunks: BitVec,
+}
+
+impl DownloadItem for FileDownload {
+    fn parent_id(&self) -> Option<usize> {
+        self.parent_id
+    }
+
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    fn relative_path(&self) -> &PathBuf {
+        &self.relative_path
+    }
+
+    fn status(&self) -> DownloadStatus {
+        self.status
+    }
+
+    fn set_status(&mut self, status: DownloadStatus) {
+        self.status = status;
+    }
+
+    fn name(&self) -> &str {
+        &self.file_name
+    }
 }
 
 impl Debug for FileDownload {
@@ -671,10 +753,6 @@ impl FileDownload {
             hash: None,
             chunks: BitVec::new(), 
         }
-    }   
-
-    pub fn relative_path(&self) -> &Path {
-        self.relative_path.as_path()
     }
 }
 
@@ -701,8 +779,30 @@ impl FolderDownload {
             children
         }
     }
+}
 
-    pub const fn relative_path(&self) -> &PathBuf {
+impl DownloadItem for FolderDownload {
+    fn parent_id(&self) -> Option<usize> {
+        self.parent_id
+    }
+
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    fn relative_path(&self) -> &PathBuf {
         &self.relative_path
+    }
+
+    fn status(&self) -> DownloadStatus {
+        self.status
+    }
+
+    fn set_status(&mut self, status: DownloadStatus) {
+        self.status = status;
+    }
+
+    fn name(&self) -> &str {
+        &self.folder_name
     }
 }
