@@ -1,51 +1,95 @@
-import React, { type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import DownloadTask from "../../components/DownloadTask";
 import DownloadUrlBar from "../../components/DownloadUrlBar";
+import { DownloadCell, DownloadGrid, DownloadRow } from "../../components/DownloadGrid";
 
-function DownloadColumn({ title, children }: { title: string, children: ReactNode}) {
-  return <>
-    <div>
-      <div className="px-2 py-1 border-r border-b border-gray-800 bg-gray-700">
-        {title}
-      </div>
-      <div className="border-r border-gray-800">
-        {children}
-      </div>
-    </div>
-  </>
+interface DownloadItem {
+  url: string,
+  status: string,
+  host: string,
+  folder?: {
+    name: string,
+    status: string,
+    subfolders: []
+    files: {
+      name: string,
+      url: string,
+      status: string,
+      progress: string,
+      hash: string,
+    }[]
+  },
+  file?: {
+    name: string,
+  }
 }
 
-function DownloadGrid({ children }: { children: ReactNode }) {
-  const columnCount = React.Children.count(children);
-  
-  return <>
-    <div className="bg-gray-800 border border-gray-800">
-      <div 
-        className="grid"
-        style={{ gridTemplateColumns: `repeat(${columnCount}, 1fr)` }}
-      >
-        {children}
-      </div>
-    </div>
-  </>
-}
+type Download = DownloadItem & (
+  | { folder: {
+      name: string,
+      status: string,
+      subfolders: []
+      files: {
+        name: string,
+        url: string,
+        status: string,
+        progress: string,
+        hash: string,
+      }[]
+  }, }
+  | { 
+    file: { 
+      name: string 
+    }
+   }
+);
 
 export default function Page() {
+  const [downloads, setDownloads] = useState<Download[]>();
+
+  useEffect(() => {
+    const downloadsSource = new EventSource("http://localhost:3211/downloads");
+    downloadsSource.onmessage = (event) => {
+      const json = JSON.parse(event.data);
+
+      setDownloads(json.downloads);
+      console.log(json.downloads);
+    }
+
+    downloadsSource.onerror = (event) => console.log('Error:', event);
+
+    return () => {
+      downloadsSource.close();
+    }
+  }, [])
+
   return <>
     <DownloadUrlBar />
     <DownloadGrid>
-      <DownloadColumn title="Name">
-        <DownloadTask text="[SubsPlease] Gachiakuta - 03 (1080p) [BF76DD32].mkv" />
-        <DownloadTask text="[SubsPlease] Gachiakuta - 03 (1080p) [BF76DD32].mkv" />
-      </DownloadColumn>
-      <DownloadColumn title="Size">
-        <DownloadTask text="100 GB" />
-        <DownloadTask text="50 GB" />
-      </DownloadColumn>
-      <DownloadColumn title="Status">
-        <DownloadTask text="Complete" />
-        <DownloadTask text="Queued" />
-      </DownloadColumn>
-    </DownloadGrid>
+      <DownloadRow>
+        <DownloadCell title="Name" isHeader={true}></DownloadCell>
+        <DownloadCell title="Size" isHeader={true}></DownloadCell>
+        <DownloadCell title="Status" isHeader={true}></DownloadCell>
+      </DownloadRow>
+
+      {downloads && downloads.map((download) => {
+        const name = (download.folder?.name ?? download.file?.name) as string;
+
+        return <div key={download.url}>
+          <DownloadRow>
+            <DownloadCell>
+              <DownloadTask text={name} />
+            </DownloadCell>
+            <DownloadCell>
+              <DownloadTask text="100 GB" />
+            </DownloadCell>
+            <DownloadCell>
+              <DownloadTask text={download.status} />
+            </DownloadCell>
+          </DownloadRow>
+        </div>
+      }
+      )}
+     </DownloadGrid>
   </>
 }
