@@ -15,14 +15,9 @@ use tokio::sync::{broadcast, mpsc};
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
+use crate::client_state_manager::{DownloadSnapshot, UiStateManager};
 use crate::download::hosts::Host;
 use crate::state_manager::StateManager;
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum DownloadEvent {
-    DownloadUpdate(DownloadUpdate),
-    DownloadSnapshot(Download),
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
@@ -45,6 +40,7 @@ pub struct DownloadManager {
     task_sender: Option<mpsc::UnboundedSender<Download>>,
     update_sender: broadcast::Sender<DownloadUpdate>,
     client: reqwest::Client,
+    // ui_state_manager: UiStateManager,
 }
 
 impl DownloadManager {
@@ -151,93 +147,6 @@ impl DownloadManager {
 
     pub async fn get_snapshot(&self) -> DownloadSnapshot {
         DownloadSnapshot(self.state_manager.load_downloads().await.unwrap())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct DownloadSnapshot(IndexMap<String, Download>);
-
-impl Serialize for DownloadSnapshot {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer {
-        self.build_tree().serialize(serializer)
-    }
-}
-
-impl DownloadSnapshot {
-    fn build_tree(&self) -> serde_json::Value {
-        let downloads = self.0.iter().map(|(_url, download)| {
-
-            let root_item_id = download.files.iter().find_map(|(&id, file_type)| 
-                if file_type.parent_id().is_none() {
-                    Some(id)
-                } else {
-                    None
-                }
-            )
-            .expect("Download must have exactly one root item");
-        
-            let mut download_json = serde_json::json!({
-                "url": download.url(),
-                "host": download.host,
-                "status": download.status,
-            });
-            
-            let root_item = self.build_node(download, root_item_id);
-
-            match download.files.get(&root_item_id).unwrap() {
-                DownloadType::File(_) => {
-                    download_json["file"] = root_item;
-                },
-                DownloadType::Folder(_) => {
-                    download_json["folder"] = root_item;
-                },
-            };
-
-            download_json
-        }).collect::<Vec<_>>();
-
-        serde_json::json!({
-            "downloads": downloads
-        })
-    }
-
-    fn build_node(&self, download: &Download, id: usize) -> serde_json::Value {
-        match &download.files.get(&id).unwrap() {
-            DownloadType::File(file_download) => {
-                let total_chunks = file_download.chunks.len();
-                let downloaded_chunks = file_download.chunks.count_ones();
-                let percentage = (downloaded_chunks as f64 / total_chunks as f64) * 100.0;
-                
-                serde_json::json!({
-                    "name": file_download.file_name,
-                    "status": file_download.status,
-                    "url": file_download.url,
-                    "hash": file_download.hash.as_ref().map(|hash| hash.to_string()),
-                    "progress": format!("{:.1}%", percentage),
-                })
-            },
-            DownloadType::Folder(folder_download) => {
-                let mut files = Vec::new();
-                let mut subfolders = Vec::new();
-
-                for &child_id in &folder_download.children {
-                    let node = self.build_node(download, child_id);
-                    match download.files.get(&child_id).unwrap() {
-                        DownloadType::File(_) => files.push(node),
-                        DownloadType::Folder(_) => subfolders.push(node),
-                    }
-                }
-                
-                serde_json::json!({
-                    "name": folder_download.folder_name,
-                    "status": folder_download.status,
-                    "files": files,
-                    "subfolders": subfolders,
-                })
-            },
-        }
     }
 }
 
@@ -512,6 +421,39 @@ impl Download {
             None => Err(()),
         }
     }
+
+    pub const fn files(&self) -> &HashMap<usize, DownloadType> {
+        &self.files
+    }
+
+    pub const fn host(&self) -> Host {
+        self.host
+    }
+
+    pub const fn status(&self) -> DownloadStatus {
+        self.status
+    }
+
+    pub fn get_progress_percent(&self, id: &usize) -> f64 {
+        let item = &self.files[id];
+
+        match item {
+            DownloadType::File(file_download) => {
+                file_download.get_progress_percent()
+            },
+            DownloadType::Folder(folder_download) => {
+                let mut count = 0.;
+                let mut total_percent = 0.;
+
+                for item in folder_download.children().iter().map(|id| &self.files[id]) {
+                    count += 1.;
+                    total_percent += self.get_progress_percent(&item.id());
+                }
+
+                total_percent / count
+            },
+        }
+    }
 }
 
 impl Download {
@@ -608,7 +550,7 @@ impl Download {
 }
 
 #[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
-enum DownloadType {
+pub enum DownloadType {
     File(FileDownload),
     Folder(FolderDownload),
 }
@@ -739,10 +681,29 @@ impl FileDownload {
             chunks: BitVec::new(), 
         }
     }
+
+    pub const fn chunks(&self) -> &BitVec {
+        &self.chunks
+    }
+
+    pub const fn hash(&self) -> Option<u128> {
+        self.hash
+    }
+
+    pub const fn url(&self) -> &String {
+        &self.url
+    }
+
+    pub fn get_progress_percent(&self) -> f64 {
+        let total_chunks = self.chunks().len();
+        let downloaded_chunks = self.chunks().count_ones();
+
+        (downloaded_chunks as f64 / total_chunks as f64) * 100.0
+    }
 }
 
 #[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
-struct FolderDownload {
+pub struct FolderDownload {
     parent_id: Option<usize>,
     id: usize,
     folder_name: String,
@@ -752,7 +713,7 @@ struct FolderDownload {
 }
 
 impl FolderDownload {
-    pub fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<usize>, parent_id: Option<usize>) -> Self {
+    pub(super) fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<usize>, parent_id: Option<usize>) -> Self {
         let relative_path = parent_relative_path.join(&folder_task.folder_name());
 
         Self { 
@@ -763,6 +724,10 @@ impl FolderDownload {
             status: DownloadStatus::Queued,
             children
         }
+    }
+
+    pub const fn children(&self) -> &Vec<usize> {
+        &self.children
     }
 }
 

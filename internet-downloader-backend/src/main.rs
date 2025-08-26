@@ -94,7 +94,7 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
         yield Ok::<_, Infallible>(Event::default().data(snapshot_json));
 
         let mut broadcast_stream = BroadcastStream::new(receiver);
-        let mut snapshot_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut snapshot_interval = tokio::time::interval(Duration::from_secs(5));
         snapshot_interval.tick().await; 
 
         loop {
@@ -112,10 +112,11 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                     }
                 }
                 _ = snapshot_interval.tick() => {
+                    println!("sending snapshot");
                     let snapshot = manager.lock().await.get_snapshot().await;
                     let snapshot_json = serde_json::to_string(&snapshot).unwrap();
 
-                    yield Ok(Event::default().event("snapshot").data(snapshot_json));
+                    yield Ok(Event::default().data(snapshot_json));
                 }
             }
         }
