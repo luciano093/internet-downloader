@@ -103,7 +103,8 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                     match result {
                         Some(Ok(update)) => {
                             let data = serde_json::to_string(&update).unwrap();
-                            yield Ok(Event::default().data(data));
+                            println!("sending: {}", data);
+                            yield Ok(Event::default().event("delta").data(data));
                         }
                         Some(Err(err)) => {
                             yield Ok(Event::default().event("error").data(format!("Error: {}", err)));
@@ -114,9 +115,10 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                 _ = snapshot_interval.tick() => {
                     println!("sending snapshot");
                     let snapshot = manager.lock().await.get_snapshot().await;
+
                     let snapshot_json = serde_json::to_string(&snapshot).unwrap();
 
-                    yield Ok(Event::default().data(snapshot_json));
+                    yield Ok(Event::default().event("snapshot").data(snapshot_json));
                 }
             }
         }

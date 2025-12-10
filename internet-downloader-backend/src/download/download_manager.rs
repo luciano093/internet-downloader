@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bincode::{Decode, Encode};
@@ -15,17 +16,86 @@ use tokio::sync::{broadcast, mpsc};
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::client_state_manager::{DownloadSnapshot, UiStateManager};
+use crate::client_state_manager::{get_snapshot, DownloadDeltaMap, DownloadSnapshot, UiStateEvent, UiStateHandle, UiStateManager};
 use crate::download::hosts::Host;
 use crate::state_manager::StateManager;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
+    StatusChanged { id: usize, status: DownloadStatus },
+    FileUpdated { id: usize, file_update: FileUpdate },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum FileUpdate {
+    Status { id: usize, status: DownloadStatus },
+    Hash { id: usize, hash: u128 },
+    Progress { id: usize, progress: f64 },
+    FileSize { id: usize, len: usize },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum InternalFileUpdate {
     Status { id: usize, status: DownloadStatus },
     Hash { id: usize, hash: u128 },
     ChunkCompleted { id: usize, chunk_index: usize },
     FileSize { id: usize, len: usize },
 }
+
+impl InternalFileUpdate {
+        fn to_external(&self, download: &Download) -> Option<FileUpdate> {
+        match self {
+            InternalFileUpdate::ChunkCompleted { id, .. } => {
+                let progress = match download.files().get(&id).unwrap() {
+                    DownloadType::File(file_download) => file_download.get_progress_percent(),
+                    DownloadType::Folder(_folder_download) => todo!(),
+                };
+
+                // if should_send_progress_update(download, *id, progress) {
+                //     Some(FileUpdate::Progress { id: *id, progress })
+                // } else {
+                //     None
+                // }
+
+                Some(FileUpdate::Progress { id: *id, progress })
+            },
+            InternalFileUpdate::Status { id, status } => {
+                Some(FileUpdate::Status { id: *id, status: *status })
+            },
+            InternalFileUpdate::Hash { id, hash } => {
+                Some(FileUpdate::Hash { id: *id, hash: *hash })
+            },
+            InternalFileUpdate::FileSize { id, len } => {
+                Some(FileUpdate::FileSize { id: *id, len: *len })
+            },
+        }
+    }
+}
+
+// fn should_send_progress_update(download: &Download, id: usize, new_progress: f64) -> bool {
+//         let last_progress = match download.files().get(&id).unwrap() {
+//             DownloadType::File(file_download) => {
+//                 file_download.get_progress_percent()
+//             },
+//             DownloadType::Folder(folder_download) => todo!(),
+//         }
+        
+//         // get the last time we sent an update
+
+        
+//         // send update if:
+//         // progress changed by more than 1%
+//         let progress_changed = (new_progress - last_progress).abs() > 0.01;
+        
+//         // it's been more than 100ms since last update
+//         // let time_elapsed = last_time
+//         //     .map_or(true, |t| now.duration_since(*t).as_millis() > 100);
+        
+//         // always send new progress when completed
+//         let completed = new_progress >= 100.0;
+        
+//         progress_changed || time_elapsed || completed
+// }
 
 #[derive(Debug, Error)]
 pub enum DownloadManagerError {
@@ -35,33 +105,32 @@ pub enum DownloadManagerError {
 
 #[derive(Debug)]
 pub struct DownloadManager {
-    state_manager: StateManager,
+    next_id: AtomicUsize,
+    db_state_manager: StateManager,
     download_queue: IndexMap<String, Download>,
     task_sender: Option<mpsc::UnboundedSender<Download>>,
-    update_sender: broadcast::Sender<DownloadUpdate>,
     client: reqwest::Client,
-    // ui_state_manager: UiStateManager,
+    ui_state_handle: Option<UiStateHandle>,
 }
 
 impl DownloadManager {
-    pub fn new(state_manager: StateManager) -> Self {
+    pub fn new(db_state_manager: StateManager) -> Self {
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:141.0) Gecko/20100101 Firefox/141.0")
             .build().unwrap();
 
-        let update_sender = broadcast::Sender::new(16);
-
         DownloadManager {
-            state_manager,
+            next_id: AtomicUsize::new(0), 
+            db_state_manager,
             download_queue: IndexMap::new(),
             task_sender: None,
-            update_sender,
             client,
+            ui_state_handle: None,
         }
     }
 
     pub async fn load_state(&mut self) {
-        let mut restored_downloads = self.state_manager.load_downloads().await.unwrap();
+        let mut restored_downloads = self.db_state_manager.load_downloads().await.unwrap();
 
         println!("restored: {:#?}", restored_downloads);
 
@@ -98,13 +167,15 @@ impl DownloadManager {
     }
 
     pub async fn add_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
-        // self.update_sender.send(DownloadUpdate { url: "test".to_owned() }).unwrap();
+        // self.update_sender.send(InternalFileUpdate { url: "test".to_owned() }).unwrap();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let host = parse_host(url)?;
 
         let download_task = host.extract_download_info(url).await;
 
-        let download = Download::new(download_task);
+        let download = Download::new(id, download_task);
+        self.ui_state_handle.as_ref().unwrap().add_download(download.clone());
 
         if let Some(sender) = &self.task_sender {
             sender.send(download).unwrap();
@@ -118,8 +189,12 @@ impl DownloadManager {
     }
 
     pub async fn start_processing(&mut self) {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let ui_state_manager = UiStateManager::new();
+        let ui_state_handle = ui_state_manager.start();
+        self.ui_state_handle = Some(ui_state_handle);
 
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        
         while let Some((_, download)) = self.download_queue.pop() {
             if download.status == DownloadStatus::Completed {
                 println!("Found completed download: {:?}", download.url());
@@ -131,26 +206,31 @@ impl DownloadManager {
 
         self.task_sender = Some(sender);
 
-        let state_manager = self.state_manager.clone();
+        let db_state_manager = self.db_state_manager.clone();
         let client = self.client.clone();
 
+        
+
+        let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
+        
         tokio::spawn(async move {
             while let Some(download) = receiver.recv().await {
-                process_download(state_manager.clone(), client.clone(), download).await;
+                let ui_event_sender = ui_event_sender.clone();
+                process_download(db_state_manager.clone(), ui_event_sender, client.clone(), download).await;
             }
         });
     }
 
-    pub fn download_subscribe(&self) -> broadcast::Receiver<DownloadUpdate> {
-        self.update_sender.subscribe()
+    pub fn download_subscribe(&self) -> broadcast::Receiver<DownloadDeltaMap> {
+        self.ui_state_handle.as_ref().unwrap().subscribe()
     }
 
     pub async fn get_snapshot(&self) -> DownloadSnapshot {
-        DownloadSnapshot(self.state_manager.load_downloads().await.unwrap())
+        get_snapshot(&self.db_state_manager).await
     }
 }
 
-async fn process_download(state_manager: StateManager, client: reqwest::Client, mut download: Download) {
+async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::UnboundedSender<UiStateEvent>, client: reqwest::Client, mut download: Download) {
     download.status = DownloadStatus::InProgress;
 
     let mut download_queue = VecDeque::new();
@@ -163,7 +243,7 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
 
     let host = download.host;
 
-    let (sender, mut receiver) = mpsc::unbounded_channel::<DownloadUpdate>();
+    let (sender, mut receiver) = mpsc::unbounded_channel::<InternalFileUpdate>();
 
     let handle = tokio::spawn(async move {
         let state_manager = state_manager;
@@ -174,7 +254,13 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
             tokio::select! {
                 update = receiver.recv() => {
                     match update {
-                        Some(update) => handle_download_update(&mut download, update).await,
+                        Some(update) => {
+                            if let Some(file_update) = update.to_external(&download) {
+                                _ = ui_event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download.id(), file_update }));
+                            }
+
+                            handle_download_update(&mut download, update).await;
+                        }
                         None => break,
                     }
                 }
@@ -189,11 +275,11 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
     });
 
     for (id, url, path) in download_queue {
-        sender.send(DownloadUpdate::Status { id, status: DownloadStatus::InProgress }).unwrap();
+        sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::InProgress }).unwrap();
 
         download_file(id, &url, &path, host, &client, &sender).await;
 
-        sender.send(DownloadUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
+        sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
     }
 
     drop(sender);
@@ -206,9 +292,9 @@ async fn process_download(state_manager: StateManager, client: reqwest::Client, 
     state_manager.write_download(&download).await;
 }
 
-async fn handle_download_update(download: &mut Download, update: DownloadUpdate) {
+async fn handle_download_update(download: &mut Download, update: InternalFileUpdate) {
     match update {
-        DownloadUpdate::Status { id, status } => {
+        InternalFileUpdate::Status { id, status } => {
             let file = download.get_file_mut(&id).unwrap();
             file.set_status(status);
 
@@ -221,11 +307,11 @@ async fn handle_download_update(download: &mut Download, update: DownloadUpdate)
                 }
             }
         },
-        DownloadUpdate::Hash { id, hash } => {
+        InternalFileUpdate::Hash { id, hash } => {
             let file = download.get_file_mut(&id).unwrap();
             file.hash = Some(hash);
         },
-        DownloadUpdate::ChunkCompleted { id, chunk_index } => {
+        InternalFileUpdate::ChunkCompleted { id, chunk_index } => {
             let file = download.get_file_mut(&id).unwrap();
 
             if chunk_index >= file.chunks.len() {
@@ -234,7 +320,7 @@ async fn handle_download_update(download: &mut Download, update: DownloadUpdate)
 
             file.chunks.set(chunk_index, true);
         }
-        DownloadUpdate::FileSize { id, len } => {
+        InternalFileUpdate::FileSize { id, len } => {
             let file = download.get_file_mut(&id).unwrap();
 
             if file.chunks.len() == 0 {
@@ -244,14 +330,14 @@ async fn handle_download_update(download: &mut Download, update: DownloadUpdate)
     };
 }
 
-async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &reqwest::Client, sender: &UnboundedSender<DownloadUpdate>) {
+async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &reqwest::Client, sender: &UnboundedSender<InternalFileUpdate>) {
     let mut response = client.get(url)
         .headers(host.headers())
         .send()
         .await.unwrap();
 
     if let Some(file_size) = response.content_length() {
-        sender.send(DownloadUpdate::FileSize { id, len: file_size.div_ceil(16384) as usize }).unwrap();
+        sender.send(InternalFileUpdate::FileSize { id, len: file_size.div_ceil(16384) as usize }).unwrap();
     }
 
     println!("{}", path.to_str().unwrap());
@@ -274,7 +360,7 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
         while buffer.len() >= chunk_size {
             file.write_all(&buffer[..chunk_size]).await.unwrap();
 
-            sender.send(DownloadUpdate::ChunkCompleted { id, chunk_index: current_chunk }).unwrap();
+            sender.send(InternalFileUpdate::ChunkCompleted { id, chunk_index: current_chunk }).unwrap();
             current_chunk += 1;
 
             buffer.copy_within(chunk_size.., 0);
@@ -285,7 +371,7 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
     // handle remaining bytes (final chunk)
     if !buffer.is_empty() {
         file.write_all(&buffer).await.unwrap();
-        sender.send(DownloadUpdate::ChunkCompleted { id, chunk_index: current_chunk }).unwrap();
+        sender.send(InternalFileUpdate::ChunkCompleted { id, chunk_index: current_chunk }).unwrap();
     }
 
     file.sync_all().await.unwrap();
@@ -402,6 +488,7 @@ pub enum DownloadFailureReason {
 /// Has either a file or folder as the only item in root
 #[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
 pub struct Download {
+    id: usize,
     url: String,
     relative_path: PathBuf,
     host: Host,
@@ -422,8 +509,20 @@ impl Download {
         }
     }
 
+    pub const fn id(&self) -> usize {
+        self.id
+    }
+
     pub const fn files(&self) -> &HashMap<usize, DownloadType> {
         &self.files
+    }
+
+    pub const fn files_mut(&mut self) -> &mut HashMap<usize, DownloadType> {
+        &mut self.files
+    }
+
+    pub const fn relative_path(&self) -> &PathBuf {
+        &self.relative_path
     }
 
     pub const fn host(&self) -> Host {
@@ -457,7 +556,7 @@ impl Download {
 }
 
 impl Download {
-    fn new(value: DownloadTask) -> Self {
+    fn new(id: usize, value: DownloadTask) -> Self {
         let mut relative_path = PathBuf::new();
 
         let mut files = HashMap::new();
@@ -473,6 +572,7 @@ impl Download {
         }
 
         Self { 
+            id,
             url: value.url,
             relative_path: PathBuf::from("./"),
             host: value.host,
