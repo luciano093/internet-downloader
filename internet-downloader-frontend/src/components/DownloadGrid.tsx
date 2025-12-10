@@ -1,8 +1,11 @@
-import type { ReactNode } from "react";
+import { Children, type ReactNode } from "react";
 
 export function DownloadRow({ children, className = "" }: { children: ReactNode, className?: string }) {
+  const columns = Children.count(children);
+
   return (
-    <div className={`grid grid-cols-3 group ${className}`}>
+    <div className={`grid group ${className}`} 
+    style={{gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`}}>
       {children}
     </div>
   );
