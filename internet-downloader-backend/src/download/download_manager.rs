@@ -30,7 +30,6 @@ pub enum DownloadUpdate {
 pub enum FileUpdate {
     Status { id: usize, status: DownloadStatus },
     Hash { id: usize, hash: u128 },
-    Progress { id: usize, progress: f64 },
     FileSize { id: usize, len: u64 },
     BytesDownloaded { id: usize, len: u64 },
 }
@@ -40,7 +39,6 @@ impl FileUpdate {
         match self {
             FileUpdate::Status { id, .. } => *id,
             FileUpdate::Hash { id, .. } => *id,
-            FileUpdate::Progress { id, .. } => *id,
             FileUpdate::FileSize { id, .. } => *id,
             FileUpdate::BytesDownloaded { id, .. } => *id,
         }
@@ -570,27 +568,6 @@ impl Download {
     pub const fn name(&self) -> &String {
         &self.name
     }
-
-    pub fn get_progress_percent(&self, id: &usize) -> f64 {
-        let item = &self.files[id];
-
-        match item {
-            DownloadType::File(file_download) => {
-                file_download.get_progress_percent()
-            },
-            DownloadType::Folder(folder_download) => {
-                let mut count = 0.;
-                let mut total_percent = 0.;
-
-                for item in folder_download.children().iter().map(|id| &self.files[id]) {
-                    count += 1.;
-                    total_percent += self.get_progress_percent(&item.id());
-                }
-
-                total_percent / count
-            },
-        }
-    }
 }
 
 impl Download {
@@ -875,20 +852,6 @@ impl FileDownload {
 
     pub fn bytes_downloaded(&self) -> u64 {
         self.bytes_downloaded
-    }
-
-    pub fn get_progress_percent(&self) -> f64 {
-        let total_chunks = self.chunks().len();
-
-        if total_chunks == 0 {
-            return 0.0;
-        }
-
-        let downloaded_chunks = self.chunks().count_ones();
-
-        let progress = (downloaded_chunks as f64 / total_chunks as f64) * 100.0;
-
-        progress
     }
 }
 

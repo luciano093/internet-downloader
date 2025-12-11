@@ -8,7 +8,6 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-use crate::download;
 use crate::download::FileSize;
 use crate::download::hosts::Host;
 use crate::download::DownloadUpdate;
@@ -315,7 +314,6 @@ pub struct FileDiff {
     file_name: Option<String>,
     relative_path: Option<PathBuf>,
     hash: Option<u128>,
-    progress: Option<f64>,
     size: Option<FileSize>,
     bytes_downloaded: Option<u64>,
 }
@@ -332,9 +330,6 @@ impl FileDiff {
             },
             FileUpdate::Hash { hash, .. } => {
                 self.hash = Some(hash)
-            },
-            FileUpdate::Progress { progress, .. } => { 
-                self.progress = Some(progress)
             },
             FileUpdate::FileSize { len, .. } => { 
                 self.size = Some(FileSize::Known(len)) 
@@ -354,7 +349,6 @@ impl From<&FileDownload> for FileDiff {
             file_name: Some(file.name().to_string()),
             relative_path: Some(file.relative_path().clone()),
             hash: file.hash(),
-            progress: Some(file.get_progress_percent()),
             size: Some(file.size()),
             bytes_downloaded: Some(file.bytes_downloaded()),
         }
@@ -428,38 +422,3 @@ pub fn download_to_json(download: &Download) -> serde_json::Value {
         "files": files_json,
     })
 }
-
-fn build_json_download_node(download: &Download, id: usize) -> serde_json::Value {
-        match &download.files().get(&id).unwrap() {
-            DownloadType::File(file_download) => {
-                
-                serde_json::json!({
-                    "name": file_download.name(),
-                    "status": file_download.status(),
-                    "url": file_download.url(),
-                    "hash": file_download.hash().as_ref().map(|hash| hash.to_string()),
-                    "progress": format!("{:.1}%", download.get_progress_percent(&file_download.id())),
-                })
-            },
-            DownloadType::Folder(folder_download) => {
-                let mut files = Vec::new();
-                let mut subfolders = Vec::new();
-
-                for &child_id in folder_download.children() {
-                    let node = build_json_download_node(download, child_id);
-                    match download.files().get(&child_id).unwrap() {
-                        DownloadType::File(_) => files.push(node),
-                        DownloadType::Folder(_) => subfolders.push(node),
-                    }
-                }
-                
-                serde_json::json!({
-                    "name": folder_download.name(),
-                    "status": folder_download.status(),
-                    "files": files,
-                    "subfolders": subfolders,
-                    "progress": format!("{:.1}%", download.get_progress_percent(&folder_download.id())),
-                })
-            },
-        }
-    }
