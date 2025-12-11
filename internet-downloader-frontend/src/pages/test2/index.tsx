@@ -8,126 +8,28 @@ import {
   TableRow,
 } from "@/components/ui/table"
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { useCallback, useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-
-interface DownloadItem {
-  id: number,
-  url: string,
-  status: string,
-  host: string,
-  folder?: {
-    name: string,
-    progress: string,
-    status: string,
-    subfolders: []
-    files: {
-      name: string,
-      progress: string,
-      url: string,
-      status: string,
-      hash: string,
-    }[]
-  },
-  file?: {
-    name: string,
-    progress: string,
-    url: string,
-    status: string,
-    hash: string,
-  }
-}
-
-interface DownloadItemDiff {
-  url?: string,
-  status?: string,
-  host?: string,
-  folder?: {
-    name?: string,
-    progress?: string,
-    status?: string,
-    subfolders?: []
-    files?: {
-      name?: string,
-      progress?: string,
-      url?: string,
-      status?: string,
-      hash?: string,
-    }[]
-  },
-  file?: {
-    name?: string,
-    progress?: string,
-    url?: string,
-    status?: string,
-    hash?: string,
-  }
-}
-
-type DeltaEvent = {
-  id: number
-  action: "created"
-  changes: DownloadItem
-} | {
-  id: number  
-  action: "modified"
-  changes: DownloadItemDiff
-}
+import { useDownloadStore } from "@/store";
+import { DownloadRow } from "@/components/DownloadRow";
+import type { DeltaEvent } from "@/downloadTypes";
 
 export default function Page() {
-  const [downloads, setDownloads] = useState<DownloadItem[]>();
+  const setSnapshot = useDownloadStore((s) => s.setSnapshot);
+  const applyDelta = useDownloadStore((s) => s.applyDelta);
+  const downloadIds = useDownloadStore((s) => s.downloadIds);
+
   const eventSourceRef = useRef<EventSource | null>(null);
+  const tableContainerRef = useRef<HTMLDivElement>(null);
 
-  const applyDiff = (item: DownloadItem, diff: DownloadItemDiff) => {
-    if (diff.url !== undefined) item.url = diff.url
-    if (diff.status !== undefined) item.status = diff.status
-    if (diff.host !== undefined) item.host = diff.host
-    
-    if (diff.folder && item.folder) {
-      if (diff.folder.name !== undefined) item.folder.name = diff.folder.name
-      if (diff.folder.progress !== undefined) item.folder.progress = diff.folder.progress
-      if (diff.folder.status !== undefined) item.folder.status = diff.folder.status
-      
-      // Files array updates
-      if (diff.folder.files) {
-        diff.folder.files.forEach((fileDiff, i) => {
-          if (fileDiff && item.folder!.files[i]) {
-            Object.assign(item.folder!.files[i], fileDiff)
-          }
-        })
-      }
-    }
-    
-    if (diff.file && item.file) {
-      Object.assign(item.file, diff.file)
-    }
-  };
-
-  const applyDeltas = useCallback((deltas: DeltaEvent[]) => {
-    if (deltas.length > 0) {
-      console.log("delta: ", deltas);
-    }
-
-    setDownloads(previousDownloads => {
-      const newDownloads = [...previousDownloads ?? []];
-
-      deltas.forEach(delta => {
-        if (delta.action === "modified") {
-          const item = newDownloads.find(item => item.id === delta.id)
-
-          if (!item) {
-            console.log("Item not found for id: ", delta.id);
-            return;
-          }
-
-          applyDiff(item, delta.changes);
-        }
-      });
-
-      return newDownloads;
-    });
-  }, []);
+  const rowVirtualizer = useVirtualizer({
+    count: downloadIds.length,
+    getScrollElement: () => tableContainerRef.current,
+    estimateSize: () => 53,
+    overscan: 10,
+  });
 
   const createEventSource = useCallback(() => {
     // Close existing connection if any
@@ -139,15 +41,15 @@ export default function Page() {
 
     newEventSource.addEventListener("snapshot", (event) => {
       const snapshot = JSON.parse(event.data);
-      console.log("snapshot: ", snapshot);
         
-      setDownloads(snapshot.downloads);
+      setSnapshot(snapshot);
     });
 
     newEventSource.addEventListener("delta", (event) => {
-      console.log("here");
-      const delta = JSON.parse(event.data);
-      applyDeltas(delta.deltas);
+      const data = JSON.parse(event.data);
+      console.log("delta: ", data)
+
+      data.deltas.forEach((delta: DeltaEvent) => applyDelta(delta));
     });
 
     newEventSource.onerror = (event) => {
@@ -165,7 +67,7 @@ export default function Page() {
     };
 
     eventSourceRef.current = newEventSource;
-  }, [applyDeltas, eventSourceRef]);
+  }, [applyDelta, setSnapshot]);
 
   useEffect(() => {
     createEventSource();
@@ -183,7 +85,6 @@ export default function Page() {
     const formData = new FormData(event.currentTarget);
 
     const downloads = formData.get("downloadsTextArea");
-    console.log("test: ", downloads);
 
     event.currentTarget.reset(); 
 
@@ -192,35 +93,52 @@ export default function Page() {
     })
   };
 
+  const items = rowVirtualizer.getVirtualItems();
+  const paddingTop = items.length > 0 ? items[0].start : 0;
+  const paddingBottom = items.length > 0
+    ? rowVirtualizer.getTotalSize() - items[items.length - 1].end
+    : 0;
+
   return <>
     <form onSubmit={onSubmit}>
       <Textarea placeholder="Enter downloads here." name="downloadsTextArea" />
       <Button className="cursor-pointer" type="submit">Download</Button>
     </form>
     
-    <Table>
-      <TableCaption>Downloads.</TableCaption>
-      <TableHeader>
-          <TableRow>
-          <TableHead className="w-[100px]">Name</TableHead>
-          <TableHead>Size</TableHead>
-          <TableHead>Progress</TableHead>
-          <TableHead className="text-right">Status</TableHead>
-          </TableRow>
-      </TableHeader>
-      {downloads && downloads.map((download) => {
-          const name = (download.folder?.name ?? download.file?.name) as string;
-          const progress = (download.folder?.progress ?? download.file?.progress) as string;
+    <div 
+        ref={tableContainerRef} 
+        className="rounded-md border h-[600px] overflow-auto relative"
+      >
+      <Table>
+        <TableCaption>Downloads.</TableCaption>
+        <TableHeader>
+            <TableRow>
+            <TableHead className="w-[100px]">Name</TableHead>
+            <TableHead>Size</TableHead>
+            <TableHead>Progress</TableHead>
+            <TableHead className="text-right">Status</TableHead>
+            </TableRow>
+        </TableHeader>
 
-          return <TableBody key={download.url}>
-              <TableRow>
-              <TableCell className="font-medium">{name}</TableCell>
-              <TableCell>10.0GB</TableCell>
-              <TableCell>{progress}</TableCell>
-              <TableCell className="text-right">{download.status}</TableCell>
-              </TableRow>
-          </TableBody>
-      })}
-    </Table>
+        <TableBody>
+          {paddingTop > 0 && (
+            <TableRow>
+              <TableCell style={{ height: `${paddingTop}px` }} colSpan={4} />
+            </TableRow>
+          )}
+
+          {items.map((virtualRow: { index: number; }) => {
+              const id = downloadIds[virtualRow.index];
+              return <DownloadRow key={id} id={id} />;
+          })}
+
+          {paddingBottom > 0 && (
+            <TableRow>
+              <TableCell style={{ height: `${paddingBottom}px` }} colSpan={4} />
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
   </>
 }
