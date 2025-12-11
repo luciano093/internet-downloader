@@ -102,6 +102,7 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
         } catch (error) {
             console.error("Failed to delete", error);
         }
+        
         setIsDeleting(false);
     };
 
@@ -130,6 +131,7 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
                         <div className="flex items-center space-x-2 py-4">
                             <Checkbox 
                                 id={`delete-disk-${id}`} 
+                                className="cursor-pointer"
                                 checked={deleteFromDisk}
                                 onCheckedChange={(checked) => setDeleteFromDisk(checked === true)}
                             />
@@ -139,10 +141,12 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
                         </div>
 
                         <AlertDialogFooter>
-                            <AlertDialogCancel onClick={() => setDeleteFromDisk(false)}>Cancel</AlertDialogCancel>
+                            <AlertDialogCancel onClick={() => setDeleteFromDisk(false)} className="cursor-pointer">
+                                Cancel
+                            </AlertDialogCancel>
                             <AlertDialogAction 
                                 onClick={handleDelete}
-                                className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+                                className="bg-destructive hover:bg-destructive/90 text-destructive-foreground cursor-pointer"
                             >
                                 Remove
                             </AlertDialogAction>
