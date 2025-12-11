@@ -208,6 +208,10 @@ impl DownloadManager {
         Ok(())
     }
 
+    pub async fn remove_download(&mut self, id: usize) {
+        
+    }
+
     pub async fn start_processing(&mut self) {
         let ui_state_manager = UiStateManager::new();
         let ui_state_handle = ui_state_manager.start();

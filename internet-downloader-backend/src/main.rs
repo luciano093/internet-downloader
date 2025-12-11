@@ -6,17 +6,18 @@ use std::{process::exit, sync::Arc};
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{delete, get};
 use internet_downloader_backend::{download::DownloadManagerError, state_manager::StateManager};
 use internet_downloader_backend::download::DownloadManager;
 
 
+use reqwest::Method;
 use serde::Deserialize;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tokio::{fs::File, signal, sync::Mutex};
 use axum::{extract::{Query, State}, routing::post, Router};
-use tower_http::cors::{self, CorsLayer};
+use tower_http::cors::{self, Any, CorsLayer};
 
 #[tokio::main]
 async fn main() {
@@ -39,11 +40,14 @@ async fn main() {
     let download_manager = Arc::new(Mutex::new(download_manager));
 
     let cors = CorsLayer::new()
-        .allow_origin(cors::Any);
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_origin(cors::Any)
+        .allow_headers(Any);
 
     let app = Router::new()
         .route("/add-download", post(add_download))
         .route("/downloads", get(download_stream))
+        .route("/delete-download", delete(delete_download))
         .with_state(download_manager)
         .layer(cors);
 
@@ -125,4 +129,19 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
     };
 
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// By default deletes a download from the database. `from_disk` signals to delete the actual file from the disk too 
+#[derive(Deserialize, Debug)]
+struct DownloadDeletion {
+    id: usize, // id of the download to delete
+    from_disk: Option<bool>,
+}
+
+
+#[axum::debug_handler] 
+async fn delete_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<DownloadDeletion>) -> impl IntoResponse {
+    println!("received: {:?}", params);
+
+    "test"
 }
