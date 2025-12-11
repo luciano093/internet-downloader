@@ -7,7 +7,7 @@ use std::time::Duration;
 use bincode::{Decode, Encode};
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use tokio::fs::{create_dir_all, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,23 +31,36 @@ pub enum FileUpdate {
     Status { id: usize, status: DownloadStatus },
     Hash { id: usize, hash: u128 },
     Progress { id: usize, progress: f64 },
-    FileSize { id: usize, len: usize },
+    FileSize { id: usize, len: u64 },
+    BytesDownloaded { id: usize, len: u64 },
+}
+
+impl FileUpdate {
+    pub fn id(&self) -> usize {
+        match self {
+            FileUpdate::Status { id, .. } => *id,
+            FileUpdate::Hash { id, .. } => *id,
+            FileUpdate::Progress { id, .. } => *id,
+            FileUpdate::FileSize { id, .. } => *id,
+            FileUpdate::BytesDownloaded { id, .. } => *id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum InternalFileUpdate {
     Status { id: usize, status: DownloadStatus },
     Hash { id: usize, hash: u128 },
-    ChunkCompleted { id: usize, chunk_index: usize },
-    FileSize { id: usize, len: usize },
+    ChunkCompleted { id: usize, chunk_index: usize, len: u64 },
+    FileSize { id: usize, len: u64 },
 }
 
 impl InternalFileUpdate {
         fn to_external(&self, download: &Download) -> Option<FileUpdate> {
         match self {
-            InternalFileUpdate::ChunkCompleted { id, .. } => {
-                let progress = match download.files().get(&id).unwrap() {
-                    DownloadType::File(file_download) => file_download.get_progress_percent(),
+            InternalFileUpdate::ChunkCompleted { id, len: new_chunk_len, .. } => {
+                let current_total  = match download.files().get(&id).unwrap() {
+                    DownloadType::File(file_download) => file_download.bytes_downloaded(),
                     DownloadType::Folder(_folder_download) => todo!(),
                 };
 
@@ -57,7 +70,9 @@ impl InternalFileUpdate {
                 //     None
                 // }
 
-                Some(FileUpdate::Progress { id: *id, progress })
+                let new_total = current_total + new_chunk_len;
+
+                Some(FileUpdate::BytesDownloaded { id: *id, len: new_total })
             },
             InternalFileUpdate::Status { id, status } => {
                 Some(FileUpdate::Status { id: *id, status: *status })
@@ -131,6 +146,13 @@ impl DownloadManager {
 
     pub async fn load_state(&mut self) {
         let mut restored_downloads = self.db_state_manager.load_downloads().await.unwrap();
+
+        let max_id = restored_downloads.iter()
+            .map(|download| download.1.id())
+            .max()
+            .unwrap_or(0);
+
+        self.next_id.store(max_id + 1, Ordering::Relaxed);
 
         println!("restored: {:#?}", restored_downloads);
 
@@ -311,20 +333,29 @@ async fn handle_download_update(download: &mut Download, update: InternalFileUpd
             let file = download.get_file_mut(&id).unwrap();
             file.hash = Some(hash);
         },
-        InternalFileUpdate::ChunkCompleted { id, chunk_index } => {
+        InternalFileUpdate::ChunkCompleted { id, chunk_index, len } => {
             let file = download.get_file_mut(&id).unwrap();
+            file.bytes_downloaded += len;
 
             if chunk_index >= file.chunks.len() {
                 file.chunks.resize(chunk_index + 1, false);
+                eprintln!("TODO: file size should probably be recalculated here too");
             }
 
             file.chunks.set(chunk_index, true);
         }
         InternalFileUpdate::FileSize { id, len } => {
             let file = download.get_file_mut(&id).unwrap();
+            let chunk_size = len.div_ceil(16384) as usize;
 
-            if file.chunks.len() == 0 {
-                file.chunks.resize(len, false);
+            if file.chunks.len() != chunk_size {
+                file.chunks.resize(chunk_size, false);
+            }
+
+            if let FileSize::Known(size) = &mut file.size && *size != len as u64 {
+                *size = len as u64;
+            } else {
+                file.size = FileSize::Known(len as u64);
             }
         }
     };
@@ -337,7 +368,7 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
         .await.unwrap();
 
     if let Some(file_size) = response.content_length() {
-        sender.send(InternalFileUpdate::FileSize { id, len: file_size.div_ceil(16384) as usize }).unwrap();
+        sender.send(InternalFileUpdate::FileSize { id, len: file_size }).unwrap();
     }
 
     println!("{}", path.to_str().unwrap());
@@ -360,7 +391,7 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
         while buffer.len() >= chunk_size {
             file.write_all(&buffer[..chunk_size]).await.unwrap();
 
-            sender.send(InternalFileUpdate::ChunkCompleted { id, chunk_index: current_chunk }).unwrap();
+            sender.send(InternalFileUpdate::ChunkCompleted { id, chunk_index: current_chunk, len: chunk_size as u64 }).unwrap();
             current_chunk += 1;
 
             buffer.copy_within(chunk_size.., 0);
@@ -370,8 +401,10 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
 
     // handle remaining bytes (final chunk)
     if !buffer.is_empty() {
+        let len = buffer.len() as u64;
+
         file.write_all(&buffer).await.unwrap();
-        sender.send(InternalFileUpdate::ChunkCompleted { id, chunk_index: current_chunk }).unwrap();
+        sender.send(InternalFileUpdate::ChunkCompleted { id, chunk_index: current_chunk, len }).unwrap();
     }
 
     file.sync_all().await.unwrap();
@@ -494,6 +527,7 @@ pub struct Download {
     host: Host,
     status: DownloadStatus,
     files: HashMap<usize, DownloadType>,
+    name: String,
 }
 
 impl Download {
@@ -533,6 +567,10 @@ impl Download {
         self.status
     }
 
+    pub const fn name(&self) -> &String {
+        &self.name
+    }
+
     pub fn get_progress_percent(&self, id: &usize) -> f64 {
         let item = &self.files[id];
 
@@ -561,12 +599,15 @@ impl Download {
 
         let mut files = HashMap::new();
         let mut current_id = 0;
+        let name;
 
         match value.task_type {
             TaskType::File(file_task) => {
+                name = file_task.file_name.clone();
                 files.insert(current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, current_id, None)));
             },
             TaskType::Folder(folder_task) => {
+                name = folder_task.folder_name.clone();
                 Self::process_folder_creation(&folder_task, &mut relative_path, &mut current_id, &mut files, None);
             },
         }
@@ -578,6 +619,7 @@ impl Download {
             host: value.host,
             status: DownloadStatus::Queued,
             files: files,
+            name,
         }
     }
 
@@ -650,6 +692,7 @@ impl Download {
 }
 
 #[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum DownloadType {
     File(FileDownload),
     Folder(FolderDownload),
@@ -721,10 +764,40 @@ pub struct FileDownload {
     file_name: String,
     relative_path: PathBuf,
     status: DownloadStatus,
+    #[serde(serialize_with = "serialize_hash")] 
     hash: Option<u128>,
+    #[serde(serialize_with = "serialize_chunks")]
     #[bincode(with_serde)]
     chunks: BitVec,
+    size: FileSize,
+    bytes_downloaded: u64,
 }
+
+fn serialize_hash<S>(hash: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if serializer.is_human_readable() {
+        match hash {
+            Some(v) => serializer.collect_str(v),
+            None => serializer.serialize_none(),
+        }
+    } else {
+        hash.serialize(serializer)
+    }
+}
+
+fn serialize_chunks<S>(chunks: &BitVec, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if serializer.is_human_readable() {
+        serializer.serialize_none()
+    } else {
+        chunks.serialize(serializer)
+    }
+}
+
 
 impl DownloadItem for FileDownload {
     fn parent_id(&self) -> Option<usize> {
@@ -778,7 +851,9 @@ impl FileDownload {
             relative_path,
             status: DownloadStatus::Queued,
             hash: None,
-            chunks: BitVec::new(), 
+            chunks: BitVec::new(),
+            size: FileSize::Unknown,
+            bytes_downloaded: 0,
         }
     }
 
@@ -794,11 +869,26 @@ impl FileDownload {
         &self.url
     }
 
+    pub fn size(&self) -> FileSize {
+        self.size
+    }
+
+    pub fn bytes_downloaded(&self) -> u64 {
+        self.bytes_downloaded
+    }
+
     pub fn get_progress_percent(&self) -> f64 {
         let total_chunks = self.chunks().len();
+
+        if total_chunks == 0 {
+            return 0.0;
+        }
+
         let downloaded_chunks = self.chunks().count_ones();
 
-        (downloaded_chunks as f64 / total_chunks as f64) * 100.0
+        let progress = (downloaded_chunks as f64 / total_chunks as f64) * 100.0;
+
+        progress
     }
 }
 
@@ -854,5 +944,22 @@ impl DownloadItem for FolderDownload {
 
     fn name(&self) -> &str {
         &self.folder_name
+    }
+}
+
+#[derive(Debug, Encode, Decode, Copy, Clone, Deserialize)]
+pub enum FileSize {
+    Unknown,
+    Known(u64)
+}
+
+impl Serialize for FileSize {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer {
+        match self {
+            FileSize::Unknown => "unknown".serialize(serializer),
+            FileSize::Known(size) => size.serialize(serializer),
+        }
     }
 }

@@ -8,6 +8,8 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::download;
+use crate::download::FileSize;
 use crate::download::hosts::Host;
 use crate::download::DownloadUpdate;
 use crate::download::FileDownload;
@@ -186,10 +188,10 @@ impl DeltaManager {
             },
             DownloadUpdate::FileUpdated { id, file_update } => match self.deltas.entry(id).or_insert(DownloadDelta::DownloadModified(DownloadDiff::default())) {
                     DownloadDelta::DownloadAdded(download_diff) => {
-                        if let None = download_diff.files.get(&id) {
+                        if let None = download_diff.files.get(&file_update.id()) {
                             todo!()
                         } else {
-                            let file_diff = download_diff.files.get_mut(&id).unwrap();
+                            let file_diff = download_diff.files.get_mut(&file_update.id()).unwrap();
 
                             match file_diff {
                                 ItemDelta::ItemAdded(item_diff) => {
@@ -206,14 +208,15 @@ impl DeltaManager {
                         }
                     },
                     DownloadDelta::DownloadModified(download_diff) => {
-                        if let None = download_diff.files.get(&id) {
+                        let file_id = file_update.id();
+                        if let None = download_diff.files.get(&file_id) {
                             let mut file_diff = FileDiff::new();
 
                             file_diff.update(file_update);
 
-                            download_diff.files.insert(id, ItemDelta::ItemModified(ItemDiff::File(file_diff)));
+                            download_diff.files.insert(file_id, ItemDelta::ItemModified(ItemDiff::File(file_diff)));
                         } else {
-                            let file_diff = download_diff.files.get_mut(&id).unwrap();
+                            let file_diff = download_diff.files.get_mut(&file_id).unwrap();
 
                             match file_diff {
                                 ItemDelta::ItemAdded(download_type) => {
@@ -252,6 +255,7 @@ impl Serialize for DownloadDelta {
     }
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DownloadDiff {
     url: Option<String>,
@@ -277,12 +281,14 @@ impl From<&Download> for DownloadDiff {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum ItemDelta {
     ItemAdded(ItemDiff),
     ItemModified(ItemDiff),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum ItemDiff {
     File(FileDiff),
     Folder(FolderDiff),
@@ -301,6 +307,7 @@ impl From<&DownloadType> for ItemDiff {
     }
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileDiff {
     status: Option<DownloadStatus>,
@@ -309,6 +316,8 @@ pub struct FileDiff {
     relative_path: Option<PathBuf>,
     hash: Option<u128>,
     progress: Option<f64>,
+    size: Option<FileSize>,
+    bytes_downloaded: Option<u64>,
 }
 
 impl FileDiff {
@@ -327,7 +336,12 @@ impl FileDiff {
             FileUpdate::Progress { progress, .. } => { 
                 self.progress = Some(progress)
             },
-            FileUpdate::FileSize { .. } => { },
+            FileUpdate::FileSize { len, .. } => { 
+                self.size = Some(FileSize::Known(len)) 
+            },
+            FileUpdate::BytesDownloaded { len, .. } => {
+                self.bytes_downloaded = Some(len)
+            },
         }
     }
 }
@@ -340,11 +354,14 @@ impl From<&FileDownload> for FileDiff {
             file_name: Some(file.name().to_string()),
             relative_path: Some(file.relative_path().clone()),
             hash: file.hash(),
-            progress: Some(file.get_progress_percent())
+            progress: Some(file.get_progress_percent()),
+            size: Some(file.size()),
+            bytes_downloaded: Some(file.bytes_downloaded()),
         }
     }
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FolderDiff {
     status: Option<DownloadStatus>,
@@ -387,41 +404,29 @@ impl DownloadSnapshot {
             download_to_json(download)
         }).collect::<Vec<_>>();
 
-        serde_json::json!({
-            "downloads": downloads
-        })
+        downloads.into()
     }
 }
 
 pub fn download_to_json(download: &Download) -> serde_json::Value {
-    let root_item_id = download.files().iter().find_map(|(&id, file_type)| 
-        if file_type.parent_id().is_none() {
-            Some(id)
-        } else {
-            None
-        }
-    )
-    .expect("Download must have exactly one root item");
+    let mut files_json = serde_json::to_value(download.files()).unwrap();
 
-    let mut download_json = serde_json::json!({
+    if let Some(files_map) = files_json.as_object_mut() {
+        for (_id, file_value) in files_map.iter_mut() {
+            if let Some(file_obj) = file_value.as_object_mut() {
+                file_obj.remove("chunks"); 
+            }
+        }
+    }
+
+    serde_json::json!({
         "id": download.id(),
+        "name": download.name(),
+        "status": download.status(),
         "url": download.url(),
         "host": download.host(),
-        "status": download.status(),
-    });
-    
-    let root_item = build_json_download_node(download, root_item_id);
-
-    match download.files().get(&root_item_id).unwrap() {
-        DownloadType::File(_) => {
-            download_json["file"] = root_item;
-        },
-        DownloadType::Folder(_) => {
-            download_json["folder"] = root_item;
-        },
-    };
-
-    download_json
+        "files": files_json,
+    })
 }
 
 fn build_json_download_node(download: &Download, id: usize) -> serde_json::Value {
