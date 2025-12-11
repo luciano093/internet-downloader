@@ -101,8 +101,8 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
             });
         } catch (error) {
             console.error("Failed to delete", error);
-            setIsDeleting(false);
         }
+        setIsDeleting(false);
     };
 
     return <>
