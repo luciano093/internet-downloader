@@ -1,7 +1,23 @@
 import { useDownloadStore } from "@/store";
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import { TableCell, TableRow } from "./ui/table";
 import type { DownloadNode, FileItem } from "@/downloadTypes";
+
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Button } from "./ui/button";
+import { Loader2, Trash2 } from "lucide-react";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 
 function formatBytes(bytes: number, decimals = 2) {
     if (!+bytes) return '0 B';
@@ -44,6 +60,9 @@ function getFolderStats(files: Record<number, DownloadNode>) {
 export const DownloadRow = memo(({ id }: { id: number }) => {
     const download = useDownloadStore((state) => state.downloads[id]);
 
+    const [deleteFromDisk, setDeleteFromDisk] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
+
     console.log(JSON.parse(JSON.stringify(download)));
     console.log(`Row ${id} Render:`, download?.status, download?.url);
 
@@ -72,12 +91,65 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
 
     const displaySize = totalSize === 0 ? "Unknown" : formatBytes(totalSize as number);
 
+    const handleDelete = async (e: React.MouseEvent) => {
+        e.preventDefault();
+        setIsDeleting(true);
+
+        try {
+            await fetch(`http://localhost:3211/delete-download?id=${id}&from_disk=${deleteFromDisk}`, {
+                method: "DELETE",
+            });
+        } catch (error) {
+            console.error("Failed to delete", error);
+            setIsDeleting(false);
+        }
+    };
+
     return <>
         <TableRow>
             <TableCell className="font-medium">{download.name}</TableCell>
             <TableCell>{displaySize}</TableCell>
             <TableCell>{progress.toFixed(1)}%</TableCell>
             <TableCell className="text-right">{download.status}</TableCell>
+            <TableCell className="text-right">
+                <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive/90 cursor-pointer">
+                            {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                        </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                        <AlertDialogHeader>
+                            <AlertDialogTitle>Remove Download?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                                This will remove <b>{download.name}</b> from the list.
+                            </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        
+                        {/* Checkbox for Disk Deletion */}
+                        <div className="flex items-center space-x-2 py-4">
+                            <Checkbox 
+                                id={`delete-disk-${id}`} 
+                                checked={deleteFromDisk}
+                                onCheckedChange={(checked) => setDeleteFromDisk(checked === true)}
+                            />
+                            <Label htmlFor={`delete-disk-${id}`} className="cursor-pointer">
+                                Also delete files from disk
+                            </Label>
+                        </div>
+
+                        <AlertDialogFooter>
+                            <AlertDialogCancel onClick={() => setDeleteFromDisk(false)}>Cancel</AlertDialogCancel>
+                            <AlertDialogAction 
+                                onClick={handleDelete}
+                                className="bg-destructive hover:bg-destructive/90 text-destructive-foreground"
+                            >
+                                Remove
+                            </AlertDialogAction>
+                        </AlertDialogFooter>
+                    </AlertDialogContent>
+                </AlertDialog>
+            </TableCell>
         </TableRow>
     </>
 });

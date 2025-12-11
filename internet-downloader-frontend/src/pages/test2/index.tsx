@@ -117,6 +117,7 @@ export default function Page() {
             <TableHead>Size</TableHead>
             <TableHead>Progress</TableHead>
             <TableHead className="text-right">Status</TableHead>
+            <TableHead className="w-[50px]"></TableHead>
             </TableRow>
         </TableHeader>
 
