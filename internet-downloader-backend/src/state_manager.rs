@@ -1,9 +1,8 @@
 use indexmap::IndexMap;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use thiserror::Error;
-use tokio::sync::mpsc;
 
-use crate::download::{Download, DownloadCommand};
+use crate::download::Download;
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {

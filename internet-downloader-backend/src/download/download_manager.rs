@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bincode::{Decode, Encode};
 use bitvec::vec::BitVec;
+use futures_util::future::join_all;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
@@ -381,6 +382,14 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
         (download, state_manager)
     });
 
+    let sizes = fetch_download_size(&unprocessed_downloads, client.clone(), host).await;
+
+    for result in sizes {
+        if let Some((id, len)) = result {
+            sender.send(InternalFileUpdate::FileSize { id, len }).unwrap();
+        }
+    }
+
     for (id, url, path) in unprocessed_downloads {
         let commands_receiver = commands_receiver.resubscribe();
 
@@ -452,6 +461,45 @@ async fn handle_download_update(download: &mut Download, update: InternalFileUpd
             }
         }
     };
+}
+
+async fn fetch_download_size(unprocessed_downloads: &VecDeque<(usize, String, PathBuf)>, client: reqwest::Client, host: Host) -> Vec<Option<(usize, u64)>>{
+    let size_checks: Vec<_> = unprocessed_downloads.iter().map(|(id, url, _)| {
+        let client = client.clone();
+
+        async move {
+            // Try a HEAD request first
+            let head_result = client.head(url)
+                .headers(host.headers())
+                .send()
+                .await;
+
+            if let Ok(response) = head_result {
+                if let Some(len) = response.content_length() {
+                    if len > 0 {
+                        return Some((*id, len));
+                    }
+                }
+            }
+
+            // If HEAD fails or returns no length, do a GET request and abort immediately to avoid downloading body
+            let get_result = client.get(url)
+                .headers(host.headers())
+                .send()
+                .await;
+
+            match get_result {
+                Ok(resp) => {
+                    resp.content_length().map(|len| (*id, len))
+                },
+                Err(_) => None, 
+            }
+        }
+    }).collect();
+
+    let sizes = join_all(size_checks).await;
+
+    sizes
 }
 
 async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &reqwest::Client, sender: &UnboundedSender<InternalFileUpdate>, mut commands_receiver: tokio::sync::broadcast::Receiver<DownloadCommand>) -> DownloadReturnStatus {

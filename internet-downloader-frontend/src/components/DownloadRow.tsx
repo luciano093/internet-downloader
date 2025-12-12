@@ -42,13 +42,15 @@ function getFolderStats(files: Record<number, DownloadNode>) {
 
     activeFiles.forEach(file => {
         const size = typeof file.size === 'number' ? file.size : 0;
-        const downloaded = file.bytes_downloaded;
+        const downloaded = file.bytes_downloaded || 0;
 
         totalBytes += size;
         downloadedBytes += downloaded;
     });
 
-    const percentage = totalBytes === 0 ? 0 : (downloadedBytes / totalBytes) * 100;
+    const effectiveTotal = Math.max(totalBytes, downloadedBytes);
+
+    const percentage = effectiveTotal === 0 ? 0 : (downloadedBytes / effectiveTotal) * 100;
 
     return {
         progress: percentage,
@@ -69,19 +71,6 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
     const { progress, totalSize, downloadedSize } = useMemo(() => {
         if (!download || !download.files || !download.files[0]) {
             return { progress: 0, totalSize: 0, downloadedSize: 0 };
-        }
-
-        const rootNode = download.files[0];
-
-        if (rootNode.type === 'file') {
-            const current = rootNode.bytes_downloaded || 0;
-            const total = typeof rootNode.size === 'number' ? rootNode.size : 0;
-
-            return { 
-                progress: total === 0 ? 0 : (current / total) * 100,
-                totalSize: total,
-                downloadedSize: current
-            };
         }
         
         return getFolderStats(download.files);
