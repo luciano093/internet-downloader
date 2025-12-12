@@ -288,6 +288,8 @@ impl DownloadManager {
                                 }
                                 // 3. Else, it's already done or doesn't exist; just DB delete
                                 else {
+
+                                    println!("Removed completed download {}", id);
                                     db_manager.delete_download(id).await;
                                 }
                             },
@@ -311,13 +313,19 @@ impl DownloadManager {
                                 let (commands_sender, commands_receiver) = tokio::sync::broadcast::channel(20);
                                 command_map.lock().await.insert(download_id, commands_sender);
 
-                                process_download(
-                                    db,
+                                let return_status = process_download(
+                                    db.clone(),
                                     ui_event_sender,
                                     commands_receiver,
                                     client,
                                     download
                                 ).await;
+
+                                if return_status == DownloadReturnStatus::Canceled {
+                                    db.delete_download(*download_id).await;
+                                }
+
+                                println!("download finished");
 
                                 command_map.lock().await.remove(&download_id);
                             });
@@ -337,8 +345,7 @@ impl DownloadManager {
     }
 }
 
-async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::UnboundedSender<UiStateEvent>, commands_receiver: tokio::sync::broadcast::Receiver<DownloadCommand>
-, client: reqwest::Client, mut download: Download) {
+async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::UnboundedSender<UiStateEvent>, commands_receiver: tokio::sync::broadcast::Receiver<DownloadCommand>, client: reqwest::Client, mut download: Download) -> DownloadReturnStatus {
     download.status = DownloadStatus::InProgress;
 
     let mut unprocessed_downloads = VecDeque::new();
@@ -400,7 +407,7 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
         if return_status == DownloadReturnStatus::Canceled {
             drop(sender);
             handle.await.unwrap();
-            return;
+            return DownloadReturnStatus::Canceled;
         }
 
         sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
@@ -414,6 +421,8 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
 
     println!("{}", download.url());
     state_manager.write_download(&download).await;
+
+    DownloadReturnStatus::Completed
 }
 
 async fn handle_download_update(download: &mut Download, update: InternalFileUpdate) {
@@ -546,6 +555,7 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
                 }
             }
             command = commands_receiver.recv() => {
+                println!("received command");
                 match command {
                     Ok(DownloadCommand::Cancel) => return DownloadReturnStatus::Canceled,
                     Ok(DownloadCommand::Pause) => {
