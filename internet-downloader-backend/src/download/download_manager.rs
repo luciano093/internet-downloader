@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::fs::{create_dir_all, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
@@ -137,6 +137,12 @@ pub enum DownloadCommand {
     Cancel,
 }
 
+enum ManagerCommand {
+    AddDownload(Download),
+    RemoveDownload(usize),
+    Shutdown,
+}
+
 #[derive(Debug, Error)]
 pub enum DownloadManagerError {
     #[error(transparent)]
@@ -148,11 +154,11 @@ pub struct DownloadManager {
     next_id: AtomicUsize,
     db_state_manager: StateManager,
     unprocessed_downloads: IndexMap<usize, Download>,
-    unprocessed_downloads_url_index: HashMap<String, usize>,
-    task_sender: Option<mpsc::UnboundedSender<Download>>,
     download_command_sender: Arc<Mutex<HashMap<DownloadId, tokio::sync::broadcast::Sender<DownloadCommand>>>>, 
     client: reqwest::Client,
     ui_state_handle: Option<UiStateHandle>,
+    command_sender: Option<UnboundedSender<ManagerCommand>>,
+    concurrency_limit: Arc<Semaphore>,
 }
 
 impl DownloadManager {
@@ -165,11 +171,11 @@ impl DownloadManager {
             next_id: AtomicUsize::new(0), 
             db_state_manager,
             unprocessed_downloads: IndexMap::new(),
-            unprocessed_downloads_url_index: HashMap::new(),
-            task_sender: None,
             download_command_sender: Arc::new(Mutex::new(HashMap::new())),
             client,
             ui_state_handle: None,
+            command_sender: None,
+            concurrency_limit: Arc::new(Semaphore::const_new(10))
         }
     }
 
@@ -183,11 +189,7 @@ impl DownloadManager {
         println!("restored: {:#?}", restored_downloads);
 
         for (id, download) in restored_downloads {
-            // Add to main store
             self.unprocessed_downloads.insert(id, download.clone());
-            
-            // Add to lookup index 
-            self.unprocessed_downloads_url_index.insert(download.url().to_string(), id);
         }
     }
 
@@ -220,12 +222,7 @@ impl DownloadManager {
         println!("restored: {:#?}", self.unprocessed_downloads);
     }
 
-    pub async fn add_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
-        if self.unprocessed_downloads_url_index.contains_key(url) {
-            println!("download already in index");
-            return Ok(())
-        }
-
+    pub async fn queue_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let host = parse_host(url)?;
 
@@ -235,78 +232,97 @@ impl DownloadManager {
 
         self.ui_state_handle.as_ref().unwrap().add_download(download.clone());
 
-        if let Some(sender) = &self.task_sender {
-            sender.send(download).unwrap();
+        if let Some(sender) = &self.command_sender {
+            sender.send(ManagerCommand::AddDownload(download)).unwrap();
         }
 
         Ok(())
     }
 
     pub async fn remove_download(&mut self, id: usize) {
-        // If the download is still unprocessed, remove it from the queue
-        if let Some(download) = self.unprocessed_downloads.swap_remove(&id) {
-            self.unprocessed_downloads_url_index.remove(download.url());
+        if let Some(sender) = &self.command_sender {
+            let _ = sender.send(ManagerCommand::RemoveDownload(id));
         }
-
-        // If the download is in progress, send a message to cancel it
-        match self.download_command_sender.lock().await.get(&DownloadId(id)) {
-            Some(sender) => {
-                let _ = sender.send(DownloadCommand::Cancel);
-                self.db_state_manager.delete_download(id).await;
-            }
-            None => {
-                // Otherwise if the download is already completed, just remove it from the db
-                self.db_state_manager.delete_download(id).await;
-            },
-        };
     }
 
     pub async fn start_processing(&mut self) {
+        let (command_sender, mut command_receiver) = mpsc::unbounded_channel::<ManagerCommand>();
+
+        self.command_sender = Some(command_sender); 
+
         let ui_state_manager = UiStateManager::new();
         let ui_state_handle = ui_state_manager.start();
         self.ui_state_handle = Some(ui_state_handle);
-
-        let (sender, mut receiver) = mpsc::unbounded_channel();
         
-        while let Some((_, download)) = self.unprocessed_downloads.pop() {
-            self.unprocessed_downloads_url_index.remove(download.url());
-            println!("{:#?}", self.unprocessed_downloads_url_index);
-
-            if download.status == DownloadStatus::Completed {
-                println!("Found completed download: {:?}", download.url());
-                continue;
-            }
-
-            sender.send(download).unwrap();
-        }
-
-        self.task_sender = Some(sender);
-
-        let db_state_manager = self.db_state_manager.clone();
-        let client = self.client.clone();
-        let download_command_sender = self.download_command_sender.clone();
-
+        
+        // Clone shared resources
         let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
-        
+        let concurrency_limit = self.concurrency_limit.clone();
+        let db_manager = self.db_state_manager.clone();
+        let command_broadcast_map = self.download_command_sender.clone(); 
+        let client = self.client.clone();
+
+        let mut queue: IndexMap<usize, Download> = self.unprocessed_downloads.drain(..).collect();
+
         tokio::spawn(async move {
-            while let Some(download) = receiver.recv().await {
-                let ui_event_sender = ui_event_sender.clone();
-                let client = client.clone();
-                let db_state_manager = db_state_manager.clone();
+            loop {
+                tokio::select! {
+                    Some(command) = command_receiver.recv() => {
+                        match command {
+                            ManagerCommand::AddDownload(download) => {
+                                if !queue.values().any(|other_download| download.url() == other_download.url()) {
+                                    queue.insert(download.id(), download);
+                                }
+                            },
+                            ManagerCommand::RemoveDownload(id) => {
+                                 // Try to remove from Pending Queue
+                                if queue.shift_remove(&id).is_some() {
+                                    println!("Removed pending download {}", id);
+                                    db_manager.delete_download(id).await;
+                                } 
+                                // If not in queue, it might be running. Send Cancel signal.
+                                else if let Some(sender) = command_broadcast_map.lock().await.get(&DownloadId(id)) {
+                                    let _ = sender.send(DownloadCommand::Cancel);
+                                    // The running task handles the DB deletion upon cancellation
+                                }
+                                // 3. Else, it's already done or doesn't exist; just DB delete
+                                else {
+                                    db_manager.delete_download(id).await;
+                                }
+                            },
+                            ManagerCommand::Shutdown => {
+                                break;
+                            },
+                        }
+                    }
 
-                let (commands_sender, commands_receiver) = tokio::sync::broadcast::channel(20);
-                
-                let _ = download_command_sender.lock().await.insert(DownloadId(download.id()), commands_sender);
+                    Ok(permit) = concurrency_limit.clone().acquire_owned(), if !queue.is_empty() => {
+                        if let Some((_, download)) = queue.shift_remove_index(0) {
+                            let client = client.clone();
+                            let db = db_manager.clone();
+                            let command_map = command_broadcast_map.clone();
+                            let ui_event_sender = ui_event_sender.clone();
 
-                tokio::spawn(async move {
-                    process_download(
-                        db_state_manager,
-                        ui_event_sender,
-                        commands_receiver,
-                        client,
-                        download
-                    ).await;
-                });
+                            tokio::spawn(async move {
+                                let _permit = permit; 
+                                let download_id = DownloadId(download.id());
+
+                                let (commands_sender, commands_receiver) = tokio::sync::broadcast::channel(20);
+                                command_map.lock().await.insert(download_id, commands_sender);
+
+                                process_download(
+                                    db,
+                                    ui_event_sender,
+                                    commands_receiver,
+                                    client,
+                                    download
+                                ).await;
+
+                                command_map.lock().await.remove(&download_id);
+                            });
+                        }
+                    }
+                }
             }
         });
     }

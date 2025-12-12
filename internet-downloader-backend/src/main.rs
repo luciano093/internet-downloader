@@ -76,7 +76,7 @@ struct DownloadQuery {
 async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<DownloadQuery>) -> impl IntoResponse {
     println!("received: {:?}", params);
 
-    match manager.lock().await.add_download(&params.url).await {
+    match manager.lock().await.queue_download(&params.url).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(DownloadManagerError::Parse(err)) => {
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
