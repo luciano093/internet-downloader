@@ -1,8 +1,9 @@
 use indexmap::IndexMap;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use thiserror::Error;
+use tokio::sync::mpsc;
 
-use crate::download::Download;
+use crate::download::{Download, DownloadCommand};
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
@@ -34,7 +35,8 @@ impl StateManager {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS download_states (
-                url TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY,
+                url TEXT NOT NULL,
                 state_blob BLOB NOT NULL,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -48,52 +50,40 @@ impl StateManager {
     }
 
     pub async fn write_download(&self, download: &Download) {
-        let url = download.url().to_string();
+        let state_blob = bincode::encode_to_vec(download, bincode::config::standard()).unwrap();
 
-        let mut state_blob = Vec::with_capacity(512);
-
-        loop {
-            state_blob.resize(state_blob.capacity(), 0);
-
-            match bincode::encode_into_slice(&download, &mut state_blob, bincode::config::standard()) {
-                Ok(encoded_len) => {
-                    let state_blob = &state_blob[..encoded_len];
-
-                    sqlx::query("REPLACE INTO download_states (url, state_blob) VALUES (?, ?)")
-                        .bind(&url)
-                        .bind(state_blob)
-                        .execute(&self.pool)
-                        .await
-                        .unwrap();
-
-                    // println!("saved!");
-                    break;
-                }
-                Err(bincode::error::EncodeError::UnexpectedEnd) => {
-                    // println!("extending {}", state_blob.capacity());
-                    state_blob.reserve(state_blob.capacity());
-                },
-                Err(err) => {
-                    panic!("{}", err);
-                }
-            }
-        }
+        sqlx::query("INSERT OR REPLACE INTO download_states (id, url, state_blob) VALUES (?, ?, ?)")
+            .bind(download.id() as i64) // SQLite uses i64
+            .bind(download.url())
+            .bind(state_blob)
+            .execute(&self.pool)
+            .await
+            .unwrap();
     }
 
-    pub async fn load_downloads(&self) -> Result<IndexMap<String, Download>, ()> {
-        let rows: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT state_blob FROM download_states"
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap();
+    pub async fn delete_download(&self, id: usize) {  
+        sqlx::query("DELETE FROM download_states WHERE id = ?")
+            .bind(id as i64)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+    }
 
-        let mut downloads: IndexMap<String, Download> = IndexMap::new();
+    pub async fn load_downloads(&self) -> Result<IndexMap<usize, Download>, ()> {
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT state_blob FROM download_states ORDER BY id ASC" )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap();
+
+        let mut downloads: IndexMap<usize, Download> = IndexMap::new();
 
         for blob in rows {
-            let (download, _): (Download, _) = bincode::decode_from_slice(&blob, bincode::config::standard()).unwrap();
+            let (download, _): (Download, _) = bincode::decode_from_slice(
+                &blob, 
+                bincode::config::standard()
+            ).unwrap();
 
-            downloads.insert(download.url().to_string(), download);
+            downloads.insert(download.id(), download);
         }
 
         Ok(downloads)

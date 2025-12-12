@@ -382,7 +382,7 @@ impl From<&FolderDownload> for FolderDiff {
 }
 
 #[derive(Debug, Clone)]
-pub struct DownloadSnapshot(pub IndexMap<String, Download>);
+pub struct DownloadSnapshot(pub IndexMap<usize, Download>);
 
 impl Serialize for DownloadSnapshot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -12,7 +14,7 @@ use thiserror::Error;
 use tokio::fs::{create_dir_all, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
@@ -110,6 +112,31 @@ impl InternalFileUpdate {
 //         progress_changed || time_elapsed || completed
 // }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
+pub struct DownloadId(usize);
+
+impl Deref for DownloadId {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
+pub enum DownloadReturnStatus {
+    Completed,
+    Canceled,
+    Paused,
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
+pub enum DownloadCommand {
+    Pause,
+    Resume,
+    Cancel,
+}
+
 #[derive(Debug, Error)]
 pub enum DownloadManagerError {
     #[error(transparent)]
@@ -120,8 +147,10 @@ pub enum DownloadManagerError {
 pub struct DownloadManager {
     next_id: AtomicUsize,
     db_state_manager: StateManager,
-    download_queue: IndexMap<String, Download>,
+    unprocessed_downloads: IndexMap<usize, Download>,
+    unprocessed_downloads_url_index: HashMap<String, usize>,
     task_sender: Option<mpsc::UnboundedSender<Download>>,
+    download_command_sender: Arc<Mutex<HashMap<DownloadId, tokio::sync::broadcast::Sender<DownloadCommand>>>>, 
     client: reqwest::Client,
     ui_state_handle: Option<UiStateHandle>,
 }
@@ -135,30 +164,35 @@ impl DownloadManager {
         DownloadManager {
             next_id: AtomicUsize::new(0), 
             db_state_manager,
-            download_queue: IndexMap::new(),
+            unprocessed_downloads: IndexMap::new(),
+            unprocessed_downloads_url_index: HashMap::new(),
             task_sender: None,
+            download_command_sender: Arc::new(Mutex::new(HashMap::new())),
             client,
             ui_state_handle: None,
         }
     }
 
     pub async fn load_state(&mut self) {
-        let mut restored_downloads = self.db_state_manager.load_downloads().await.unwrap();
+        let restored_downloads = self.db_state_manager.load_downloads().await.unwrap();
 
-        let max_id = restored_downloads.iter()
-            .map(|download| download.1.id())
-            .max()
-            .unwrap_or(0);
+        let max_id = restored_downloads.keys().max().copied().unwrap_or(0);
 
         self.next_id.store(max_id + 1, Ordering::Relaxed);
 
         println!("restored: {:#?}", restored_downloads);
 
-        self.download_queue.append(&mut restored_downloads);
+        for (id, download) in restored_downloads {
+            // Add to main store
+            self.unprocessed_downloads.insert(id, download.clone());
+            
+            // Add to lookup index 
+            self.unprocessed_downloads_url_index.insert(download.url().to_string(), id);
+        }
     }
 
     pub async fn verify_downloads(&mut self) {
-        for (_, download) in &mut self.download_queue {
+        for (_, download) in &mut self.unprocessed_downloads {
             let mut fail = false;
 
             for (_, download_type) in &mut download.files {
@@ -183,33 +217,48 @@ impl DownloadManager {
             }
         }
 
-        println!("restored: {:#?}", self.download_queue);
+        println!("restored: {:#?}", self.unprocessed_downloads);
     }
 
     pub async fn add_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
-        // self.update_sender.send(InternalFileUpdate { url: "test".to_owned() }).unwrap();
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        if self.unprocessed_downloads_url_index.contains_key(url) {
+            println!("download already in index");
+            return Ok(())
+        }
 
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let host = parse_host(url)?;
 
         let download_task = host.extract_download_info(url).await;
 
         let download = Download::new(id, download_task);
+
         self.ui_state_handle.as_ref().unwrap().add_download(download.clone());
 
         if let Some(sender) = &self.task_sender {
             sender.send(download).unwrap();
-        } else {
-            if !self.download_queue.contains_key(download.url()) {
-                self.download_queue.insert(download.url().to_string(), download);
-            }
         }
 
         Ok(())
     }
 
     pub async fn remove_download(&mut self, id: usize) {
-        
+        // If the download is still unprocessed, remove it from the queue
+        if let Some(download) = self.unprocessed_downloads.swap_remove(&id) {
+            self.unprocessed_downloads_url_index.remove(download.url());
+        }
+
+        // If the download is in progress, send a message to cancel it
+        match self.download_command_sender.lock().await.get(&DownloadId(id)) {
+            Some(sender) => {
+                let _ = sender.send(DownloadCommand::Cancel);
+                self.db_state_manager.delete_download(id).await;
+            }
+            None => {
+                // Otherwise if the download is already completed, just remove it from the db
+                self.db_state_manager.delete_download(id).await;
+            },
+        };
     }
 
     pub async fn start_processing(&mut self) {
@@ -219,7 +268,10 @@ impl DownloadManager {
 
         let (sender, mut receiver) = mpsc::unbounded_channel();
         
-        while let Some((_, download)) = self.download_queue.pop() {
+        while let Some((_, download)) = self.unprocessed_downloads.pop() {
+            self.unprocessed_downloads_url_index.remove(download.url());
+            println!("{:#?}", self.unprocessed_downloads_url_index);
+
             if download.status == DownloadStatus::Completed {
                 println!("Found completed download: {:?}", download.url());
                 continue;
@@ -232,15 +284,29 @@ impl DownloadManager {
 
         let db_state_manager = self.db_state_manager.clone();
         let client = self.client.clone();
-
-        
+        let download_command_sender = self.download_command_sender.clone();
 
         let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
         
         tokio::spawn(async move {
             while let Some(download) = receiver.recv().await {
                 let ui_event_sender = ui_event_sender.clone();
-                process_download(db_state_manager.clone(), ui_event_sender, client.clone(), download).await;
+                let client = client.clone();
+                let db_state_manager = db_state_manager.clone();
+
+                let (commands_sender, commands_receiver) = tokio::sync::broadcast::channel(20);
+                
+                let _ = download_command_sender.lock().await.insert(DownloadId(download.id()), commands_sender);
+
+                tokio::spawn(async move {
+                    process_download(
+                        db_state_manager,
+                        ui_event_sender,
+                        commands_receiver,
+                        client,
+                        download
+                    ).await;
+                });
             }
         });
     }
@@ -254,14 +320,15 @@ impl DownloadManager {
     }
 }
 
-async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::UnboundedSender<UiStateEvent>, client: reqwest::Client, mut download: Download) {
+async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::UnboundedSender<UiStateEvent>, commands_receiver: tokio::sync::broadcast::Receiver<DownloadCommand>
+, client: reqwest::Client, mut download: Download) {
     download.status = DownloadStatus::InProgress;
 
-    let mut download_queue = VecDeque::new();
+    let mut unprocessed_downloads = VecDeque::new();
 
     for (&id, download_type) in &download.files {
         if let DownloadType::File(file_download) = download_type {
-            download_queue.push_back((id, file_download.url.to_owned(), file_download.relative_path().to_owned()));
+            unprocessed_downloads.push_back((id, file_download.url.to_owned(), file_download.relative_path().to_owned()));
         }
     }
 
@@ -298,10 +365,18 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
         (download, state_manager)
     });
 
-    for (id, url, path) in download_queue {
+    for (id, url, path) in unprocessed_downloads {
+        let commands_receiver = commands_receiver.resubscribe();
+
         sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::InProgress }).unwrap();
 
-        download_file(id, &url, &path, host, &client, &sender).await;
+        let return_status = download_file(id, &url, &path, host, &client, &sender, commands_receiver).await;
+
+        if return_status == DownloadReturnStatus::Canceled {
+            drop(sender);
+            handle.await.unwrap();
+            return;
+        }
 
         sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
     }
@@ -363,7 +438,7 @@ async fn handle_download_update(download: &mut Download, update: InternalFileUpd
     };
 }
 
-async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &reqwest::Client, sender: &UnboundedSender<InternalFileUpdate>) {
+async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &reqwest::Client, sender: &UnboundedSender<InternalFileUpdate>, mut commands_receiver: tokio::sync::broadcast::Receiver<DownloadCommand>) -> DownloadReturnStatus {
     let mut response = client.get(url)
         .headers(host.headers())
         .send()
@@ -386,18 +461,35 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
     let chunk_size = 16384; // 16 KB
     let mut buffer = Vec::with_capacity(chunk_size * 2); // * 2 to prevent too many reallocations
     let mut current_chunk = 0;
+    
+    loop {
+        tokio::select! {
+            chunk_result = response.chunk() => {
+                if let Ok(Some(chunk)) = chunk_result {
+                    buffer.extend_from_slice(&chunk);
 
-    while let Some(chunk) = response.chunk().await.unwrap() {
-        buffer.extend_from_slice(&chunk);
+                    while buffer.len() >= chunk_size {
+                        file.write_all(&buffer[..chunk_size]).await.unwrap();
 
-        while buffer.len() >= chunk_size {
-            file.write_all(&buffer[..chunk_size]).await.unwrap();
+                        sender.send(InternalFileUpdate::ChunkCompleted { id, chunk_index: current_chunk, len: chunk_size as u64 }).unwrap();
+                        current_chunk += 1;
 
-            sender.send(InternalFileUpdate::ChunkCompleted { id, chunk_index: current_chunk, len: chunk_size as u64 }).unwrap();
-            current_chunk += 1;
-
-            buffer.copy_within(chunk_size.., 0);
-            buffer.truncate(buffer.len() - chunk_size);
+                        buffer.copy_within(chunk_size.., 0);
+                        buffer.truncate(buffer.len() - chunk_size);
+                    }
+                } else {
+                    break;
+                }
+            }
+            command = commands_receiver.recv() => {
+                match command {
+                    Ok(DownloadCommand::Cancel) => return DownloadReturnStatus::Canceled,
+                    Ok(DownloadCommand::Pause) => {
+                        println!("download {} should be paused!", id);
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -410,6 +502,8 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
     }
 
     file.sync_all().await.unwrap();
+
+    DownloadReturnStatus::Completed
 }
 
 async fn hash_file(path: &Path) -> u128 {
