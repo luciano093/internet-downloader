@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -139,7 +139,8 @@ pub enum DownloadCommand {
 }
 
 enum ManagerCommand {
-    AddDownload(Download),
+    QueueDownloadByUrl(String),
+    QueueDownload(Download),
     RemoveDownload(usize),
     Shutdown,
 }
@@ -152,7 +153,7 @@ pub enum DownloadManagerError {
 
 #[derive(Debug)]
 pub struct DownloadManager {
-    next_id: AtomicUsize,
+    next_id: Option<AtomicUsize>,
     db_state_manager: StateManager,
     unprocessed_downloads: IndexMap<usize, Download>,
     download_command_sender: Arc<Mutex<HashMap<DownloadId, tokio::sync::broadcast::Sender<DownloadCommand>>>>, 
@@ -169,7 +170,7 @@ impl DownloadManager {
             .build().unwrap();
 
         DownloadManager {
-            next_id: AtomicUsize::new(0), 
+            next_id: Some(AtomicUsize::new(0)), 
             db_state_manager,
             unprocessed_downloads: IndexMap::new(),
             download_command_sender: Arc::new(Mutex::new(HashMap::new())),
@@ -185,7 +186,7 @@ impl DownloadManager {
 
         let max_id = restored_downloads.keys().max().copied().unwrap_or(0);
 
-        self.next_id.store(max_id + 1, Ordering::Relaxed);
+        self.next_id.as_mut().unwrap().store(max_id + 1, Ordering::Relaxed);
 
         println!("restored: {:#?}", restored_downloads);
 
@@ -223,18 +224,9 @@ impl DownloadManager {
         println!("restored: {:#?}", self.unprocessed_downloads);
     }
 
-    pub async fn queue_download(&mut self, url: &str) -> Result<(), DownloadManagerError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let host = parse_host(url)?;
-
-        let download_task = host.extract_download_info(url).await;
-
-        let download = Download::new(id, download_task);
-
-        self.ui_state_handle.as_ref().unwrap().add_download(download.clone());
-
+    pub async fn queue_download(&mut self, url: String) -> Result<(), DownloadManagerError> {
         if let Some(sender) = &self.command_sender {
-            sender.send(ManagerCommand::AddDownload(download)).unwrap();
+            sender.send(ManagerCommand::QueueDownloadByUrl(url)).unwrap();
         }
 
         Ok(())
@@ -249,12 +241,11 @@ impl DownloadManager {
     pub async fn start_processing(&mut self) {
         let (command_sender, mut command_receiver) = mpsc::unbounded_channel::<ManagerCommand>();
 
-        self.command_sender = Some(command_sender); 
+        self.command_sender = Some(command_sender.clone()); 
 
         let ui_state_manager = UiStateManager::new();
         let ui_state_handle = ui_state_manager.start();
         self.ui_state_handle = Some(ui_state_handle);
-        
         
         // Clone shared resources
         let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
@@ -265,17 +256,63 @@ impl DownloadManager {
 
         let mut queue: IndexMap<usize, Download> = self.unprocessed_downloads.drain(..).collect();
 
+        // Download registry for deduplication purposes
+        let mut url_registry: HashMap<String, usize> = HashMap::new();
+        let mut id_registry: HashMap<usize, String> = HashMap::new();
+
+        let existing_downloads = db_manager.get_all_download_urls().await; 
+
+        // Add existing downloads to registry
+        for (id, url) in existing_downloads {
+            url_registry.insert(url.clone(), id);
+            id_registry.insert(id, url);
+        }
+
+        // Add queued downloads to registry
+        for (id, download) in &queue {
+            url_registry.insert(download.url().to_string(), *id);
+            id_registry.insert(*id, download.url().to_string());
+        }
+
+        let next_id = self.next_id.take().unwrap();
+
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     Some(command) = command_receiver.recv() => {
                         match command {
-                            ManagerCommand::AddDownload(download) => {
-                                if !queue.values().any(|other_download| download.url() == other_download.url()) {
-                                    queue.insert(download.id(), download);
+                            ManagerCommand::QueueDownloadByUrl(url) => {
+                                println!("registry: {:#?}", url_registry);
+                                println!("url: {}", url);
+                                if url_registry.contains_key(&url) {
+                                    println!("Download already exists: {}", url);
+                                    continue; 
                                 }
+
+                                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                                url_registry.insert(url.clone(), id);
+                                id_registry.insert(id, url.clone()); 
+
+                                let command_sender = command_sender.clone();
+
+                                tokio::spawn(async move {
+                                    let host = parse_host(&url).unwrap();
+                                    let download_task = host.extract_download_info(&url).await;
+                                    let download = Download::new(id, download_task);
+
+                                    let _ = command_sender.send(ManagerCommand::QueueDownload(download));
+                                });
                             },
+                            ManagerCommand::QueueDownload(download) => {
+                                ui_event_sender.send(UiStateEvent::AddDownload(download.clone())).unwrap();
+                                queue.insert(download.id(), download);
+                            } 
                             ManagerCommand::RemoveDownload(id) => {
+                                // First, remove from registry
+                                if let Some(url) = id_registry.remove(&id) {
+                                    url_registry.remove(&url);
+                                }
+
                                  // Try to remove from Pending Queue
                                 if queue.shift_remove(&id).is_some() {
                                     println!("Removed pending download {}", id);
@@ -292,7 +329,6 @@ impl DownloadManager {
                                     println!("Removed completed download {}", id);
                                     db_manager.delete_download(id).await;
                                 }
-
                                 let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(id));
                             },
                             ManagerCommand::Shutdown => {
@@ -303,6 +339,10 @@ impl DownloadManager {
 
                     Ok(permit) = concurrency_limit.clone().acquire_owned(), if !queue.is_empty() => {
                         if let Some((_, download)) = queue.shift_remove_index(0) {
+                            if download.is_completed() {
+                                continue;
+                            }
+
                             let client = client.clone();
                             let db = db_manager.clone();
                             let command_map = command_broadcast_map.clone();
@@ -745,6 +785,10 @@ impl Download {
 
     pub const fn name(&self) -> &String {
         &self.name
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.status == DownloadStatus::Completed
     }
 }
 

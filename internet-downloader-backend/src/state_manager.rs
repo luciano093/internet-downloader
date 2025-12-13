@@ -87,4 +87,14 @@ impl StateManager {
 
         Ok(downloads)
     }
+
+    pub async fn get_all_download_urls(&self) -> Vec<(usize, String)> {
+        sqlx::query_as::<_, (i64, String)>("SELECT id, url FROM download_states")
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(id, url)| (id as usize, url))
+            .collect()
+    }
 }
