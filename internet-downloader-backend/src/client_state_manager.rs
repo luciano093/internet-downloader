@@ -18,14 +18,52 @@ use crate::state_manager::StateManager;
 
 pub enum UiStateEvent {
     AddDownload(Download),
-    AddFile(Download),
+    RemoveDownload(usize), 
     AddUpdate(DownloadUpdate),
+}
+
+#[derive(Debug, Clone)]
+pub enum FrontendMessage {
+    // Sent immediately
+    DownloadAdded(Download),
+    DownloadRemoved { id: usize },
+
+    // Sent on flush interval
+    BatchUpdate(DownloadDeltaMap),
+}
+
+impl Serialize for FrontendMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        match self {
+            FrontendMessage::DownloadAdded(download) => {
+                serde_json::json!({
+                    "id": download.id(),
+                    "action": "added",
+                    "download": download,
+                }).serialize(serializer)
+            },
+            FrontendMessage::DownloadRemoved { id } => {
+                serde_json::json!({
+                    "id": id,
+                    "action": "deleted",
+                }).serialize(serializer)
+            },
+            FrontendMessage::BatchUpdate(download_delta_map) => {
+                serde_json::json!({
+                    "action": "changes",
+                    "changes": download_delta_map,
+                }).serialize(serializer)
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct UiStateHandle {
     event_sender: mpsc::UnboundedSender<UiStateEvent>,
-    delta_sender: broadcast::Sender<DownloadDeltaMap>,
+    delta_sender: broadcast::Sender<FrontendMessage>,
     shutdown_sender: oneshot::Sender<()>, 
 }
 
@@ -38,7 +76,7 @@ impl UiStateHandle {
         self.event_sender.clone()
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<DownloadDeltaMap> {
+    pub fn subscribe(&self) -> broadcast::Receiver<FrontendMessage> {
         self.delta_sender.subscribe()
     }
 
@@ -49,7 +87,7 @@ impl UiStateHandle {
 
 #[derive(Debug)]
 pub struct UiStateManager {
-    delta_sender: broadcast::Sender<DownloadDeltaMap>,
+    delta_sender: broadcast::Sender<FrontendMessage>,
     event_receiver: mpsc::UnboundedReceiver<UiStateEvent>,
     event_sender: mpsc::UnboundedSender<UiStateEvent>,
 }
@@ -81,17 +119,23 @@ impl UiStateManager {
                     Some(event) = event_receiver.recv() => {
                         match event {
                             UiStateEvent::AddDownload(download) => {
-                                delta_manager.add_download(&download);
+                                println!("sending add event");
+                                let _ = delta_sender.send(FrontendMessage::DownloadAdded(download));
                             },
-                            UiStateEvent::AddFile(download) => todo!(),
+                            UiStateEvent::RemoveDownload(id) => {
+                                println!("sending remove event");
+                                delta_manager.deltas.remove(&id);
+
+                                let _ = delta_sender.send(FrontendMessage::DownloadRemoved { id });
+                            },
                             UiStateEvent::AddUpdate(download_update) => {
                                 delta_manager.add_update(download_update);
                             },
                         }
                     }
                     _ = delta_timer.tick() => {
-                        if delta_manager.deltas().len() > 0 {
-                            _ = delta_sender.send(delta_manager.drain_deltas());
+                        if !delta_manager.deltas().is_empty() {
+                            _ = delta_sender.send(FrontendMessage::BatchUpdate(delta_manager.drain_deltas()));
                         }
                     }
                     _ = &mut shutdown_receiver => {
@@ -122,32 +166,22 @@ impl Serialize for DownloadDeltaMap {
     where
         S: serde::Serializer {
         let vec = self.0.iter().map(|(id, delta)| {
-            let (action, json) = match delta {
+            let json = match delta {
                 DownloadDelta::DownloadAdded(download_diff) => {
-                    ("added", serde_json::to_value(download_diff).unwrap())
+                    todo!("remove")
                 },
                 DownloadDelta::DownloadModified(download_diff) => {
-                    ("modified", serde_json::to_value(download_diff).unwrap())
+                    let mut json = serde_json::to_value(download_diff).unwrap();
+                    json["id"] = serde_json::to_value(id).unwrap();
+
+                    json
                 },
             };
 
-            let mut delta_json = serde_json::json!({
-                "id": id,
-                "action": action,
-            });
-
-            if action == "added" {
-                delta_json["download"] = json;
-            } else {
-                delta_json["changes"] = json;
-            }
-
-            delta_json
+            json
         }).collect::<Vec<_>>();
 
-        serde_json::json!({
-            "deltas": vec,
-        }).serialize(serializer)
+        vec.serialize(serializer)
     }
 }
 

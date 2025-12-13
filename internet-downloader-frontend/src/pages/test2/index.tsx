@@ -46,10 +46,10 @@ export default function Page() {
     });
 
     newEventSource.addEventListener("delta", (event) => {
-      const data = JSON.parse(event.data);
-      console.log("delta: ", data)
+      const delta = JSON.parse(event.data) as DeltaEvent;
+      console.log("delta: ", delta)
 
-      data.deltas.forEach((delta: DeltaEvent) => applyDelta(delta));
+      applyDelta(delta);
     });
 
     newEventSource.onerror = (event) => {

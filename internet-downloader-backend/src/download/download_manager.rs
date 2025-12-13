@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::client_state_manager::{get_snapshot, DownloadDeltaMap, DownloadSnapshot, UiStateEvent, UiStateHandle, UiStateManager};
+use crate::client_state_manager::{DownloadDeltaMap, DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::download::hosts::Host;
 use crate::state_manager::StateManager;
 
@@ -292,6 +292,8 @@ impl DownloadManager {
                                     println!("Removed completed download {}", id);
                                     db_manager.delete_download(id).await;
                                 }
+
+                                let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(id));
                             },
                             ManagerCommand::Shutdown => {
                                 break;
@@ -336,7 +338,7 @@ impl DownloadManager {
         });
     }
 
-    pub fn download_subscribe(&self) -> broadcast::Receiver<DownloadDeltaMap> {
+    pub fn download_subscribe(&self) -> broadcast::Receiver<FrontendMessage> {
         self.ui_state_handle.as_ref().unwrap().subscribe()
     }
 

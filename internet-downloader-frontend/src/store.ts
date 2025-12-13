@@ -34,27 +34,40 @@ export const useDownloadStore = create<DownloadState>()(
                 return;
             }
 
-            if (delta.action === "modified") {
-                const item = state.downloads[delta.id];
-                if (!item) return;
+            if (delta.action === "deleted") {
+                delete state.downloads[delta.id];
+                const index = state.downloadIds.indexOf(delta.id);
+                state.downloadIds.splice(index, 1);
+                return;
+            }
 
-                const diff = delta.changes as DownloadItemDiff;
-                
-                if (diff.url !== undefined) item.url = diff.url;
-                if (diff.status !== undefined) item.status = diff.status;
-                if (diff.host !== undefined) item.host = diff.host;
+            if (delta.action === "changes") {
+                Object.entries(delta.changes).forEach(([idString, change]) => {
+                    const id = Number(idString);
+                    const download = state.downloads[change.id || id];
 
-                if (diff.files) {
-                    Object.entries(diff.files).forEach(([fileId, nodeUpdate]) => {
-                        if (item.files[fileId]) {
-                            Object.assign(item.files[fileId], nodeUpdate);
-                        } 
-                        // If it's new (and the update contains the full object), add it
-                        else if (nodeUpdate.type) {
-                            item.files[fileId] = nodeUpdate as DownloadNode;
-                        }
-                    });
-                }
+                    if (!download) return;
+
+                    if (change.url) download.url = change.url;
+                    if (change.status) download.status = change.status;
+                    if (change.host) download.host = change.host;
+
+                    if (change.files) {
+                        Object.entries(change.files).forEach(([fileIdString, fileChanges]) => {
+                            const fileId = Number(fileIdString);
+                            const file = download.files[fileId];
+
+                            if (file) {
+                                Object.assign(file, fileChanges);
+                            } 
+
+                            // If it's new (and the update contains the full object), add it
+                            else if (fileChanges.type) {
+                                download.files[fileId] = fileChanges as DownloadNode;
+                            }
+                        })
+                    }
+                });
             }
         }),
     }))

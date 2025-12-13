@@ -24,6 +24,7 @@ export interface DownloadItem {
   host: string;
   name: string,
   files: Record<number, DownloadNode>;
+  id: number,
 }
 
 export type FileItemDiff = {
@@ -51,6 +52,7 @@ export interface DownloadItemDiff {
   host?: string,
   relative_path?: string,
   files?: Record<number, DownloadNodeDiff>;
+  id: number,
 }
 
 export type DeltaEvent = {
@@ -58,7 +60,9 @@ export type DeltaEvent = {
   action: "added"
   download: DownloadItem
 } | {
-  id: number  
-  action: "modified"
-  changes: DownloadItemDiff
+  id: number
+  action: "deleted"
+} | {
+  action: "changes"
+  changes: Record<number, DownloadItemDiff>
 }
