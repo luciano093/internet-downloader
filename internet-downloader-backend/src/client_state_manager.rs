@@ -159,24 +159,15 @@ pub async fn get_snapshot(db_state_manager: &StateManager) -> DownloadSnapshot {
 }
 
 #[derive(Debug, Clone)]
-pub struct DownloadDeltaMap(pub HashMap<usize, DownloadDelta>);
+pub struct DownloadDeltaMap(pub HashMap<usize, DownloadDiff>);
 
 impl Serialize for DownloadDeltaMap {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer {
         let vec = self.0.iter().map(|(id, delta)| {
-            let json = match delta {
-                DownloadDelta::DownloadAdded(download_diff) => {
-                    todo!("remove")
-                },
-                DownloadDelta::DownloadModified(download_diff) => {
-                    let mut json = serde_json::to_value(download_diff).unwrap();
-                    json["id"] = serde_json::to_value(id).unwrap();
-
-                    json
-                },
-            };
+            let mut json = serde_json::to_value(delta).unwrap();
+            json["id"] = serde_json::to_value(id).unwrap();
 
             json
         }).collect::<Vec<_>>();
@@ -187,7 +178,7 @@ impl Serialize for DownloadDeltaMap {
 
 #[derive(Debug)]
 pub struct DeltaManager {
-    deltas: HashMap<usize, DownloadDelta>, // download id to download delta
+    deltas: HashMap<usize, DownloadDiff>, // download id to download delta
 }
 
 impl DeltaManager {
@@ -195,95 +186,39 @@ impl DeltaManager {
         Self { deltas: HashMap::new() }
     }
 
-    pub const fn deltas(&self) -> &HashMap<usize, DownloadDelta> {
+    pub const fn deltas(&self) -> &HashMap<usize, DownloadDiff> {
         &self.deltas
     }
 
     fn drain_deltas(&mut self) -> DownloadDeltaMap {
         DownloadDeltaMap(std::mem::take(&mut self.deltas))
     }
-    
-    pub fn add_download(&mut self, download: &Download) {
-        self.deltas.insert(download.id(), DownloadDelta::DownloadAdded(DownloadDiff::from(download)));
-    }
 
     pub fn add_update(&mut self, download_update: DownloadUpdate) {
         match download_update {
             DownloadUpdate::StatusChanged { id, status } => {
-                match self.deltas.get_mut(&id).unwrap() {
-                    DownloadDelta::DownloadAdded(_) => {
-                        todo!()
-                    },
-                    DownloadDelta::DownloadModified(download_diff) => {
-                        download_diff.status = Some(status);
-                    },
+                let download_diff = self.deltas.get_mut(&id).unwrap();
+            
+                download_diff.status = Some(status);
+            },
+            DownloadUpdate::FileUpdated { id, file_update } => {
+                let download_diff = self.deltas.entry(id).or_insert(DownloadDiff::default());
+
+                let file_id = file_update.id();
+                if let None = download_diff.files.get(&file_id) {
+                    let mut file_diff = FileDiff::new();
+
+                    file_diff.update(file_update);
+
+                    download_diff.files.insert(file_id, ItemDiff::File(file_diff));
+                } else {
+                    let file_diff = download_diff.files.get_mut(&file_id).unwrap();
+
+                    if let ItemDiff::File(file_diff) = file_diff {
+                        file_diff.update(file_update);
+                    }
                 }
-            },
-            DownloadUpdate::FileUpdated { id, file_update } => match self.deltas.entry(id).or_insert(DownloadDelta::DownloadModified(DownloadDiff::default())) {
-                    DownloadDelta::DownloadAdded(download_diff) => {
-                        if let None = download_diff.files.get(&file_update.id()) {
-                            todo!()
-                        } else {
-                            let file_diff = download_diff.files.get_mut(&file_update.id()).unwrap();
-
-                            match file_diff {
-                                ItemDelta::ItemAdded(item_diff) => {
-                                    if let ItemDiff::File(file_diff) = item_diff {
-                                        file_diff.update(file_update);
-                                    }
-                                },
-                                ItemDelta::ItemModified(item_diff) => {
-                                    if let ItemDiff::File(file_diff) = item_diff {
-                                        file_diff.update(file_update);
-                                    }
-                                },
-                            }
-                        }
-                    },
-                    DownloadDelta::DownloadModified(download_diff) => {
-                        let file_id = file_update.id();
-                        if let None = download_diff.files.get(&file_id) {
-                            let mut file_diff = FileDiff::new();
-
-                            file_diff.update(file_update);
-
-                            download_diff.files.insert(file_id, ItemDelta::ItemModified(ItemDiff::File(file_diff)));
-                        } else {
-                            let file_diff = download_diff.files.get_mut(&file_id).unwrap();
-
-                            match file_diff {
-                                ItemDelta::ItemAdded(download_type) => {
-                                    todo!()
-                                },
-                                ItemDelta::ItemModified(item_diff) => {
-                                    if let ItemDiff::File(file_diff) = item_diff {
-                                        file_diff.update(file_update);
-                                    }
-                                },
-                            }
-                            
-                        }
-                    },
-                },
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum DownloadDelta {
-    DownloadAdded(DownloadDiff),
-    DownloadModified(DownloadDiff),
-}
-
-impl Serialize for DownloadDelta {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer {
-        match self {
-            DownloadDelta::DownloadAdded(download_diff) => {
-                serde_json::to_value(download_diff).unwrap().serialize(serializer)
-            },
-            DownloadDelta::DownloadModified(download_diff) => todo!(),
+            }
         }
     }
 }
@@ -295,13 +230,13 @@ pub struct DownloadDiff {
     relative_path: Option<PathBuf>,
     host: Option<Host>,
     status: Option<DownloadStatus>,
-    files: HashMap<usize, ItemDelta>,
+    files: HashMap<usize, ItemDiff>,
 }
 
 impl From<&Download> for DownloadDiff {
     fn from(download: &Download) -> Self {
         let file_diffs = download.files().into_iter().map(|(&id, download_type)| {
-            (id, ItemDelta::ItemAdded(ItemDiff::from(download_type)))
+            (id, ItemDiff::from(download_type))
         }).collect();
 
         DownloadDiff { url: Some(download.url().clone()),
@@ -311,13 +246,6 @@ impl From<&Download> for DownloadDiff {
             files: file_diffs,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ItemDelta {
-    ItemAdded(ItemDiff),
-    ItemModified(ItemDiff),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

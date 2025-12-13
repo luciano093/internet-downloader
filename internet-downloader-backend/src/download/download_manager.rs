@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::client_state_manager::{DownloadDeltaMap, DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
+use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::download::hosts::Host;
 use crate::state_manager::StateManager;
 
