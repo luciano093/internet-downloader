@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -114,21 +115,34 @@ impl UiStateManager {
             let mut delta_timer = tokio::time::interval(Duration::from_millis(100));
             let mut event_receiver = self.event_receiver;
 
+            let mut removed_ids: HashSet<usize> = HashSet::new();
+
             loop {
                 tokio::select! {
                     Some(event) = event_receiver.recv() => {
                         match event {
                             UiStateEvent::AddDownload(download) => {
                                 println!("sending add event");
+                                removed_ids.remove(&download.id());
                                 let _ = delta_sender.send(FrontendMessage::DownloadAdded(download));
                             },
                             UiStateEvent::RemoveDownload(id) => {
                                 println!("sending remove event");
+                                removed_ids.insert(id);
                                 delta_manager.deltas.remove(&id);
 
                                 let _ = delta_sender.send(FrontendMessage::DownloadRemoved { id });
                             },
                             UiStateEvent::AddUpdate(download_update) => {
+                                let update_id = match &download_update {
+                                    DownloadUpdate::StatusChanged { id, .. } => *id,
+                                    DownloadUpdate::FileUpdated { id, .. } => *id,
+                                };
+
+                                if removed_ids.contains(&update_id) {
+                                    continue;
+                                }
+
                                 let force_flush = matches!(download_update, DownloadUpdate::StatusChanged { .. });
 
                                 delta_manager.add_update(download_update);

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -16,6 +16,7 @@ use tokio::fs::{create_dir_all, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
+use tokio::task::JoinSet;
 use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
@@ -321,11 +322,9 @@ impl DownloadManager {
                                 // If not in queue, it might be running. Send Cancel signal.
                                 else if let Some(sender) = command_broadcast_map.lock().await.get(&DownloadId(id)) {
                                     let _ = sender.send(DownloadCommand::Cancel);
-                                    // The running task handles the DB deletion upon cancellation
                                 }
-                                // 3. Else, it's already done or doesn't exist; just DB delete
+                                // Else if it's already done or doesn't exist; just DB delete
                                 else {
-
                                     println!("Removed completed download {}", id);
                                     db_manager.delete_download(id).await;
                                 }
@@ -442,25 +441,52 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
         }
     }
 
+    let mut file_download_handles = JoinSet::new();
+    let file_concurrency_limit = Arc::new(Semaphore::new(5)); 
+
+
     for (id, url, path) in unprocessed_downloads {
+        let client = client.clone();
         let commands_receiver = commands_receiver.resubscribe();
+        let sender = sender.clone(); 
+        let permit = file_concurrency_limit.clone().acquire_owned().await.unwrap();
 
-        sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::InProgress }).unwrap();
+        file_download_handles.spawn(async move {
+            let _permit = permit; 
 
-        let return_status = download_file(id, &url, &path, host, &client, &sender, commands_receiver).await;
+            sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::InProgress }).unwrap();
 
-        if return_status == DownloadReturnStatus::Canceled {
-            drop(sender);
-            handle.await.unwrap();
-            return DownloadReturnStatus::Canceled;
-        }
+            let return_status = download_file(id, &url, &path, host, &client, &sender, commands_receiver).await;
 
-        sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
+            if return_status == DownloadReturnStatus::Canceled {
+                return DownloadReturnStatus::Canceled;
+            }
+
+            sender.send(InternalFileUpdate::Status { id, status: DownloadStatus::Completed }).unwrap();
+
+            return_status
+        });
     }
 
     drop(sender);
 
     let (mut download, state_manager) = handle.await.unwrap();
+
+    while let Some(result) = file_download_handles.join_next().await {
+        match result {
+            Ok(status) => {
+                if status == DownloadReturnStatus::Canceled {
+                    file_download_handles.shutdown().await; 
+                    state_manager.delete_download(download.id).await;
+
+                    return DownloadReturnStatus::Canceled;
+                }
+            }
+            Err(e) => {
+                println!("Download task failed: {:?}", e);
+            }
+        }
+    }
     
     download.status = DownloadStatus::Completed;
     let _ = ui_event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::StatusChanged { id: download.id(), status: DownloadStatus::Completed }));
