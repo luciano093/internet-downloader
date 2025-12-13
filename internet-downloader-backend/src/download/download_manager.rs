@@ -6,10 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use axum::http::HeaderValue;
 use bincode::{Decode, Encode};
 use bitvec::vec::BitVec;
-use futures_util::future::join_all;
+use futures_util::{StreamExt, stream};
 use indexmap::IndexMap;
+use reqwest::header;
 use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 use tokio::fs::{create_dir_all, File};
@@ -433,7 +435,9 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
         (download, state_manager)
     });
 
-    let sizes = fetch_download_size(&unprocessed_downloads, client.clone(), host).await;
+    let sizes = fetch_download_size(unprocessed_downloads.clone(), client.clone(), host).await;
+
+    println!("found size of download: {}", sizes.clone().into_iter().map(|result| result.unwrap().1).fold(0, |a, b| a + b));
 
     for result in sizes {
         if let Some((id, len)) = result {
@@ -544,43 +548,60 @@ async fn handle_download_update(download: &mut Download, update: InternalFileUpd
     };
 }
 
-async fn fetch_download_size(unprocessed_downloads: &VecDeque<(usize, String, PathBuf)>, client: reqwest::Client, host: Host) -> Vec<Option<(usize, u64)>>{
-    let size_checks: Vec<_> = unprocessed_downloads.iter().map(|(id, url, _)| {
+async fn fetch_download_size(unprocessed_downloads: VecDeque<(usize, String, PathBuf)>, client: reqwest::Client, host: Host) -> Vec<Option<(usize, u64)>>{
+    let stream = stream::iter(unprocessed_downloads);
+
+    let results = stream.map(|(id, url, _)| {
         let client = client.clone();
 
         async move {
-            // Try a HEAD request first
-            let head_result = client.head(url)
-                .headers(host.headers())
-                .send()
-                .await;
-
-            if let Ok(response) = head_result {
-                if let Some(len) = response.content_length() {
-                    if len > 0 {
-                        return Some((*id, len));
-                    }
-                }
-            }
-
-            // If HEAD fails or returns no length, do a GET request and abort immediately to avoid downloading body
-            let get_result = client.get(url)
-                .headers(host.headers())
-                .send()
-                .await;
-
-            match get_result {
-                Ok(resp) => {
-                    resp.content_length().map(|len| (*id, len))
-                },
-                Err(_) => None, 
-            }
+            fetch_file_size(host, &client, &url, id).await.map(|len| (id, len))
         }
-    }).collect();
+    }).buffer_unordered(4);
 
-    let sizes = join_all(size_checks).await;
+    let sizes = results.collect().await;
 
     sizes
+}
+
+async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str, id: usize) -> Option<u64> {
+    // Try a HEAD request first
+    let head_result = client.head(url)
+        .headers(host.headers())
+        .header("Accept-Encoding", "identity")
+        .send()
+        .await;
+
+    if let Ok(response) = head_result {
+        if let Some(len) = response.content_length() && response.status().is_success() {
+            if len > 0 {
+                return Some(len);
+            }
+        }
+    }
+
+    // If HEAD fails or returns no length, do a GET request and abort immediately to avoid downloading body
+    let get_result = client.get(url)
+        .headers(host.headers())
+        .header("Accept-Encoding", "identity")
+        .header("Range", "bytes=0-0")
+        .send()
+        .await;
+
+        if let Ok(resp) = get_result {
+            if let Some(range_header) = resp.headers().get(header::CONTENT_RANGE) {
+                return Some(parse_content_range_size(range_header)); 
+            }
+            if let Some(len) = resp.content_length() {
+                return Some(len);
+            }
+        }
+
+    None
+}
+
+fn parse_content_range_size(range_header: &HeaderValue) -> u64 {
+    u64::from_str_radix(range_header.to_str().unwrap().rsplit_once("/").unwrap().1, 10).unwrap()
 }
 
 async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &reqwest::Client, sender: &UnboundedSender<InternalFileUpdate>, mut commands_receiver: tokio::sync::broadcast::Receiver<DownloadCommand>) -> DownloadReturnStatus {
