@@ -129,7 +129,15 @@ impl UiStateManager {
                                 let _ = delta_sender.send(FrontendMessage::DownloadRemoved { id });
                             },
                             UiStateEvent::AddUpdate(download_update) => {
+                                let force_flush = matches!(download_update, DownloadUpdate::StatusChanged { .. });
+
                                 delta_manager.add_update(download_update);
+
+                                if force_flush {
+                                    let _ = delta_sender.send(FrontendMessage::BatchUpdate(delta_manager.drain_deltas()));
+
+                                    delta_timer.reset();
+                                }
                             },
                         }
                     }
@@ -197,7 +205,7 @@ impl DeltaManager {
     pub fn add_update(&mut self, download_update: DownloadUpdate) {
         match download_update {
             DownloadUpdate::StatusChanged { id, status } => {
-                let download_diff = self.deltas.get_mut(&id).unwrap();
+                let download_diff = self.deltas.entry(id).or_insert(DownloadDiff::default());
             
                 download_diff.status = Some(status);
             },

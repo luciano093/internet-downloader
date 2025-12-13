@@ -349,6 +349,7 @@ impl DownloadManager {
 
 async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::UnboundedSender<UiStateEvent>, commands_receiver: tokio::sync::broadcast::Receiver<DownloadCommand>, client: reqwest::Client, mut download: Download) -> DownloadReturnStatus {
     download.status = DownloadStatus::InProgress;
+    let _ = ui_event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::StatusChanged { id: download.id(), status: DownloadStatus::InProgress }));
 
     let mut unprocessed_downloads = VecDeque::new();
 
@@ -362,6 +363,8 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
 
     let (sender, mut receiver) = mpsc::unbounded_channel::<InternalFileUpdate>();
 
+    let ui_event_sender_clone = ui_event_sender.clone();
+
     let handle = tokio::spawn(async move {
         let state_manager = state_manager;
         let mut download = download;
@@ -373,7 +376,7 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
                     match update {
                         Some(update) => {
                             if let Some(file_update) = update.to_external(&download) {
-                                _ = ui_event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download.id(), file_update }));
+                                _ = ui_event_sender_clone.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download.id(), file_update }));
                             }
 
                             handle_download_update(&mut download, update).await;
@@ -420,6 +423,7 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
     let (mut download, state_manager) = handle.await.unwrap();
     
     download.status = DownloadStatus::Completed;
+    let _ = ui_event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::StatusChanged { id: download.id(), status: DownloadStatus::Completed }));
 
     println!("{}", download.url());
     state_manager.write_download(&download).await;
