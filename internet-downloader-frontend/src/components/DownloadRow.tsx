@@ -65,9 +65,6 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
     const [deleteFromDisk, setDeleteFromDisk] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
 
-    console.log(JSON.parse(JSON.stringify(download)));
-    console.log(`Row ${id} Render:`, download?.status, download?.url);
-
     const { progress, totalSize, downloadedSize } = useMemo(() => {
         if (!download || !download.files || !download.files[0]) {
             return { progress: 0, totalSize: 0, downloadedSize: 0 };
@@ -75,6 +72,8 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
         
         return getFolderStats(download.files);
     }, [download]);
+
+    console.log("downloaded size: ", downloadedSize);
 
     if (!download) return null;
 

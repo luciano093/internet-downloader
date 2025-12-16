@@ -17,6 +17,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tokio::{fs::File, signal, sync::Mutex};
 use axum::{extract::{Query, State}, routing::post, Router};
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tower_http::cors::{self, Any, CorsLayer};
 
 #[tokio::main]
@@ -95,7 +96,7 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
         let snapshot_json = serde_json::to_string(&snapshot).unwrap();
 
         // explicit turbofish as Infallible can't be inferred automatically
-        yield Ok::<_, Infallible>(Event::default().data(snapshot_json));
+        yield Ok::<_, Infallible>(Event::default().event("snapshot").data(snapshot_json).retry(Duration::from_millis(100)));
 
         let mut broadcast_stream = BroadcastStream::new(receiver);
         let mut snapshot_interval = tokio::time::interval(Duration::from_secs(5));

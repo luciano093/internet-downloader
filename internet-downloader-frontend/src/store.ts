@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { DeltaEvent, DownloadItem, DownloadItemDiff, DownloadNode } from './downloadTypes';
+import type { DeltaEvent, DownloadItem, DownloadNode } from './downloadTypes';
 
 type DownloadState = {
     downloads: Record<number, DownloadItem>;

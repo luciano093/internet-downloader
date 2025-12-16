@@ -41,6 +41,8 @@ export default function Page() {
 
     newEventSource.addEventListener("snapshot", (event) => {
       const snapshot = JSON.parse(event.data);
+
+      console.log("snapshot: ", snapshot)
         
       setSnapshot(snapshot);
     });
@@ -54,12 +56,6 @@ export default function Page() {
 
     newEventSource.onerror = (event) => {
       console.log('Error:', event);
-      if (newEventSource.readyState === EventSource.CLOSED) {
-        console.log('Connection closed, attempting manual reconnect');
-        setTimeout(() => {
-          createEventSource();
-        }, 2000);
-      }
     };
 
     newEventSource.onopen = () => {
