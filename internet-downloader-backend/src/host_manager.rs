@@ -86,8 +86,8 @@ impl HostManager {
     }
 
     fn distribute_permits(&mut self) {
-        if self.connections_budget.available_permits() > 0 {
-            for download_id in &self.permit_queue {
+        for download_id in &self.permit_queue {
+            while self.connections_budget.available_permits() > 0 {
                 let permit = match self.connections_budget.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => break, // no more permits left, so don't keep distributing

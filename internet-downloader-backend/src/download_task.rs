@@ -180,9 +180,6 @@ impl SupervisorState {
                 }
 
                 let end_index = start_index + index;
-                
-                // Update cursor for next time so we don't scan the start of this file again
-                self.chunk_cursors.insert(file_id, end_index);
 
                 return Some((file_id, (start_index, end_index)));
             }
@@ -267,11 +264,28 @@ impl DownloadSupervisor {
                                             // We drop the permit so it gets sent back to the host manager
                                             drop(permit);
 
-                                            // no more work to do
+                                            // check if there is no more work to do
                                             if state.active_permits == 0 && state.active_downloads == 0 {
-                                                state.download.set_status(DownloadStatus::Completed);
-                                                let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
-                                                break;
+                                                let mut download_complete = true;
+                                                for file in state.download.files().values() {
+                                                    if let DownloadType::File(f) = file {
+                                                        if f.status() != DownloadStatus::Completed {
+                                                            download_complete = false;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+
+                                                if download_complete {                 
+                                                    state.db_manager.write_download(&state.download).await;
+                                                    state.download.set_status(DownloadStatus::Completed);
+                                                    let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
+                                                    break;
+                                                } else {
+                                                    // the download might be in a stalled state so we reset all cursors to find the missing chunks
+                                                    // this should hopefully never happen if the worker reports correctly when it failed
+
+                                                }
                                             }
 
                                             continue;
@@ -336,12 +350,27 @@ impl DownloadSupervisor {
                                                 state.file_maps.get(&file_id).unwrap().clone()
                                             };
 
+                                            let chunk_size = 16384u64;
+                                            let start_byte = range.0 as u64 * chunk_size;
+                                            let theoretical_end = range.1 as u64 * chunk_size;
+
+                                            let total_size = match state.download.files().get(&file_id).unwrap() {
+                                                DownloadType::File(f) => match f.size() {
+                                                    FileSize::Known(s) => s,
+                                                    FileSize::Unknown => 0,
+                                                },
+                                                _ => 0,
+                                            };
+
+                                            let actual_end = std::cmp::min(theoretical_end, total_size);
+                                            let expected_len = actual_end.saturating_sub(start_byte);
+
 
                                             tokio::spawn(async move {
                                                 // Do worker stuff
-                                                download_range(client, host, &url, range, file_map).await;
+                                                let success = download_range(client, host, &url, range, file_map, expected_len).await;
 
-                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, true));
+                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, success));
                                             });
                                         },
                                     }
@@ -353,14 +382,27 @@ impl DownloadSupervisor {
                                         let download_id = state.download.id();
 
                                         let chunk_size = 16384;
-
-                                        let start_byte = range.0 * chunk_size;
-                                        let end_byte = (range.1 * chunk_size) - 1; // -1 because http ranges are inclusive
                                         
                                         match state.download.files_mut().get_mut(&file_id).unwrap() {
                                             crate::download::DownloadType::File(file_download) => {
-                                                let bytes_downloaded = file_download.bytes_downloaded() + (end_byte - start_byte) as u64;
+                                                let total_size = match file_download.size() {
+                                                    FileSize::Known(s) => s,
+                                                    FileSize::Unknown => 0, 
+                                                };
+
+                                                let start_byte = range.0 as u64 * chunk_size;
+                                                let theoretical_end = range.1 as u64 * chunk_size;
+
+                                                let actual_end = std::cmp::min(theoretical_end, total_size);
+                                                let bytes_in_range = actual_end.saturating_sub(start_byte);
+                                        
+
+                                                let bytes_downloaded = file_download.bytes_downloaded() + bytes_in_range;
                                                 file_download.set_bytes_downloaded(bytes_downloaded);
+
+
+                                                let name = file_download.name().to_string();
+                                                let bytes_downloaded = file_download.bytes_downloaded();
 
                                                 let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded } }));
 
@@ -379,6 +421,7 @@ impl DownloadSupervisor {
                                                 }
 
                                                 if all_chunks_done {
+                                                    println!("file {} finished! got {} bytes", name, bytes_downloaded);
                                                     let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
                                                     file_download.set_status(DownloadStatus::Completed);
                                                     state.file_maps.remove(&file_id);
@@ -518,7 +561,7 @@ fn parse_content_range(range_header: &str) -> Option<u64> {
     range_header.rsplit('/').next()?.parse::<u64>().ok()
 }
 
-async fn download_range(client: Client, host: Host, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>) -> bool {
+async fn download_range(client: Client, host: Host, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>, expected_len: u64) -> bool {
     let chunk_size = 16384;
 
     let start_byte = range.0 as u64 * chunk_size;
@@ -534,15 +577,22 @@ async fn download_range(client: Client, host: Host, url: &str, range: (usize, us
         let mut response = request.send().await.unwrap();
 
         if response.status() != StatusCode::PARTIAL_CONTENT && response.status() != StatusCode::OK {
-            return Err(format!("Server returned status: {}", response.status()));
+            return Err(format!("Server wrong returned status: {}", response.status()));
         }
 
         let mut current_offset = start_byte;
+        let mut bytes_received = 0; 
 
         while let Some(chunk) = response.chunk().await.unwrap() {
+            let chunk_len = chunk.len() as u64;
             file_map.write_chunk(current_offset as usize, &chunk);
 
-            current_offset += chunk.len() as u64;
+            current_offset += chunk_len;
+            bytes_received += chunk_len;
+        }
+
+        if bytes_received != expected_len {
+            return Err(format!("Incomplete download: expected {} bytes, got {}", expected_len, bytes_received));
         }
             
         Ok(())
@@ -551,7 +601,7 @@ async fn download_range(client: Client, host: Host, url: &str, range: (usize, us
     let success = result.is_ok();
 
     if let Err(error) = result {
-        eprintln!("Download worker failed: {}", error);
+        println!("Download worker failed: {}", error);
     }
 
     success
