@@ -5,6 +5,7 @@ use memmap2::MmapMut;
 pub struct SharedFileMap {
     _mmap: MmapMut,
     ptr: *mut u8,
+    size: u64,
 }
 
 // This promises to not write to overlapping offsets
@@ -23,10 +24,17 @@ impl SharedFileMap {
         file.set_len(size).unwrap();
         let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
         let ptr = mmap.as_mut_ptr();
-        Self { _mmap: mmap, ptr }
+        Self { _mmap: mmap, ptr, size }
     }
 
     pub fn write_chunk(&self, offset: usize, data: &[u8]) {
+        let end = offset + data.len();
+
+
+        if end as u64 > self.size {
+            panic!("Out of bounds write! File size: {}, End: {}", self.size, end);
+        }
+
         unsafe {
             let dst_ptr = self.ptr.add(offset);
             
