@@ -19,11 +19,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use tokio::task::JoinSet;
-use url::{ParseError, Url};
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
-use crate::download::hosts::Host;
+use crate::download::hosts::{Host, HostParseError};
+use crate::network_manager::NetworkHandle;
 use crate::state_manager::StateManager;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -117,7 +117,7 @@ impl InternalFileUpdate {
 // }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
-pub struct DownloadId(usize);
+pub struct DownloadId(pub usize);
 
 impl Deref for DownloadId {
     type Target = usize;
@@ -142,8 +142,7 @@ pub enum DownloadCommand {
 }
 
 enum ManagerCommand {
-    QueueDownloadByUrl(String),
-    QueueDownload(Download),
+    QueueDownload(String),
     RemoveDownload(usize),
     Shutdown,
 }
@@ -229,7 +228,7 @@ impl DownloadManager {
 
     pub async fn queue_download(&mut self, url: String) -> Result<(), DownloadManagerError> {
         if let Some(sender) = &self.command_sender {
-            sender.send(ManagerCommand::QueueDownloadByUrl(url)).unwrap();
+            sender.send(ManagerCommand::QueueDownload(url)).unwrap();
         }
 
         Ok(())
@@ -249,6 +248,8 @@ impl DownloadManager {
         let ui_state_manager = UiStateManager::new();
         let ui_state_handle = ui_state_manager.start();
         self.ui_state_handle = Some(ui_state_handle);
+
+        let (network_manager, _) = NetworkHandle::spawn();
         
         // Clone shared resources
         let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
@@ -284,7 +285,7 @@ impl DownloadManager {
                 tokio::select! {
                     Some(command) = command_receiver.recv() => {
                         match command {
-                            ManagerCommand::QueueDownloadByUrl(url) => {
+                            ManagerCommand::QueueDownload(url) => {
                                 println!("registry: {:#?}", url_registry);
                                 println!("url: {}", url);
                                 if url_registry.contains_key(&url) {
@@ -294,22 +295,10 @@ impl DownloadManager {
 
                                 let id = next_id.fetch_add(1, Ordering::Relaxed);
                                 url_registry.insert(url.clone(), id);
-                                id_registry.insert(id, url.clone()); 
+                                id_registry.insert(id, url.clone());
 
-                                let command_sender = command_sender.clone();
-
-                                tokio::spawn(async move {
-                                    let host = parse_host(&url).unwrap();
-                                    let download_task = host.extract_download_info(&url).await;
-                                    let download = Download::new(id, download_task);
-
-                                    let _ = command_sender.send(ManagerCommand::QueueDownload(download));
-                                });
+                                network_manager.queue_download(url, id);
                             },
-                            ManagerCommand::QueueDownload(download) => {
-                                ui_event_sender.send(UiStateEvent::AddDownload(download.clone())).unwrap();
-                                queue.insert(download.id(), download);
-                            } 
                             ManagerCommand::RemoveDownload(id) => {
                                 // First, remove from registry
                                 if let Some(url) = id_registry.remove(&id) {
@@ -340,39 +329,42 @@ impl DownloadManager {
 
                     Ok(permit) = concurrency_limit.clone().acquire_owned(), if !queue.is_empty() => {
                         if let Some((_, download)) = queue.shift_remove_index(0) {
-                            if download.is_completed() {
-                                continue;
-                            }
-
-                            let client = client.clone();
-                            let db = db_manager.clone();
-                            let command_map = command_broadcast_map.clone();
-                            let ui_event_sender = ui_event_sender.clone();
-
-                            tokio::spawn(async move {
-                                let _permit = permit; 
-                                let download_id = DownloadId(download.id());
-
-                                let (commands_sender, commands_receiver) = tokio::sync::broadcast::channel(20);
-                                command_map.lock().await.insert(download_id, commands_sender);
-
-                                let return_status = process_download(
-                                    db.clone(),
-                                    ui_event_sender,
-                                    commands_receiver,
-                                    client,
-                                    download
-                                ).await;
-
-                                if return_status == DownloadReturnStatus::Canceled {
-                                    db.delete_download(*download_id).await;
-                                }
-
-                                println!("download finished");
-
-                                command_map.lock().await.remove(&download_id);
-                            });
+                            let _ = command_sender.send(ManagerCommand::QueueDownload(download.url().to_string()));
                         }
+                        // if let Some((_, download)) = queue.shift_remove_index(0) {
+                        //     if download.is_completed() {
+                        //         continue;
+                        //     }
+
+                        //     let client = client.clone();
+                        //     let db = db_manager.clone();
+                        //     let command_map = command_broadcast_map.clone();
+                        //     let ui_event_sender = ui_event_sender.clone();
+
+                        //     tokio::spawn(async move {
+                        //         let _permit = permit; 
+                        //         let download_id = DownloadId(download.id());
+
+                        //         let (commands_sender, commands_receiver) = tokio::sync::broadcast::channel(20);
+                        //         command_map.lock().await.insert(download_id, commands_sender);
+
+                        //         let return_status = process_download(
+                        //             db.clone(),
+                        //             ui_event_sender,
+                        //             commands_receiver,
+                        //             client,
+                        //             download
+                        //         ).await;
+
+                        //         if return_status == DownloadReturnStatus::Canceled {
+                        //             db.delete_download(*download_id).await;
+                        //         }
+
+                        //         println!("download finished");
+
+                        //         command_map.lock().await.remove(&download_id);
+                        //     });
+                        // }
                     }
                 }
             }
@@ -408,6 +400,7 @@ async fn process_download(state_manager: StateManager, ui_event_sender: mpsc::Un
 
     let handle = tokio::spawn(async move {
         let state_manager = state_manager;
+
         let mut download = download;
         let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
@@ -555,7 +548,7 @@ async fn fetch_download_size(unprocessed_downloads: VecDeque<(usize, String, Pat
         let client = client.clone();
 
         async move {
-            fetch_file_size(host, &client, &url, id).await.map(|len| (id, len))
+            fetch_file_size(host, &client, &url).await.map(|len| (id, len))
         }
     }).buffer_unordered(4);
 
@@ -564,7 +557,7 @@ async fn fetch_download_size(unprocessed_downloads: VecDeque<(usize, String, Pat
     sizes
 }
 
-async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str, id: usize) -> Option<u64> {
+async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str) -> Option<u64> {
     // Try a HEAD request first
     let head_result = client.head(url)
         .headers(host.headers())
@@ -601,6 +594,7 @@ async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str, id: us
 }
 
 fn parse_content_range_size(range_header: &HeaderValue) -> u64 {
+     // e.g. "bytes 0-0/1048576"
     u64::from_str_radix(range_header.to_str().unwrap().rsplit_once("/").unwrap().1, 10).unwrap()
 }
 
@@ -688,28 +682,8 @@ async fn hash_file(path: &Path) -> u128 {
     hasher.digest128()
 }
 
-fn parse_host(url: &str) -> Result<Host, HostParseError> {
-    let url = Url::parse(url)?;
-    let host = url.host_str().ok_or(HostParseError::NoHost)?;
-
-    match host {
-        "example.com" => Ok(Host::example_host),
-        _ => Err(HostParseError::UnknownHost(host.to_string())),
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum HostParseError {
-    #[error("Invalid URL: {0}")]
-    InvalidUrl(#[from] ParseError),
-     #[error("Url contains no host")]
-    NoHost,
-    #[error("Unknown host: {0}")]
-    UnknownHost(String)
-}
-
 #[derive(Debug)]
-pub(in crate::download) struct DownloadTask {
+pub struct DownloadTask {
     url: String,
     task_type: TaskType,
     host: Host,
@@ -726,13 +700,13 @@ impl DownloadTask {
 }
 
 #[derive(Debug)]
-pub(super) enum TaskType {
+pub enum TaskType {
     File(FileTask),
     Folder(FolderTask),
 }
 
 #[derive(Debug)]
-pub(super) struct FileTask {
+pub struct FileTask {
     url: String,
     file_name: String,
 }
@@ -751,7 +725,7 @@ impl FileTask {
 }
 
 #[derive(Debug)]
-pub(super) struct FolderTask {
+pub struct FolderTask {
     folder_name: String,
     files: Vec<TaskType>
 }
@@ -769,6 +743,7 @@ impl FolderTask {
 #[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DownloadStatus {
     Queued,
+    Initializing,
     InProgress,
     Completed,
     Paused,
@@ -787,9 +762,9 @@ pub struct Download {
     id: usize,
     url: String,
     relative_path: PathBuf,
-    host: Host,
+    pub(crate) host: Host,
     status: DownloadStatus,
-    files: HashMap<usize, DownloadType>,
+    pub(crate) files: HashMap<usize, DownloadType>,
     name: String,
 }
 
@@ -840,7 +815,7 @@ impl Download {
 }
 
 impl Download {
-    fn new(id: usize, value: DownloadTask) -> Self {
+    pub fn new(id: usize, value: DownloadTask) -> Self {
         let mut relative_path = PathBuf::new();
 
         let mut files = HashMap::new();
@@ -1107,6 +1082,10 @@ impl FileDownload {
         &self.chunks
     }
 
+    pub fn chunks_mut(&mut self) -> &mut BitVec {
+        &mut self.chunks
+    }
+
     pub const fn hash(&self) -> Option<u128> {
         self.hash
     }
@@ -1117,6 +1096,10 @@ impl FileDownload {
 
     pub fn size(&self) -> FileSize {
         self.size
+    }
+
+    pub fn set_size(&mut self, size: FileSize) {
+        self.size = size;
     }
 
     pub fn bytes_downloaded(&self) -> u64 {
@@ -1179,7 +1162,7 @@ impl DownloadItem for FolderDownload {
     }
 }
 
-#[derive(Debug, Encode, Decode, Copy, Clone, Deserialize)]
+#[derive(Debug, Encode, Decode, Copy, Clone, Deserialize, PartialEq, Eq)]
 pub enum FileSize {
     Unknown,
     Known(u64)
