@@ -36,6 +36,7 @@ impl NetworkManager {
         while let Some(message) = self.receiver.recv().await {
             match message {
                 NetworkMessage::QueueDownload(url, id) => {
+                    println!("queueing download in network maanger");
                     self.process_download(url, *id);
                 },
                 NetworkMessage::HandleDownload(download) => {
@@ -46,6 +47,7 @@ impl NetworkManager {
                         self.host_handle_map.get(&download.host()).unwrap()
                     };
                     
+                    println!("sending to host manager");
                     host_handle.queue_download(download);
                 },
             }

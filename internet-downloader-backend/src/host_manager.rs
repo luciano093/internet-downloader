@@ -76,7 +76,12 @@ impl HostManager {
                 HostMessage::DownloadFinished(download_id) => {
                     let _ = self.ui_sender.send(UiStateEvent::AddUpdate(crate::download::DownloadUpdate::StatusChanged { id: download_id, status: DownloadStatus::Completed }));
                     self.active_downloads.remove(&download_id);
-                    // TODO: remove from queue
+                   
+                    if let Some(pos) = self.permit_queue.iter().position(|x| *x == download_id) {
+                        self.permit_queue.remove(pos);
+                    }
+
+                    self.distribute_permits();
                 },
                 HostMessage::SupervisorSaturated(download_id) => {
                     self.active_downloads.get_mut(&download_id).unwrap().set_saturated(true);
@@ -95,11 +100,11 @@ impl HostManager {
 
                 let supervisor = match self.active_downloads.get_mut(download_id) {
                     Some(supervisor) => supervisor,
-                    None => continue,
+                    None => break,
                 };
 
                 if supervisor.is_saturated() {
-                    continue;
+                    break;
                 }
 
                 supervisor.give_permit(ActiveDownloadPermit::new(permit, self.sender.clone()));
@@ -130,6 +135,7 @@ impl HostHandle {
     }
 
     pub fn queue_download(&self, download: Download) {
+        println!("sending through handle");
         let _ = self.sender.send(HostMessage::QueueDownload(download));
     }
 }
