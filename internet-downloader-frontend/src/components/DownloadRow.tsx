@@ -1,5 +1,5 @@
 import { useDownloadStore } from "@/store";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { TableCell, TableRow } from "./ui/table";
 import type { DownloadNode, FileItem } from "@/downloadTypes";
 
@@ -65,6 +65,8 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
     const [deleteFromDisk, setDeleteFromDisk] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
 
+    const [downloadSpeed, setDownloadSpeed] = useState(0);
+    
     const { progress, totalSize, downloadedSize } = useMemo(() => {
         if (!download || !download.files || !download.files[0]) {
             return { progress: 0, totalSize: 0, downloadedSize: 0 };
@@ -75,9 +77,36 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
 
     console.log("downloaded size: ", downloadedSize);
 
+    const currentSizeRef = useRef(downloadedSize);
+    const prevSizeRef = useRef(downloadedSize);
+
+    currentSizeRef.current = downloadedSize;
+    
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const current = currentSizeRef.current;
+            const previous = prevSizeRef.current;
+            const diff = Math.max(0, current - previous);
+
+            setDownloadSpeed(prevSpeed => {
+                // "Smoothing Factor": 0.1 means trust the new value 10%, keep old 90%
+                // 0.5 is a good balance for downloaders.
+                const alpha = 0.3; 
+                return (alpha * diff) + ((1 - alpha) * prevSpeed);
+            });
+
+            prevSizeRef.current = current;
+        }, 1000);
+
+        return () => clearInterval(interval);
+    }, []);
+
     if (!download) return null;
 
     const displaySize = totalSize === 0 ? "Unknown" : formatBytes(totalSize as number);
+    const displaySpeed = download.status === 'completed' 
+        ? 'Done' 
+        : `${formatBytes(downloadSpeed)}/s`;
 
     const handleDelete = async (e: React.MouseEvent) => {
         e.preventDefault();
@@ -98,6 +127,7 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
         <TableRow>
             <TableCell className="font-medium">{download.name}</TableCell>
             <TableCell>{displaySize}</TableCell>
+            <TableCell>{displaySpeed}</TableCell>
             <TableCell>{progress.toFixed(1)}%</TableCell>
             <TableCell className="text-right">{download.status}</TableCell>
             <TableCell className="text-right">

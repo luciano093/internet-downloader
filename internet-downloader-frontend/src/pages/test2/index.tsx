@@ -111,6 +111,7 @@ export default function Page() {
             <TableRow>
             <TableHead className="w-[100px]">Name</TableHead>
             <TableHead>Size</TableHead>
+            <TableHead>Download Speed</TableHead>
             <TableHead>Progress</TableHead>
             <TableHead className="text-right">Status</TableHead>
             <TableHead className="w-[50px]"></TableHead>
