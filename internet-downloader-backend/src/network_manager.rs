@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use reqwest::Client;
 use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, task::JoinHandle};
 
-use crate::{download::{Download, hosts::{Host, parse_host}}, host_manager::HostHandle};
+use crate::{client_state_manager::UiStateEvent, download::{Download, DownloadId, hosts::{Host, parse_host}}, host_manager::HostHandle, state_manager::StateManager};
 
 pub enum NetworkMessage {
-    QueueDownload(String, usize),
+    QueueDownload(String, DownloadId),
     HandleDownload(Download)
 }
 
@@ -16,15 +16,19 @@ struct NetworkManager {
     receiver: UnboundedReceiver<NetworkMessage>,
     host_handle_map: HashMap<Host, HostHandle>,
     client: Client,
+    ui_sender: UnboundedSender<UiStateEvent>,
+    db_manager: StateManager,
 }
 
 impl NetworkManager {
-    pub fn new(sender: UnboundedSender<NetworkMessage>, receiver: UnboundedReceiver<NetworkMessage>) -> Self {
+    pub fn new(sender: UnboundedSender<NetworkMessage>, receiver: UnboundedReceiver<NetworkMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
         Self {
             sender,
             receiver,
             host_handle_map: HashMap::new(),
             client: Client::new(),
+            ui_sender,
+            db_manager,
         }
     }
 
@@ -32,13 +36,13 @@ impl NetworkManager {
         while let Some(message) = self.receiver.recv().await {
             match message {
                 NetworkMessage::QueueDownload(url, id) => {
-                    self.process_download(url, id);
+                    self.process_download(url, *id);
                 },
                 NetworkMessage::HandleDownload(download) => {
                     let host_handle = if self.host_handle_map.contains_key(&download.host()) {
                         self.host_handle_map.get(&download.host()).unwrap()
                     } else {
-                        self.host_handle_map.insert(download.host(), HostHandle::spawn(self.client.clone(), download.host()).0);
+                        self.host_handle_map.insert(download.host(), HostHandle::spawn(self.client.clone(), download.host(), self.ui_sender.clone(), self.db_manager.clone()).0);
                         self.host_handle_map.get(&download.host()).unwrap()
                     };
                     
@@ -67,10 +71,10 @@ pub struct NetworkHandle {
 }
 
 impl NetworkHandle {
-    pub fn spawn() -> (Self, JoinHandle<()>) {
+    pub fn spawn(ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> (Self, JoinHandle<()>) {
         let (network_sender, network_receiver) = unbounded_channel();
 
-        let network_manager = NetworkManager::new(network_sender.clone(), network_receiver);
+        let network_manager = NetworkManager::new(network_sender.clone(), network_receiver, ui_sender, db_manager);
 
         let join_handle = tokio::spawn(async move {
             network_manager.run().await;
@@ -81,7 +85,7 @@ impl NetworkHandle {
         (network_handler, join_handle)
     }
 
-    pub fn queue_download(&self, url: String, id: usize) {
+    pub fn queue_download(&self, url: String, id: DownloadId) {
         let _ = self.sender.send(NetworkMessage::QueueDownload(url, id));
     }
 }

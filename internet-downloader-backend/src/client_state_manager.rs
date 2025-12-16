@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::download::DownloadId;
 use crate::download::FileSize;
 use crate::download::hosts::Host;
 use crate::download::DownloadUpdate;
@@ -219,12 +220,12 @@ impl DeltaManager {
     pub fn add_update(&mut self, download_update: DownloadUpdate) {
         match download_update {
             DownloadUpdate::StatusChanged { id, status } => {
-                let download_diff = self.deltas.entry(id).or_insert(DownloadDiff::default());
+                let download_diff = self.deltas.entry(*id).or_insert(DownloadDiff::default());
             
                 download_diff.status = Some(status);
             },
             DownloadUpdate::FileUpdated { id, file_update } => {
-                let download_diff = self.deltas.entry(id).or_insert(DownloadDiff::default());
+                let download_diff = self.deltas.entry(*id).or_insert(DownloadDiff::default());
 
                 let file_id = file_update.id();
                 if let None = download_diff.files.get(&file_id) {
@@ -366,7 +367,7 @@ impl From<&FolderDownload> for FolderDiff {
 }
 
 #[derive(Debug, Clone)]
-pub struct DownloadSnapshot(pub IndexMap<usize, Download>);
+pub struct DownloadSnapshot(pub IndexMap<DownloadId, Download>);
 
 impl Serialize for DownloadSnapshot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

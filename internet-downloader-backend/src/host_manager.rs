@@ -3,7 +3,7 @@ use std::{collections::{HashMap, VecDeque}, sync::Arc};
 use reqwest::Client;
 use tokio::{sync::{OwnedSemaphorePermit, Semaphore, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}}, task::JoinHandle};
 
-use crate::{download::{Download, DownloadId, hosts::Host}, download_task::{DownloadSupervisor}};
+use crate::{client_state_manager::UiStateEvent, download::{Download, DownloadId, DownloadStatus, hosts::Host}, download_task::DownloadSupervisor, state_manager::StateManager};
 
 pub struct ActiveDownloadPermit {
     permit: Option<OwnedSemaphorePermit>,
@@ -37,10 +37,12 @@ pub struct HostManager {
     active_downloads: HashMap<DownloadId, DownloadSupervisor>, // Maybe change this to a BTreeMap for order
     connections_budget: Arc<Semaphore>,
     permit_queue: VecDeque<DownloadId>,
+    ui_sender: UnboundedSender<UiStateEvent>,
+    db_manager: StateManager,
 }
 
 impl HostManager {
-    pub fn new(client: Client, host: Host, sender: UnboundedSender<HostMessage>, receiver: UnboundedReceiver<HostMessage>) -> Self {
+    pub fn new(client: Client, host: Host, sender: UnboundedSender<HostMessage>, receiver: UnboundedReceiver<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
         Self {
             client,
             host,
@@ -49,6 +51,8 @@ impl HostManager {
             active_downloads: HashMap::new(),
             connections_budget: Arc::new(Semaphore::const_new(2)),
             permit_queue: VecDeque::new(),
+            ui_sender,
+            db_manager,
         }
     }
 
@@ -59,8 +63,9 @@ impl HostManager {
                     println!("queueing download: {}", download.name());
                     let client = self.client.clone();
 
-                    self.permit_queue.push_back(DownloadId(download.id()));
-                    self.active_downloads.insert(DownloadId(download.id()), DownloadSupervisor::new(client, download, self.sender.clone()));
+                    let _ = self.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
+                    self.permit_queue.push_back(download.id());
+                    self.active_downloads.insert(download.id(), DownloadSupervisor::new(client, download, self.sender.clone(), self.ui_sender.clone(), self.db_manager.clone()));
 
                     self.distribute_permits();
                 },
@@ -69,6 +74,7 @@ impl HostManager {
                     self.distribute_permits();
                 },
                 HostMessage::DownloadFinished(download_id) => {
+                    let _ = self.ui_sender.send(UiStateEvent::AddUpdate(crate::download::DownloadUpdate::StatusChanged { id: download_id, status: DownloadStatus::Completed }));
                     self.active_downloads.remove(&download_id);
                     // TODO: remove from queue
                 },
@@ -104,10 +110,10 @@ pub struct HostHandle {
 }
 
 impl HostHandle {
-    pub fn spawn(client: Client, host: Host) -> (Self, JoinHandle<()>) {
+    pub fn spawn(client: Client, host: Host, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> (Self, JoinHandle<()>) {
         let (host_sender, host_receiver) = unbounded_channel();
 
-        let host_manager = HostManager::new(client, host, host_sender.clone(), host_receiver);
+        let host_manager = HostManager::new(client, host, host_sender.clone(), host_receiver, ui_sender, db_manager);
 
         let handle = tokio::spawn(async move {
             host_manager.run().await;

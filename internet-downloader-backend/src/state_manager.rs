@@ -2,7 +2,7 @@ use indexmap::IndexMap;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use thiserror::Error;
 
-use crate::download::Download;
+use crate::download::{Download, DownloadId};
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
@@ -52,7 +52,7 @@ impl StateManager {
         let state_blob = bincode::encode_to_vec(download, bincode::config::standard()).unwrap();
 
         sqlx::query("INSERT OR REPLACE INTO download_states (id, url, state_blob) VALUES (?, ?, ?)")
-            .bind(download.id() as i64) // SQLite uses i64
+            .bind(*download.id() as i64) // SQLite uses i64
             .bind(download.url())
             .bind(state_blob)
             .execute(&self.pool)
@@ -60,21 +60,21 @@ impl StateManager {
             .unwrap();
     }
 
-    pub async fn delete_download(&self, id: usize) {  
+    pub async fn delete_download(&self, id: DownloadId) {  
         sqlx::query("DELETE FROM download_states WHERE id = ?")
-            .bind(id as i64)
+            .bind(*id as i64)
             .execute(&self.pool)
             .await
             .unwrap();
     }
 
-    pub async fn load_downloads(&self) -> Result<IndexMap<usize, Download>, ()> {
+    pub async fn load_downloads(&self) -> Result<IndexMap<DownloadId, Download>, ()> {
         let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT state_blob FROM download_states ORDER BY id ASC" )
             .fetch_all(&self.pool)
             .await
             .unwrap();
 
-        let mut downloads: IndexMap<usize, Download> = IndexMap::new();
+        let mut downloads: IndexMap<DownloadId, Download> = IndexMap::new();
 
         for blob in rows {
             let (download, _): (Download, _) = bincode::decode_from_slice(

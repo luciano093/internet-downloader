@@ -1,18 +1,18 @@
 use std::collections::HashMap;
-use std::io::SeekFrom;
-use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::{Client, StatusCode, header};
 use tokio::fs::create_dir_all;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::client_state_manager::UiStateEvent;
 use crate::download::hosts::Host;
-use crate::download::{Download, DownloadId, DownloadItem, DownloadStatus, DownloadType, FileSize};
+use crate::download::{Download, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
 use crate::host_manager::{ActiveDownloadPermit, HostMessage};
 use crate::shared_file_map::SharedFileMap;
+use crate::state_manager::StateManager;
 
 pub enum SupervisorMessage {
     SpawnWorker(ActiveDownloadPermit),
@@ -39,10 +39,12 @@ struct SupervisorState {
     active_downloads: usize, // tracks how many permits we are using to download files
     active_metadata_requests: usize, // tracks how many permits we are using to gather metadata
     file_maps: HashMap<usize, Arc<SharedFileMap>>, // Tracks file maps to get memory mapped files
+    ui_sender: UnboundedSender<UiStateEvent>,
+    db_manager: StateManager,
 }
 
 impl SupervisorState {
-    fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>) -> Self {
+    fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
         Self { 
             client,
             download,
@@ -56,6 +58,8 @@ impl SupervisorState {
             active_downloads: 0,
             active_metadata_requests: 0,
             file_maps: HashMap::new(),
+            ui_sender,
+            db_manager,
         }
     }
 
@@ -186,24 +190,6 @@ impl SupervisorState {
 
         None
     }
-
-    /// Iterates through the download and returns the first file that has not been completed
-    /// returns `None` if all files are completed
-    fn get_next_download(&self) -> Option<usize> {
-        for (id, file) in self.download.files() {
-            match file {
-                crate::download::DownloadType::File(file_download) => {
-                    if file_download.status() != DownloadStatus::Completed {
-                        return Some(*id);
-                    }
-                    continue;
-                },
-                crate::download::DownloadType::Folder(_) => continue,
-            }
-        }
-
-        return None;
-    }
 }
 
 pub struct DownloadSupervisor {
@@ -214,11 +200,11 @@ pub struct DownloadSupervisor {
 }
 
 impl DownloadSupervisor {
-    pub fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>) -> Self {
+    pub fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
         println!("Supervisor created for: {}", download.name());
 
         Self {
-            state: Some(SupervisorState::new(client, download, host_sender)),
+            state: Some(SupervisorState::new(client, download, host_sender, ui_sender, db_manager)),
             sender: None,
             shutdown_receiver: None,
             saturated: false,
@@ -244,189 +230,207 @@ impl DownloadSupervisor {
                 panic!("Supervisor in inconsistent state: No local state and no recovery channel!");
             };
 
-            while let Some(message) = receiver.recv().await {
-                match message {
-                    SupervisorMessage::SpawnWorker(permit) => {
-                        println!("spawning worker for download: {}", state.download.name());
-                        // If we are already at max permits, don't take the permit 
-                        if state.active_permits >= state.max_permits {
-                            HostMessage::SupervisorSaturated(DownloadId(state.download.id()));
-                            drop(permit);
-                            continue;
-                        }
+            let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
-                        state.active_permits += 1;
-
-                        let sender = sender.clone();
-
-                        // no next job means either we are finished or all remaining jobs are already taken
-                        // in any case, we send the permit back to the host
-                        let job = match state.get_next_job() {
-                            Some(job) => {
-                                println!("found job {:?} for download: {}", job, state.download.name());
-                                job
-                            },
-                            None => {
-                                println!("no jobs left");
-                                state.active_permits -= 1;
-
-                                // We tell the host manager that we are saturated so it doesn't try to send more permits
-                                HostMessage::SupervisorSaturated(DownloadId(state.download.id()));
             
-                                // We drop the permit so it gets sent back to the host manager
-                                drop(permit);
-
-                                // no more work to do
-                                if state.active_permits == 0 && state.active_downloads == 0 {
-                                    let _ = state.host_sender.send(HostMessage::DownloadFinished(DownloadId(state.download.id())));
-                                    break;
-                                }
-
-                                continue;
-                            },
-                        };
-
-                        match job {
-                            Job::GetSize(file_id) => {
-                                println!("getting size for download: {}", state.download.name());
-                                state.active_metadata_requests += 1;
-                                let url = match state.download.files().get(&file_id).unwrap() {
-                                    DownloadType::File(file_download) => file_download.url().clone(),
-                                    DownloadType::Folder(_) => todo!(),
-                                };
-                                let host = state.download.host();
-                                let client = state.client.clone();
-
-                                tokio::spawn(async move {  
-                                    let size = fetch_file_size(host, &client, &url).await;
-                                    
-                                    let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, size));
-                                });
-                            },
-                            Job::DownloadChunk(file_id, range) => {
-                                state.active_downloads += 1;
-
-                                let file_download = match state.download.files().get(&file_id).unwrap() {
-                                    DownloadType::File(file_download) => file_download,
-                                    DownloadType::Folder(_) => todo!(),
-                                };
-
-                                let client = state.client.clone();
-                                let host = state.download.host();
-                                let url = file_download.url().clone();
-                                let path = file_download.relative_path().clone();
-
-
-                                if !file_download.relative_path().exists() {
-                                    if let Some(parent_path) = path.parent() {
-                                        create_dir_all(parent_path).await.unwrap();
+                loop {
+                    tokio::select! {
+                        Some(message) = receiver.recv() => {
+                            match message {
+                                SupervisorMessage::SpawnWorker(permit) => {
+                                    println!("spawning worker for download: {}", state.download.name());
+                                    // If we are already at max permits, don't take the permit 
+                                    if state.active_permits >= state.max_permits {
+                                        HostMessage::SupervisorSaturated(state.download.id());
+                                        drop(permit);
+                                        continue;
                                     }
 
-                                    let file = tokio::fs::File::create(&path).await.unwrap();
+                                    state.active_permits += 1;
 
-                                    let size = match file_download.size() {
-                                        FileSize::Unknown => todo!(),
-                                        FileSize::Known(size) => size,
+                                    let sender = sender.clone();
+
+                                    // no next job means either we are finished or all remaining jobs are already taken
+                                    // in any case, we send the permit back to the host
+                                    let job = match state.get_next_job() {
+                                        Some(job) => {
+                                            println!("found job {:?} for download: {}", job, state.download.name());
+                                            job
+                                        },
+                                        None => {
+                                            println!("no jobs left");
+                                            state.active_permits -= 1;
+
+                                            // We tell the host manager that we are saturated so it doesn't try to send more permits
+                                            HostMessage::SupervisorSaturated(state.download.id());
+                        
+                                            // We drop the permit so it gets sent back to the host manager
+                                            drop(permit);
+
+                                            // no more work to do
+                                            if state.active_permits == 0 && state.active_downloads == 0 {
+                                                let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
+                                                break;
+                                            }
+
+                                            continue;
+                                        },
                                     };
 
-                                    file.set_len(size).await.unwrap(); 
+                                    match job {
+                                        Job::GetSize(file_id) => {
+                                            println!("getting size for download: {}", state.download.name());
+                                            state.active_metadata_requests += 1;
+                                            let url = match state.download.files().get(&file_id).unwrap() {
+                                                DownloadType::File(file_download) => file_download.url().clone(),
+                                                DownloadType::Folder(_) => todo!(),
+                                            };
+                                            let host = state.download.host();
+                                            let client = state.client.clone();
+
+                                            tokio::spawn(async move {  
+                                                let size = fetch_file_size(host, &client, &url).await;
+                                                
+                                                let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, size));
+                                            });
+                                        },
+                                        Job::DownloadChunk(file_id, range) => {
+                                            state.active_downloads += 1;
+
+                                            let file_download = match state.download.files().get(&file_id).unwrap() {
+                                                DownloadType::File(file_download) => file_download,
+                                                DownloadType::Folder(_) => todo!(),
+                                            };
+
+                                            let client = state.client.clone();
+                                            let host = state.download.host();
+                                            let url = file_download.url().clone();
+                                            let path = file_download.relative_path().clone();
+
+
+                                            if !file_download.relative_path().exists() {
+                                                if let Some(parent_path) = path.parent() {
+                                                    create_dir_all(parent_path).await.unwrap();
+                                                }
+
+                                                let file = tokio::fs::File::create(&path).await.unwrap();
+
+                                                let size = match file_download.size() {
+                                                    FileSize::Unknown => todo!(),
+                                                    FileSize::Known(size) => size,
+                                                };
+
+                                                file.set_len(size).await.unwrap(); 
+                                            }
+                                            
+                                            let file_map = if state.file_maps.contains_key(&file_id) {
+                                                state.file_maps.get(&file_id).unwrap().clone()
+                                            } else {
+                                                let size = match file_download.size() {
+                                                    FileSize::Unknown => todo!(),
+                                                    FileSize::Known(size) => size,
+                                                };
+
+                                                state.file_maps.insert(file_id, Arc::new(SharedFileMap::new(&path, size)));
+                                                state.file_maps.get(&file_id).unwrap().clone()
+                                            };
+
+
+                                            tokio::spawn(async move {
+                                                // Do worker stuff
+                                                download_range(client, host, &url, range, file_map).await;
+
+                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, true));
+                                            });
+                                        },
+                                    }
                                 }
-                                
-                                let file_map = if state.file_maps.contains_key(&file_id) {
-                                    state.file_maps.get(&file_id).unwrap().clone()
-                                } else {
-                                    let size = match file_download.size() {
-                                        FileSize::Unknown => todo!(),
-                                        FileSize::Known(size) => size,
-                                    };
+                                SupervisorMessage::WorkerFinished(permit, file_id, range, success) => {
+                                    state.active_downloads -= 1;
 
-                                    state.file_maps.insert(file_id, Arc::new(SharedFileMap::new(&path, size)));
-                                    state.file_maps.get(&file_id).unwrap().clone()
-                                };
+                                    if success {
+                                        let download_id = state.download.id();
+                                        
+                                        match state.download.files_mut().get_mut(&file_id).unwrap() {
+                                            crate::download::DownloadType::File(file_download) => {
+                                                // assume all chunks are done, if a chunk is false, mark this to false too
+                                                let mut all_chunks_done = true; 
 
+                                                // TODO: change this logic to something that doesn't iterate over every single chunk
+                                                for (i, mut chunk) in file_download.chunks_mut().iter_mut().enumerate() {
+                                                    // mark all chunks of the range as finished
+                                                    if i >= range.0 && i < range.1 {
+                                                        *chunk = true;
+                                                    }
+                                                    if !*chunk {
+                                                        all_chunks_done = false;
+                                                    }
+                                                }
 
-                                tokio::spawn(async move {
-                                    // Do worker stuff
-                                    download_range(client, host, &url, &path, range, file_map).await;
-
-                                    let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, true));
-                                });
-                            },
-                        }
-                    }
-                    SupervisorMessage::WorkerFinished(permit, file_id, range, success) => {
-                        state.active_downloads -= 1;
-
-                        if success {
-                            
-                            match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                crate::download::DownloadType::File(file_download) => {
-                                    // assume all chunks are done, if a chunk is false, mark this to false too
-                                    let mut all_chunks_done = true; 
-
-                                    // TODO: change this logic to something that doesn't iterate over every single chunk
-                                    for (i, mut chunk) in file_download.chunks_mut().iter_mut().enumerate() {
-                                        // mark all chunks of the range as finished
-                                        if i >= range.0 && i < range.1 {
-                                            *chunk = true;
-                                        }
-                                        if !*chunk {
-                                            all_chunks_done = false;
-                                        }
+                                                if all_chunks_done {
+                                                    let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
+                                                    file_download.set_status(DownloadStatus::Completed);
+                                                    state.file_maps.remove(&file_id);
+                                                }
+                                            },
+                                            crate::download::DownloadType::Folder(_) => todo!(),
+                                        } 
+                                    } else {
+                                        state.retry_ranges.entry(file_id).or_default().push(range);
                                     }
 
-                                    if all_chunks_done {
-                                        file_download.set_status(DownloadStatus::Completed);
-                                        state.file_maps.remove(&file_id);
-                                    }
+
+                                    // mark the permit as inactive, but still owned
+                                    // this has to happen after marking all chunks as finished to avoid a race condition
+                                    // otherwise spawn_worker might kill the loop before this finishes
+                                    state.active_permits -= 1;
+
+                                    // try to spawn another worked
+                                    let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
                                 },
-                                crate::download::DownloadType::Folder(_) => todo!(),
-                            } 
-                        } else {
-                            state.retry_ranges.entry(file_id).or_default().push(range);
-                        }
+                                SupervisorMessage::MetadataFetched(permit, file_id, size) => {
+                                    println!("got metadata for: {}", state.download.name());
+                                    state.active_metadata_requests -= 1;
 
+                                    if let Some(size) = size {
+                                        let download_id = state.download.id();
 
-                        // mark the permit as inactive, but still owned
-                        // this has to happen after marking all chunks as finished to avoid a race condition
-                        // otherwise spawn_worker might kill the loop before this finishes
-                        state.active_permits -= 1;
+                                        if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
+                                            file.set_size(FileSize::Known(size));
+                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size } }));
+                                            
+                                            // todo, make this a global or store it somewhere
+                                            let chunk_size = 16384; // 16 KB
 
-                        // try to spawn another worked
-                        let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
-                    },
-                    SupervisorMessage::MetadataFetched(permit, file_id, size) => {
-                        println!("got metadata for: {}", state.download.name());
-                        state.active_metadata_requests -= 1;
+                                            // Initialize chunks
+                                            if size > 0 {
+                                                let chunk_count = (size + chunk_size - 1) / chunk_size;
+                                                file.chunks_mut().resize(chunk_count as usize, false);
+                                                file.set_status(DownloadStatus::InProgress); 
+                                            } else {
+                                                println!("got 0 bytes: {}", file.name());
+                                                // 0 Byte file
+                                                file.set_status(DownloadStatus::Completed);
+                                            }
+                                        }
+                                    } else {
+                                        state.retry_uninitialized.push(file_id);
+                                    }
 
-                        if let Some(size) = size {
-                            if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
-                                file.set_size(FileSize::Known(size));
+                                    state.active_permits -= 1; 
+                                    let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+                                },
                                 
-                                // todo, make this a global or store it somewhere
-                                let chunk_size = 16384; // 16 KB
-
-                                // Initialize chunks
-                                if size > 0 {
-                                    let chunk_count = (size + chunk_size - 1) / chunk_size;
-                                    file.chunks_mut().resize(chunk_count as usize, false);
-                                    file.set_status(DownloadStatus::InProgress); 
-                                } else {
-                                    println!("got 0 bytes: {}", file.name());
-                                    // 0 Byte file
-                                    file.set_status(DownloadStatus::Completed);
-                                }
                             }
-                        } else {
-                            state.retry_uninitialized.push(file_id);
                         }
-
-                        state.active_permits -= 1; 
-                        let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
-                    },
+                    _ = save_interval.tick() => {
+                        state.db_manager.write_download(&state.download).await;
+                    }
                 }
+        
             }
-            // TODO: save to db here for persitence and in case oneshot fails
+            // saves to db here for persitence and in case oneshot fails
+            state.db_manager.write_download(&state.download).await;
 
             let _ = shutdown_sender.send(state);
         });
@@ -503,7 +507,7 @@ fn parse_content_range(range_header: &str) -> Option<u64> {
     range_header.rsplit('/').next()?.parse::<u64>().ok()
 }
 
-async fn download_range(client: Client, host: Host, url: &str, path: &Path, range: (usize, usize), file_map: Arc<SharedFileMap>) -> bool {
+async fn download_range(client: Client, host: Host, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>) -> bool {
     let chunk_size = 16384;
 
     let start_byte = range.0 as u64 * chunk_size;

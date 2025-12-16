@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,8 +28,8 @@ use crate::state_manager::StateManager;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
-    StatusChanged { id: usize, status: DownloadStatus },
-    FileUpdated { id: usize, file_update: FileUpdate },
+    StatusChanged { id: DownloadId, status: DownloadStatus },
+    FileUpdated { id: DownloadId, file_update: FileUpdate },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -116,7 +116,8 @@ impl InternalFileUpdate {
 //         progress_changed || time_elapsed || completed
 // }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Encode, Decode, Ord)]
+#[serde(transparent)]
 pub struct DownloadId(pub usize);
 
 impl Deref for DownloadId {
@@ -124,6 +125,12 @@ impl Deref for DownloadId {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl Display for DownloadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -143,7 +150,7 @@ pub enum DownloadCommand {
 
 enum ManagerCommand {
     QueueDownload(String),
-    RemoveDownload(usize),
+    RemoveDownload(DownloadId),
     Shutdown,
 }
 
@@ -157,7 +164,7 @@ pub enum DownloadManagerError {
 pub struct DownloadManager {
     next_id: Option<AtomicUsize>,
     db_state_manager: StateManager,
-    unprocessed_downloads: IndexMap<usize, Download>,
+    unprocessed_downloads: IndexMap<DownloadId, Download>,
     download_command_sender: Arc<Mutex<HashMap<DownloadId, tokio::sync::broadcast::Sender<DownloadCommand>>>>, 
     client: reqwest::Client,
     ui_state_handle: Option<UiStateHandle>,
@@ -186,9 +193,9 @@ impl DownloadManager {
     pub async fn load_state(&mut self) {
         let restored_downloads = self.db_state_manager.load_downloads().await.unwrap();
 
-        let max_id = restored_downloads.keys().max().copied().unwrap_or(0);
+        let max_id = restored_downloads.keys().max().copied().unwrap_or(DownloadId(0));
 
-        self.next_id.as_mut().unwrap().store(max_id + 1, Ordering::Relaxed);
+        self.next_id.as_mut().unwrap().store(*max_id + 1, Ordering::Relaxed);
 
         println!("restored: {:#?}", restored_downloads);
 
@@ -234,7 +241,7 @@ impl DownloadManager {
         Ok(())
     }
 
-    pub async fn remove_download(&mut self, id: usize) {
+    pub async fn remove_download(&mut self, id: DownloadId) {
         if let Some(sender) = &self.command_sender {
             let _ = sender.send(ManagerCommand::RemoveDownload(id));
         }
@@ -249,27 +256,27 @@ impl DownloadManager {
         let ui_state_handle = ui_state_manager.start();
         self.ui_state_handle = Some(ui_state_handle);
 
-        let (network_manager, _) = NetworkHandle::spawn();
         
         // Clone shared resources
         let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
         let concurrency_limit = self.concurrency_limit.clone();
         let db_manager = self.db_state_manager.clone();
-        let command_broadcast_map = self.download_command_sender.clone(); 
-        let client = self.client.clone();
+        let command_broadcast_map = self.download_command_sender.clone();
 
-        let mut queue: IndexMap<usize, Download> = self.unprocessed_downloads.drain(..).collect();
+        let mut queue: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
+
+        let (network_manager, _) = NetworkHandle::spawn(ui_event_sender.clone(), db_manager.clone());
 
         // Download registry for deduplication purposes
-        let mut url_registry: HashMap<String, usize> = HashMap::new();
-        let mut id_registry: HashMap<usize, String> = HashMap::new();
+        let mut url_registry: HashMap<String, DownloadId> = HashMap::new();
+        let mut id_registry: HashMap<DownloadId, String> = HashMap::new();
 
         let existing_downloads = db_manager.get_all_download_urls().await; 
 
         // Add existing downloads to registry
         for (id, url) in existing_downloads {
-            url_registry.insert(url.clone(), id);
-            id_registry.insert(id, url);
+            url_registry.insert(url.clone(), DownloadId(id));
+            id_registry.insert(DownloadId(id), url);
         }
 
         // Add queued downloads to registry
@@ -293,7 +300,7 @@ impl DownloadManager {
                                     continue; 
                                 }
 
-                                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                                let id = DownloadId(next_id.fetch_add(1, Ordering::Relaxed));
                                 url_registry.insert(url.clone(), id);
                                 id_registry.insert(id, url.clone());
 
@@ -311,7 +318,7 @@ impl DownloadManager {
                                     db_manager.delete_download(id).await;
                                 } 
                                 // If not in queue, it might be running. Send Cancel signal.
-                                else if let Some(sender) = command_broadcast_map.lock().await.get(&DownloadId(id)) {
+                                else if let Some(sender) = command_broadcast_map.lock().await.get(&id) {
                                     let _ = sender.send(DownloadCommand::Cancel);
                                 }
                                 // Else if it's already done or doesn't exist; just DB delete
@@ -319,7 +326,7 @@ impl DownloadManager {
                                     println!("Removed completed download {}", id);
                                     db_manager.delete_download(id).await;
                                 }
-                                let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(id));
+                                let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*id));
                             },
                             ManagerCommand::Shutdown => {
                                 break;
@@ -759,7 +766,7 @@ pub enum DownloadFailureReason {
 /// Has either a file or folder as the only item in root
 #[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
 pub struct Download {
-    id: usize,
+    id: DownloadId,
     url: String,
     relative_path: PathBuf,
     pub(crate) host: Host,
@@ -781,7 +788,7 @@ impl Download {
         }
     }
 
-    pub const fn id(&self) -> usize {
+    pub const fn id(&self) -> DownloadId {
         self.id
     }
 
@@ -834,7 +841,7 @@ impl Download {
         }
 
         Self { 
-            id,
+            id: DownloadId(id),
             url: value.url,
             relative_path: PathBuf::from("./"),
             host: value.host,

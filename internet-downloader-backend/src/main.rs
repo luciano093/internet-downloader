@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use internet_downloader_backend::{download::DownloadManagerError, state_manager::StateManager};
-use internet_downloader_backend::download::DownloadManager;
+use internet_downloader_backend::download::{DownloadId, DownloadManager};
 
 
 use reqwest::Method;
@@ -143,7 +143,7 @@ struct DownloadDeletion {
 async fn delete_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<DownloadDeletion>) -> impl IntoResponse {
     println!("received: {:?}", params);
 
-    manager.lock().await.remove_download(params.id).await;
+    manager.lock().await.remove_download(DownloadId(params.id)).await;
 
     "test"
 }
