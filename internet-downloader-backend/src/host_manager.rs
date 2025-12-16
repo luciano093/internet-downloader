@@ -93,7 +93,10 @@ impl HostManager {
                     Err(_) => break, // no more permits left, so don't keep distributing
                 };
 
-                let supervisor = self.active_downloads.get_mut(download_id).unwrap();
+                let supervisor = match self.active_downloads.get_mut(download_id) {
+                    Some(supervisor) => supervisor,
+                    None => continue,
+                };
 
                 if supervisor.is_saturated() {
                     continue;

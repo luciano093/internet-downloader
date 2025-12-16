@@ -269,6 +269,7 @@ impl DownloadSupervisor {
 
                                             // no more work to do
                                             if state.active_permits == 0 && state.active_downloads == 0 {
+                                                state.download.set_status(DownloadStatus::Completed);
                                                 let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
                                                 break;
                                             }
@@ -350,9 +351,19 @@ impl DownloadSupervisor {
 
                                     if success {
                                         let download_id = state.download.id();
+
+                                        let chunk_size = 16384;
+
+                                        let start_byte = range.0 * chunk_size;
+                                        let end_byte = (range.1 * chunk_size) - 1; // -1 because http ranges are inclusive
                                         
                                         match state.download.files_mut().get_mut(&file_id).unwrap() {
                                             crate::download::DownloadType::File(file_download) => {
+                                                let bytes_downloaded = file_download.bytes_downloaded() + (end_byte - start_byte) as u64;
+                                                file_download.set_bytes_downloaded(bytes_downloaded);
+
+                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded } }));
+
                                                 // assume all chunks are done, if a chunk is false, mark this to false too
                                                 let mut all_chunks_done = true; 
 

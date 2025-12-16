@@ -819,6 +819,10 @@ impl Download {
     pub fn is_completed(&self) -> bool {
         self.status == DownloadStatus::Completed
     }
+
+    pub fn set_status(&mut self, status: DownloadStatus) {
+        self.status = status;
+    }
 }
 
 impl Download {
@@ -1111,6 +1115,10 @@ impl FileDownload {
 
     pub fn bytes_downloaded(&self) -> u64 {
         self.bytes_downloaded
+    }
+
+    pub fn set_bytes_downloaded(&mut self, bytes_downloaded: u64) {
+        self.bytes_downloaded = bytes_downloaded
     }
 }
 
