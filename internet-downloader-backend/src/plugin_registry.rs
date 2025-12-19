@@ -111,16 +111,37 @@ impl Worker {
             let future = promise.into_future::<DownloadTask>();
             println!("made future");
 
+            let value = context.clone();
+
             context.spawn(async move {
                 println!("spawning parse");
                 tokio::select! {
                     result = future => {
-                        if let Ok(download_task) = result {
-                            println!("got task!: {:#?}", download_task);
-                            let _ = load_guard.send(Some(download_task));
-                        } else {
-                            println!("result: {:#?}", result);
-                            let _ = load_guard.send(None);
+                        match result {
+                            Ok(download_task) => {
+                                println!("got task!: {:#?}", download_task);
+                                let _ = load_guard.send(Some(download_task));
+                            }
+                            Err(err) => {
+                                if err.is_exception() {
+                                    let exception = value.catch(); 
+                                    
+                                    // Print the main error message
+                                    if let Some(msg) = exception.as_string() {
+                                        println!("JS Exception: {}", msg.to_string().unwrap_or_default());
+                                    }
+
+                                    // Print the stack trace
+                                    if let Some(stack) = exception.as_object().and_then(|o| o.get::<_, String>("stack").ok()) {
+                                        println!("Stack Trace:\n{}", stack);
+                                    }
+                                } else {
+                                    // Rust error
+                                    println!("Rust/Internal Error: {}", err);
+                                }
+
+                                let _ = load_guard.send(None);
+                            }
                         }
                     }
                     _ = request.cancel_token.cancelled() => {
@@ -190,7 +211,6 @@ impl WorkerHandle {
 
             let now = current_millis();
 
-            
                 // If execution takes longer than 5s, terminate it
                 if now.saturating_sub(start) > 5000 {
                     return true;
@@ -200,8 +220,6 @@ impl WorkerHandle {
         }).await;
 
         let worker = Worker::new(receiver, context, handler_start);
-
-
 
         tokio::spawn(async {
             worker.spawn().await;
