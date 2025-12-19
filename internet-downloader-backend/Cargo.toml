@@ -12,7 +12,9 @@ bitvec = { version = "1.0.1", features = ["serde"] }
 futures-util = "0.3.31"
 indexmap = { version = "2.10.0", features = ["serde"] }
 memmap2 = "0.9.9"
+regex = { version = "1.12.2", features = ["use_std"] }
 reqwest = { version = "0.12.23", features = ["json"] }
+rquickjs = { version = "0.10.0", features = ["full-async", "parallel"] }
 scraper = "0.23.1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.142"
@@ -21,6 +23,7 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
 thiserror = "2.0.14"
 tokio = { version = "1.47.1", features = ["fs", "macros", "rt-multi-thread", "signal", "tokio-macros"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }
+tokio-util = "0.7.17"
 tower-http = { version = "0.6.6", features = ["cors"] }
 url = "2.5.4"
 xxh3 = "0.1.1"
