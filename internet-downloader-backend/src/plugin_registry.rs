@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, ops::Deref, sync::{Arc, atomic::{Atom
 use rquickjs::{Array, AsyncContext, AsyncRuntime, Context, Function, Module, Object, Promise, Runtime, WriteOptions};
 use tokio::{fs::read_dir, sync::{mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}};
 use regex::{Regex, escape};
-use url::{Host, Url};
+use url::{Host, ParseError, Url};
 use tokio_util::sync::CancellationToken;
 
 use crate::download::hosts::{DownloadTask, Utils};
@@ -510,9 +510,9 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
                 let string = item?;
 
                 if let Some(str) = string.strip_prefix('!') {
-                    excludes.push(to_regex(str));
+                    excludes.push(to_regex(&to_url(str).unwrap()));
                 } else {
-                    supports.push((to_regex(&string), string.len()));
+                    supports.push((to_regex(&to_url(&string).unwrap()), string.len()));
 
                     if let Ok(host) = Host::parse(&string) {
                         if let Some(vec) = host_map.get_mut(&host) {
@@ -549,14 +549,21 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
     (entries, host_map, complex_plugins)
 }
 
-fn to_regex(target: &str) -> Regex {
-    let parsed = Url::parse(target).expect("Invalid URL");
+fn to_url(str: &str) -> Result<Url, ParseError> {
+    match Url::parse(str) {
+        Err(ParseError::RelativeUrlWithoutBase) => {
+            Url::parse(&format!("https://{}", str))
+        },
+        result => result,
+    }
+}
 
+fn to_regex(url: &Url) -> Regex {
     // 1. Protocol: make the 's' in https optional
     let protocol = "https?";
 
     // 2. Host: Handle www. separately to make it optional
-    let mut host = parsed.host_str().unwrap_or("").to_string();
+    let mut host = url.host_str().unwrap_or("").to_string();
     let host_pattern = if host.starts_with("www.") {
         host = host.replacen("www.", "", 1);
         format!(r"(www\.)?{}", escape(&host))
@@ -566,7 +573,7 @@ fn to_regex(target: &str) -> Regex {
 
     // 3. Path: Escape the path
     // We trim the trailing slash if it exists to handle the "sub-path" logic manually
-    let path = parsed.path().trim_end_matches('/');
+    let path = url.path().trim_end_matches('/');
     let escaped_path = escape(path);
 
     Regex::new(&format!(r"^{}://{}{}(?:/.*)?$", protocol, host_pattern, escaped_path)).expect("Failed to compile regex")
