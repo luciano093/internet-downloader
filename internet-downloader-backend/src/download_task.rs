@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode, header};
@@ -26,6 +27,8 @@ pub enum Job {
     DownloadChunk(usize, (usize, usize)),
 }
 
+// TODO: try to see if i can implement a get_next_chunk()
+
 struct SupervisorState {
     client: Client,
     download: Download,
@@ -35,16 +38,21 @@ struct SupervisorState {
     retry_uninitialized: Vec<usize>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
     active_permits: usize, 
-    max_permits: usize, 
     active_downloads: usize, // tracks how many permits we are using to download files
     active_metadata_requests: usize, // tracks how many permits we are using to gather metadata
     file_maps: HashMap<usize, Arc<SharedFileMap>>, // Tracks file maps to get memory mapped files
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
+    permits_needed: Arc<AtomicUsize>,
 }
 
 impl SupervisorState {
     fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
+        let files = download.files.iter().filter(|(_, file)| match file {
+            DownloadType::File(_) => true,
+            DownloadType::Folder(_) => false,
+        }).count();
+
         Self { 
             client,
             download,
@@ -54,12 +62,12 @@ impl SupervisorState {
             retry_uninitialized: Vec::new(),
             host_sender,
             active_permits: 0,
-            max_permits: 4,
             active_downloads: 0,
             active_metadata_requests: 0,
             file_maps: HashMap::new(),
             ui_sender,
             db_manager,
+            permits_needed: Arc::new(files.into()),
         }
     }
 
@@ -193,7 +201,7 @@ pub struct DownloadSupervisor {
     state: Option<SupervisorState>,
     sender: Option<UnboundedSender<SupervisorMessage>>,
     shutdown_receiver: Option<oneshot::Receiver<SupervisorState>>,
-    saturated: bool,
+    saturated: Arc<AtomicBool>,
 }
 
 impl DownloadSupervisor {
@@ -204,7 +212,7 @@ impl DownloadSupervisor {
             state: Some(SupervisorState::new(client, download, host_sender, ui_sender, db_manager)),
             sender: None,
             shutdown_receiver: None,
-            saturated: false,
+            saturated: Arc::new(false.into()),
         }
     }
 
@@ -214,6 +222,7 @@ impl DownloadSupervisor {
 
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         self.shutdown_receiver = Some(shutdown_receiver);
+        let saturated = self.saturated.clone();
 
         tokio::spawn(async move {
             let mut state = if let Some(state) = state.take() {
@@ -236,13 +245,6 @@ impl DownloadSupervisor {
                             match message {
                                 SupervisorMessage::SpawnWorker(permit) => {
                                     println!("spawning worker for download: {}", state.download.name());
-                                    // If we are already at max permits, don't take the permit 
-                                    if state.active_permits >= state.max_permits {
-                                        HostMessage::SupervisorSaturated(state.download.id());
-                                        drop(permit);
-                                        continue;
-                                    }
-
                                     state.active_permits += 1;
 
                                     let sender = sender.clone();
@@ -259,7 +261,7 @@ impl DownloadSupervisor {
                                             state.active_permits -= 1;
 
                                             // We tell the host manager that we are saturated so it doesn't try to send more permits
-                                            HostMessage::SupervisorSaturated(state.download.id());
+                                            saturated.store(true, Ordering::Relaxed);
                         
                                             // We drop the permit so it gets sent back to the host manager
                                             drop(permit);
@@ -455,6 +457,7 @@ impl DownloadSupervisor {
                                             
                                             // todo, make this a global or store it somewhere
                                             let chunk_size = 16384; // 16 KB
+                                            let range_size = 5242880 / 16384; // 5 MB
 
                                             // Initialize chunks
                                             if size > 0 {
@@ -507,12 +510,12 @@ impl DownloadSupervisor {
         let _ = self.sender.as_ref().unwrap().send(SupervisorMessage::SpawnWorker(permit));
     }
 
-    pub const fn is_saturated(&self) -> bool {
-        self.saturated
+    pub fn is_saturated(&self) -> bool {
+        self.saturated.load(Ordering::Acquire).into()
     }
 
     pub fn set_saturated(&mut self, saturated: bool) {
-        self.saturated = saturated
+        self.saturated.store(saturated, Ordering::Relaxed); 
     }
 }
 
