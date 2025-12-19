@@ -339,8 +339,10 @@ impl PluginRegistry {
                         candidates.insert(*id);
                     }
 
-                    if let Ok(host) = Host::parse(&url) {
-                        if let Some(ids) = self.host_cache.get(&host) {
+                    println!("host name: {:#?}", Url::parse(&url).unwrap().host());
+
+                    if let Some(host) = Url::parse(&url).unwrap().host() {
+                        if let Some(ids) = self.host_cache.get(&host.to_owned()) {
                             for id in ids {
                                 candidates.insert(*id);
                             }
@@ -474,6 +476,8 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
         let name = path.file_name().to_str().unwrap().to_string();
         let path = path.path();
 
+        println!("found {} {}", name, path.extension().unwrap().to_str().unwrap());
+
         // Skip non-js paths
         if path.extension().map_or(false, |extension| extension != "js") {
             continue;
@@ -514,7 +518,8 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
                 } else {
                     supports.push((to_regex(&to_url(&string).unwrap()), string.len()));
 
-                    if let Ok(host) = Host::parse(&string) {
+                    if let Some(host) = to_url(&string).unwrap().host() {
+                        let host = host.to_owned();
                         if let Some(vec) = host_map.get_mut(&host) {
                             vec.push(PluginId(id));
                         } else {
