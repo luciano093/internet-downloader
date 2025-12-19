@@ -2,12 +2,13 @@ use std::collections::HashMap;
 
 use reqwest::Client;
 use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, task::JoinHandle};
+use url::{Host, Url};
 
-use crate::{client_state_manager::UiStateEvent, download::{Download, DownloadId, hosts::{Host, parse_host}}, host_manager::HostHandle, state_manager::StateManager};
+use crate::{client_state_manager::UiStateEvent, download::{Download, DownloadId}, host_manager::HostHandle, plugin_registry::PluginRegistryHandler, state_manager::StateManager};
 
 pub enum NetworkMessage {
     QueueDownload(String, DownloadId),
-    HandleDownload(Download)
+    // HandleDownload(Download)
 }
 
 /// Handles network related concerns such as connections, downloads, and rate limiting.
@@ -18,10 +19,11 @@ struct NetworkManager {
     client: Client,
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
+    plugin_registry: PluginRegistryHandler,
 }
 
 impl NetworkManager {
-    pub fn new(sender: UnboundedSender<NetworkMessage>, receiver: UnboundedReceiver<NetworkMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
+    pub fn new(sender: UnboundedSender<NetworkMessage>, receiver: UnboundedReceiver<NetworkMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager, plugin_registry: PluginRegistryHandler) -> Self {
         Self {
             sender,
             receiver,
@@ -29,6 +31,7 @@ impl NetworkManager {
             client: Client::new(),
             ui_sender,
             db_manager,
+            plugin_registry,
         }
     }
 
@@ -36,35 +39,49 @@ impl NetworkManager {
         while let Some(message) = self.receiver.recv().await {
             match message {
                 NetworkMessage::QueueDownload(url, id) => {
-                    println!("queueing download in network maanger");
-                    self.process_download(url, *id);
-                },
-                NetworkMessage::HandleDownload(download) => {
-                    let host_handle = if self.host_handle_map.contains_key(&download.host()) {
-                        self.host_handle_map.get(&download.host()).unwrap()
+                    println!("queueing download in network manager");
+
+                    let url2 = Url::parse(&url).expect("Invalid URL");
+                    let host = url2.host().unwrap().to_owned();
+
+                    let host_handle = if self.host_handle_map.contains_key(&host) {
+                        self.host_handle_map.get(&host).unwrap()
                     } else {
-                        self.host_handle_map.insert(download.host(), HostHandle::spawn(self.client.clone(), download.host(), self.ui_sender.clone(), self.db_manager.clone()).0);
-                        self.host_handle_map.get(&download.host()).unwrap()
+                        self.host_handle_map.insert(host.clone(), HostHandle::spawn(self.client.clone(), host.clone(), self.ui_sender.clone(), self.db_manager.clone(), self.plugin_registry.clone()).0);
+                        self.host_handle_map.get(&host).unwrap()
                     };
                     
                     println!("sending to host manager");
-                    host_handle.queue_download(download);
+                    host_handle.process_download(url, id);
                 },
+                // NetworkMessage::HandleDownload(download) => {
+                //     // Url::
+
+                //     // let host_handle = if self.host_handle_map.contains_key(&download.host()) {
+                //     //     self.host_handle_map.get(&download.host()).unwrap()
+                //     // } else {
+                //     //     self.host_handle_map.insert(download.host(), HostHandle::spawn(self.client.clone(), download.host(), self.ui_sender.clone(), self.db_manager.clone()).0);
+                //     //     self.host_handle_map.get(&download.host()).unwrap()
+                //     // };
+                    
+                //     println!("sending to host manager");
+                //     host_handle.queue_download(download);
+                // },
             }
         }   
     }
 
-    pub fn process_download(&self, url: String, id: usize) -> JoinHandle<()> {
-        let sender = self.sender.clone();
+    // pub fn process_download(&self, url: String, id: usize) -> JoinHandle<()> {
+    //     let sender = self.sender.clone();
 
-        tokio::spawn(async move {
-            let host = parse_host(&url).unwrap();
-            let download_task = host.extract_download_info(&url).await;
-            let download = Download::new(id, download_task);
+    //     tokio::spawn(async move {
+    //         let host = parse_host(&url).unwrap();
+    //         let download_task = host.extract_download_info(&url).await;
+    //         let download = Download::new(id, download_task);
 
-            let _ = sender.send(NetworkMessage::HandleDownload(download));
-        })
-    }
+    //         let _ = sender.send(NetworkMessage::HandleDownload(download));
+    //     })
+    // }
 }
 
 #[derive(Clone, Debug)]
@@ -73,10 +90,12 @@ pub struct NetworkHandle {
 }
 
 impl NetworkHandle {
-    pub fn spawn(ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> (Self, JoinHandle<()>) {
+    pub async fn spawn(ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> (Self, JoinHandle<()>) {
         let (network_sender, network_receiver) = unbounded_channel();
 
-        let network_manager = NetworkManager::new(network_sender.clone(), network_receiver, ui_sender, db_manager);
+        let plugin_registry = PluginRegistryHandler::spawn().await;
+
+        let network_manager = NetworkManager::new(network_sender.clone(), network_receiver, ui_sender, db_manager, plugin_registry);
 
         let join_handle = tokio::spawn(async move {
             network_manager.run().await;

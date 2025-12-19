@@ -22,7 +22,7 @@ use tokio::task::JoinSet;
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
-use crate::download::hosts::{Host, HostParseError};
+use crate::download::hosts::{DownloadTask, FileTask, FolderTask, Host, HostParseError, TaskType};
 use crate::network_manager::NetworkHandle;
 use crate::state_manager::StateManager;
 
@@ -265,7 +265,7 @@ impl DownloadManager {
 
         let mut queue: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
 
-        let (network_manager, _) = NetworkHandle::spawn(ui_event_sender.clone(), db_manager.clone());
+        let (network_manager, _) = NetworkHandle::spawn(ui_event_sender.clone(), db_manager.clone()).await;
 
         // Download registry for deduplication purposes
         let mut url_registry: HashMap<String, DownloadId> = HashMap::new();
@@ -689,64 +689,6 @@ async fn hash_file(path: &Path) -> u128 {
     hasher.digest128()
 }
 
-#[derive(Debug)]
-pub struct DownloadTask {
-    url: String,
-    task_type: TaskType,
-    host: Host,
-}
-
-impl DownloadTask {
-    pub fn new(url: String, task_type: TaskType, host: Host) -> Self {
-        Self {
-            url,
-            task_type,
-            host
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum TaskType {
-    File(FileTask),
-    Folder(FolderTask),
-}
-
-#[derive(Debug)]
-pub struct FileTask {
-    url: String,
-    file_name: String,
-}
-
-impl FileTask {
-    pub fn new(url: impl Into<String>, file_name: String) -> Self {
-        Self { 
-            url: url.into(),
-            file_name,
-        }
-    }
-
-    pub const fn file_name(&self) -> &String {
-        &self.file_name
-    }
-}
-
-#[derive(Debug)]
-pub struct FolderTask {
-    folder_name: String,
-    files: Vec<TaskType>
-}
-
-impl FolderTask {
-    pub fn new(folder_name: String, files: Vec<TaskType>) -> Self {
-        Self { folder_name, files }
-    }
-
-    pub const fn folder_name(&self) -> &String {
-        &self.folder_name
-    }
-}
-
 #[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DownloadStatus {
     Queued,
@@ -835,11 +777,11 @@ impl Download {
 
         match value.task_type {
             TaskType::File(file_task) => {
-                name = file_task.file_name.clone();
+                name = file_task.file_name().clone();
                 files.insert(current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, current_id, None)));
             },
             TaskType::Folder(folder_task) => {
-                name = folder_task.folder_name.clone();
+                name = folder_task.folder_name().clone();
                 Self::process_folder_creation(&folder_task, &mut relative_path, &mut current_id, &mut files, None);
             },
         }
@@ -848,7 +790,7 @@ impl Download {
             id: DownloadId(id),
             url: value.url,
             relative_path: PathBuf::from("./"),
-            host: value.host,
+            host: Host::example_host,
             status: DownloadStatus::Queued,
             files: files,
             name,

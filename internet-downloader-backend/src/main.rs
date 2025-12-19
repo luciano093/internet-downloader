@@ -7,6 +7,7 @@ use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
+use internet_downloader_backend::download::hosts::JsPlugin;
 use internet_downloader_backend::{download::DownloadManagerError, state_manager::StateManager};
 use internet_downloader_backend::download::{DownloadId, DownloadManager};
 
@@ -22,6 +23,9 @@ use tower_http::cors::{self, Any, CorsLayer};
 
 #[tokio::main]
 async fn main() {
+    // let plugin = JsPlugin::new("./plugins/test.js").await;
+    // plugin.parse("./plugins/test.js");
+
     let db_file= File::open("mydb.sqlite3").await;
     if db_file.is_err() {
         File::create_new("mydb.sqlite3").await.unwrap();
