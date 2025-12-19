@@ -539,11 +539,11 @@ async fn handle_download_update(download: &mut Download, update: InternalFileUpd
                 file.chunks.resize(chunk_size, false);
             }
 
-            if let FileSize::Known(size) = &mut file.size && *size != len as u64 {
-                *size = len as u64;
-            } else {
-                file.size = FileSize::Known(len as u64);
-            }
+            // if let FileSize::Known(size) = &mut file.size && *size != len as u64 {
+            //     *size = len as u64;
+            // } else {
+            //     file.size = FileSize::Known(len as u64);
+            // }
         }
     };
 }
@@ -943,7 +943,7 @@ pub struct FileDownload {
     #[serde(serialize_with = "serialize_chunks")]
     #[bincode(with_serde)]
     chunks: BitVec,
-    size: FileSize,
+    size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     bytes_downloaded: u64,
 }
 
@@ -1026,7 +1026,7 @@ impl FileDownload {
             status: DownloadStatus::Queued,
             hash: None,
             chunks: BitVec::new(),
-            size: FileSize::Unknown,
+            size: None,
             bytes_downloaded: 0,
         }
     }
@@ -1047,12 +1047,12 @@ impl FileDownload {
         &self.url
     }
 
-    pub fn size(&self) -> FileSize {
+    pub fn size(&self) -> Option<FileSize> {
         self.size
     }
 
     pub fn set_size(&mut self, size: FileSize) {
-        self.size = size;
+        self.size = Some(size);
     }
 
     pub fn bytes_downloaded(&self) -> u64 {

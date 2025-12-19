@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode, header};
 use tokio::fs::create_dir_all;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -15,16 +17,25 @@ use crate::host_manager::{ActiveDownloadPermit, HostMessage};
 use crate::shared_file_map::SharedFileMap;
 use crate::state_manager::StateManager;
 
+pub enum SizeResult {
+    Known(u64),
+    Stream,
+    Retryable(u16),
+    PermanentFail,
+}
+
 pub enum SupervisorMessage {
     SpawnWorker(ActiveDownloadPermit),
     WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), bool), // permit, id, range, success (false if failed)
-    MetadataFetched(ActiveDownloadPermit, usize, Option<u64>), 
+    StreamFinished(ActiveDownloadPermit, usize, Result<usize, ()>), // permit, id, result containing size
+    MetadataFetched(ActiveDownloadPermit, usize, SizeResult), 
 }
 
 #[derive(Debug)]
 pub enum Job {
     GetSize(usize),
     DownloadChunk(usize, (usize, usize)),
+    DownloadStream(usize), // file id
 }
 
 // TODO: try to see if i can implement a get_next_chunk()
@@ -34,8 +45,10 @@ struct SupervisorState {
     download: Download,
     chunk_cursors: HashMap<usize, usize>, // used to keep track of last tracked chunk in a file to avoid looping through all the chunks every time
     uninitialized_cursor: usize, // track the last known initialized file
+    streams_cursor: usize, // track the last known stream-only file
     retry_ranges: HashMap<usize, Vec<(usize, usize)>>, // ranges that failed but are still buffered
     retry_uninitialized: Vec<usize>, // tracks the files that failed to get metadata
+    retry_streams: Vec<usize>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
     active_permits: usize, 
     active_downloads: usize, // tracks how many permits we are using to download files
@@ -58,8 +71,10 @@ impl SupervisorState {
             download,
             chunk_cursors: HashMap::new(),
             uninitialized_cursor: 0,
+            streams_cursor: 0,
             retry_ranges: HashMap::new(),
             retry_uninitialized: Vec::new(),
+            retry_streams: Vec::new(),
             host_sender,
             active_permits: 0,
             active_downloads: 0,
@@ -77,42 +92,89 @@ impl SupervisorState {
         // Check for files that need sizes
         let next_metadata_id = self.get_next_uninitialized_file();
 
-        // Check for a chunk range that can already be downloaded
         let next_range = self.get_next_range();
 
-        match (next_metadata_id, next_range) {
-            // We have both a file that needs metadata resolution and a file that can already start to be downloaded
-            (Some(next_metadata_id), Some((file_id, range))) => {
-                // TODO: This implementation should probably be changed in the future to optimize for concurrent downloads
+        let next_stream = self.get_next_stream();
 
-                // Prioritize downloads
-                if self.active_downloads == 0 {
-                    self.chunk_cursors.insert(file_id, range.1);
-                    return Some(Job::DownloadChunk(file_id, range));
+        let can_download_files = next_range.is_some() || next_stream.is_some();
+
+        if let Some(next_metadata_id) = next_metadata_id {
+            // if we hold only one permit, prioritize downloading metadata 
+            // likewise if we still have unintialized file, initialize them by getting their metadata
+            if self.active_permits == 1 || !can_download_files {
+                return Some(self.take_metadata_job(next_metadata_id));
+            }
+        }
+
+        // we prefer to file downloads over metadata if less than half of the active permits are being used
+        // this way, we can gather the metadata with the permits left
+        let prefer_downloads = self.active_downloads < (self.active_permits / 2);
+
+        if prefer_downloads {
+            if can_download_files {
+                match self.take_download_job(next_range, next_stream) {
+                    Some(job) => return Some(job),
+                    None => (),
                 }
-
-                if next_metadata_id >= self.uninitialized_cursor {
-                    self.uninitialized_cursor = next_metadata_id + 1;
+            } else if let Some(next_metadata_id) = next_metadata_id {
+                return Some(self.take_metadata_job(next_metadata_id));
+            }
+        } else {
+            if let Some(next_metadata_id) = next_metadata_id {
+                return Some(self.take_metadata_job(next_metadata_id));
+            } else if can_download_files {
+                match self.take_download_job(next_range, next_stream) {
+                    Some(job) => return Some(job),
+                    None => (),
                 }
+            } 
+        }
 
-                Some(Job::GetSize(next_metadata_id))
-            },
-            // We only have files that needs metadta resolution
-            (Some(next_metadata_id), None) => {
-                if next_metadata_id >= self.uninitialized_cursor {
-                    self.uninitialized_cursor = next_metadata_id + 1;
-                }
+        None
+    }
 
-                Some(Job::GetSize(next_metadata_id))
-            },
-            // All metadata is gathered, so we only have files to download
-            (None, Some((file_id, range))) => {
+    /// Gets a metadata job and automatically updates its cursor as needed
+    fn take_metadata_job(&mut self, id: usize) -> Job {
+        if id >= self.uninitialized_cursor {
+            self.uninitialized_cursor = id + 1;
+        }
+        Job::GetSize(id)
+    }
 
+    // Gets a download job and automatically updates the appropriate cursor as needed
+    // Prioritizes range downloads as these can be parallelized
+    fn take_download_job(&mut self, range: Option<(usize, (usize, usize))>, stream: Option<usize>) -> Option<Job> {
+        match (range, stream) {
+            (Some((file_id, range)), _) => {
                 self.chunk_cursors.insert(file_id, range.1);
                 Some(Job::DownloadChunk(file_id, range))
-            },
-            (None, None) => None,
+            }
+            (None, Some(stream_id)) => {
+                self.streams_cursor += 1;
+                Some(Job::DownloadStream(stream_id))
+            }
+            _ => None,
         }
+    }
+
+    fn get_next_stream(&mut self) -> Option<usize> {
+        if let Some(file_id) = self.retry_streams.pop() {
+            return Some(file_id);
+        }
+
+        // leverage the fact that ids are continuous
+        let last_id = *self.download.files().keys().max().unwrap_or(&0);
+
+        let cursor = self.streams_cursor;
+
+        for file_id in cursor..=last_id {
+            if let Some(DownloadType::File(file)) = self.download.files().get(&file_id) 
+                && file.size() == Some(FileSize::Unknown) {
+                    return Some(file_id);
+            }
+        }
+
+        None
     }
 
     fn get_next_uninitialized_file(&mut self) -> Option<usize> {
@@ -132,7 +194,7 @@ impl SupervisorState {
 
         for index in cursor..=last_id {
             if let Some(DownloadType::File(file)) = self.download.files().get(&index) {
-                if file.size() == FileSize::Unknown {
+                if file.size() == None {
                     return Some(index);
                 }
             }
@@ -306,9 +368,9 @@ impl DownloadSupervisor {
                                             let client = state.client.clone();
 
                                             tokio::spawn(async move {  
-                                                let size = fetch_file_size(host, &client, &url).await;
-                                                
-                                                let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, size));
+                                                let size_result = fetch_file_size(host, &client, &url).await;
+
+                                                let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, size_result));
                                             });
                                         },
                                         Job::DownloadChunk(file_id, range) => {
@@ -333,8 +395,15 @@ impl DownloadSupervisor {
                                                 let file = tokio::fs::File::create(&path).await.unwrap();
 
                                                 let size = match file_download.size() {
-                                                    FileSize::Unknown => todo!(),
-                                                    FileSize::Known(size) => size,
+                                                    Some(FileSize::Known(size)) => size,
+                                                    Some(FileSize::Unknown) => {
+                                                        eprintln!("Tried to download file with unknown size by chunks!");
+                                                        continue;
+                                                    }
+                                                    None => {
+                                                        eprintln!("Tried to download file with no size!");
+                                                        continue;
+                                                    },
                                                 };
 
                                                 file.set_len(size).await.unwrap(); 
@@ -344,8 +413,15 @@ impl DownloadSupervisor {
                                                 state.file_maps.get(&file_id).unwrap().clone()
                                             } else {
                                                 let size = match file_download.size() {
-                                                    FileSize::Unknown => todo!(),
-                                                    FileSize::Known(size) => size,
+                                                    Some(FileSize::Known(size)) => size,
+                                                    Some(FileSize::Unknown) => {
+                                                        eprintln!("Tried to download a chunk of a file with unknown size");
+                                                        continue;
+                                                    },
+                                                    None => {
+                                                        eprintln!("Tried to download a chunk of a file with unresolved size");
+                                                        continue;
+                                                    },
                                                 };
 
                                                 state.file_maps.insert(file_id, Arc::new(SharedFileMap::new(&path, size)));
@@ -357,26 +433,96 @@ impl DownloadSupervisor {
                                             let theoretical_end = range.1 as u64 * chunk_size;
 
                                             let total_size = match state.download.files().get(&file_id).unwrap() {
-                                                DownloadType::File(f) => match f.size() {
-                                                    FileSize::Known(s) => s,
-                                                    FileSize::Unknown => 0,
+                                                DownloadType::File(file) => match file.size() {
+                                                    Some(FileSize::Known(size)) => size,
+                                                    Some(FileSize::Unknown) => {
+                                                        eprintln!("Tried to download file with unknown size by chunks!");
+                                                        continue;
+                                                    }
+                                                    None => {
+                                                        eprintln!("Tried to download file with no size!");
+                                                        continue;
+                                                    },
                                                 },
                                                 _ => 0,
                                             };
 
+                                            println!("id: {} total size: {}", file_id, total_size);
+
                                             let actual_end = std::cmp::min(theoretical_end, total_size);
                                             let expected_len = actual_end.saturating_sub(start_byte);
 
+                                            println!("id: {} expected_len {}", file_id, expected_len);
 
                                             tokio::spawn(async move {
                                                 // Do worker stuff
-                                                let success = download_range(client, host, &url, range, file_map, expected_len).await;
+                                                let success = download_range(client, host, &url, range, file_map, expected_len.min(total_size)).await;
 
                                                 let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, success));
                                             });
                                         },
+                                        Job::DownloadStream(file_id) => {
+                                            state.active_downloads += 1;
+                                            let client = state.client.clone();
+
+                                            let file_download = match state.download.files.get(&file_id).unwrap() {
+                                                DownloadType::File(file_download) => {
+                                                    file_download
+                                                },
+                                                DownloadType::Folder(_) => todo!(),
+                                            };
+
+                                            let url = file_download.url().clone();
+                                            let path = file_download.relative_path().clone();
+                                            
+                                            tokio::spawn(async move {
+                                                // Do worker stuff
+                                                let result = download_stream(client, path, &url).await;
+
+                                                let _ = sender.send(SupervisorMessage::StreamFinished(permit, file_id, result));
+                                            });
+                                        }
                                     }
                                 }
+                                SupervisorMessage::StreamFinished(permit, file_id, result) => {
+                                    state.active_downloads -= 1;
+
+                                    if let Ok(size) = result {
+                                        let download_id = state.download.id();
+                                        let chunk_size = 16384;
+
+                                        match state.download.files_mut().get_mut(&file_id).unwrap() {
+                                            DownloadType::File(file) => {
+                                                file.set_size(FileSize::Known(size as u64));
+                                                file.set_bytes_downloaded(size as u64);
+
+                                                if size > 0 {
+                                                    let chunk_count = (size + chunk_size - 1) / chunk_size;
+                                                    file.chunks_mut().resize(chunk_count as usize, true);
+                                                    println!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
+                                                    file.set_status(DownloadStatus::Completed); 
+                                                } else {
+                                                    println!("got 0 bytes: {}", file.name());
+                                                    // 0 Byte file
+                                                    file.set_status(DownloadStatus::Completed);
+                                                }
+
+                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size as u64 } }));
+                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: size as u64 } }));
+                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
+                                            },
+                                            DownloadType::Folder(_) => todo!(),
+                                        }
+                                    } else {
+                                        state.retry_streams.push(file_id);
+                                    }
+
+                                    state.active_permits -= 1;
+
+                                    // try to spawn another worked
+                                    let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+
+                                },
                                 SupervisorMessage::WorkerFinished(permit, file_id, range, success) => {
                                     state.active_downloads -= 1;
 
@@ -388,8 +534,15 @@ impl DownloadSupervisor {
                                         match state.download.files_mut().get_mut(&file_id).unwrap() {
                                             crate::download::DownloadType::File(file_download) => {
                                                 let total_size = match file_download.size() {
-                                                    FileSize::Known(s) => s,
-                                                    FileSize::Unknown => 0, 
+                                                    Some(FileSize::Known(size)) => size,
+                                                    Some(FileSize::Unknown) => {
+                                                        eprintln!("A file with not yet unknown size has had a piece downloaded!");
+                                                        continue;
+                                                    }
+                                                    None => {
+                                                        eprintln!("A file with not yet resolved size has had a piece downloaded!");
+                                                        continue;
+                                                    },
                                                 };
 
                                                 let start_byte = range.0 as u64 * chunk_size;
@@ -444,34 +597,43 @@ impl DownloadSupervisor {
                                     // try to spawn another worked
                                     let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
                                 },
-                                SupervisorMessage::MetadataFetched(permit, file_id, size) => {
-                                    println!("got metadata for: {}", state.download.name());
+                                SupervisorMessage::MetadataFetched(permit, file_id, size_result) => {
+                                    println!("got metadata for: {} {}", state.download.name(), file_id);
                                     state.active_metadata_requests -= 1;
 
-                                    if let Some(size) = size {
-                                        let download_id = state.download.id();
+                                    match size_result {
+                                        SizeResult::Known(size) => {
+                                            let download_id = state.download.id();
 
-                                        if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
-                                            file.set_size(FileSize::Known(size));
-                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size } }));
-                                            
-                                            // todo, make this a global or store it somewhere
-                                            let chunk_size = 16384; // 16 KB
-                                            let range_size = 5242880 / 16384; // 5 MB
+                                            if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
+                                                file.set_size(FileSize::Known(size));
+                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size } }));
+                                                
+                                                // todo, make this a global or store it somewhere
+                                                let chunk_size = 16384; // 16 KB
+                                                let range_size = 5242880 / 16384; // 5 MB
 
-                                            // Initialize chunks
-                                            if size > 0 {
-                                                let chunk_count = (size + chunk_size - 1) / chunk_size;
-                                                file.chunks_mut().resize(chunk_count as usize, false);
-                                                file.set_status(DownloadStatus::InProgress); 
-                                            } else {
-                                                println!("got 0 bytes: {}", file.name());
-                                                // 0 Byte file
-                                                file.set_status(DownloadStatus::Completed);
+                                                // Initialize chunks
+                                                if size > 0 {
+                                                    let chunk_count = (size + chunk_size - 1) / chunk_size;
+                                                    file.chunks_mut().resize(chunk_count as usize, false);
+                                                    file.set_status(DownloadStatus::InProgress); 
+                                                } else {
+                                                    println!("got 0 bytes: {}", file.name());
+                                                    // 0 Byte file
+                                                    file.set_status(DownloadStatus::Completed);
+                                                }
                                             }
-                                        }
-                                    } else {
-                                        state.retry_uninitialized.push(file_id);
+                                        },
+                                        SizeResult::Stream => {
+                                            if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
+                                                file.set_size(FileSize::Unknown);
+                                            }
+                                        },
+                                        SizeResult::Retryable(_) => {
+                                            state.retry_uninitialized.push(file_id);
+                                        },
+                                        SizeResult::PermanentFail => todo!(),
                                     }
 
                                     state.active_permits -= 1; 
@@ -519,7 +681,7 @@ impl DownloadSupervisor {
     }
 }
 
-async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str) -> Option<u64> {
+async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str) -> SizeResult {
     // Try a HEAD request first
     let head_result = client.head(url)
         .headers(host.headers())
@@ -530,7 +692,7 @@ async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str) -> Opt
     if let Ok(response) = head_result {
         if let Some(len) = response.content_length() && response.status().is_success() {
             if len != 0 {
-                return Some(len);
+                return SizeResult::Known(len);
             }
         }
     }
@@ -543,20 +705,34 @@ async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str) -> Opt
         .send()
         .await;
 
-        if let Ok(response) = get_result {
-            if response.status() == StatusCode::PARTIAL_CONTENT {
+    if let Ok(response) = get_result {
+        match response.status() {
+            | StatusCode::PARTIAL_CONTENT => {
                 if let Some(range_header) = response.headers().get(header::CONTENT_RANGE) {
-                    // Helper to parse "bytes 0-0/12345" -> 12345
                     if let Ok(str) = range_header.to_str() {
+                        println!("parse successfuly: {}", str);
                         if let Some(total_size) = parse_content_range(str) {
-                            return Some(total_size);
+                            println!("parsed correctly!");
+                            return SizeResult::Known(total_size);
                         }
                     }
                 }
             }
-        }
+            StatusCode::OK => {
+                if let Some(len) = response.content_length() {
+                    return SizeResult::Known(len)
+                }
 
-    None
+                return SizeResult::Stream;
+            }
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => {
+                return SizeResult::Retryable(response.status().as_u16());
+            }
+            _ => return SizeResult::PermanentFail,
+        }
+    }
+
+    SizeResult::Retryable(0)
 }
 
 fn parse_content_range(range_header: &str) -> Option<u64> {
@@ -608,4 +784,30 @@ async fn download_range(client: Client, host: Host, url: &str, range: (usize, us
     }
 
     success
+}
+
+async fn download_stream(client: Client, path: PathBuf, url: &str) -> Result<usize, ()> {
+    println!("downloading stream: {}", url);
+    let mut response = client.get(url)
+        .send()
+        .await
+        .unwrap();
+
+    if let Some(parent_path) = path.parent() {
+        create_dir_all(parent_path).await.unwrap();
+    }
+
+    let file = tokio::fs::File::create(&path).await.unwrap();
+
+    let mut writer = BufWriter::new(file);
+    let mut size = 0;
+
+    while let Some(chunk) = response.chunk().await.unwrap() {
+        size += chunk.len();
+        writer.write_all(&chunk).await.unwrap();
+    }
+
+    writer.flush().await.unwrap();
+
+    Ok(size)
 }

@@ -334,7 +334,7 @@ impl From<&FileDownload> for FileDiff {
             file_name: Some(file.name().to_string()),
             relative_path: Some(file.relative_path().clone()),
             hash: file.hash(),
-            size: Some(file.size()),
+            size: file.size(),
             bytes_downloaded: Some(file.bytes_downloaded()),
         }
     }

@@ -4,7 +4,7 @@ use reqwest::Client;
 use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, task::JoinHandle};
 use url::{Host, Url};
 
-use crate::{client_state_manager::UiStateEvent, download::{Download, DownloadId}, host_manager::HostHandle, plugin_registry::PluginRegistryHandler, state_manager::StateManager};
+use crate::{client_state_manager::UiStateEvent, download::DownloadId, host_manager::HostHandle, plugin_registry::PluginRegistryHandler, state_manager::StateManager};
 
 pub enum NetworkMessage {
     QueueDownload(String, DownloadId),
@@ -24,11 +24,19 @@ struct NetworkManager {
 
 impl NetworkManager {
     pub fn new(sender: UnboundedSender<NetworkMessage>, receiver: UnboundedReceiver<NetworkMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager, plugin_registry: PluginRegistryHandler) -> Self {
+        let client = reqwest::Client::builder()
+            .no_gzip()     // prevents stripping Content-Length
+            .no_brotli()   // prevents stripping Content-Length
+            .no_deflate()
+            .build()
+            .unwrap();
+
+        
         Self {
             sender,
             receiver,
             host_handle_map: HashMap::new(),
-            client: Client::new(),
+            client,
             ui_sender,
             db_manager,
             plugin_registry,
