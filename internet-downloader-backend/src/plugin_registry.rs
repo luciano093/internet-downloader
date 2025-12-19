@@ -6,7 +6,7 @@ use regex::{Regex, escape};
 use url::{Host, ParseError, Url};
 use tokio_util::sync::CancellationToken;
 
-use crate::download::hosts::{DownloadTask, Utils};
+use crate::download::hosts::{DownloadTask, FileTask, Utils};
 
 struct ParseRequest {
     url: String,
@@ -16,7 +16,7 @@ struct ParseRequest {
     cancel_token: CancellationToken,
 }
 
-pub enum WorkerMessage {
+enum WorkerMessage {
     Parse(ParseRequest),
 }
 
@@ -373,7 +373,7 @@ impl PluginRegistry {
                         println!("sending worker parse");
                         worker.parse(url, plugin_id, bytecode, sender, cancel_token);
                     } else { 
-                        println!("didn't find best plugin");
+                        println!("didn't find plugin");
                         let _ = sender.send(None);
                     }
                 },
@@ -502,34 +502,67 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
             promise.finish::<()>().unwrap();
 
             let plugin: Object = module.get("default").expect("Plugin is missing 'export default { ... }'");
-            let supports_array: Array = plugin.get("supports").expect("Plugin object is missing 'supports' list");
+            let supports_arr: Option<Array> = plugin.get("supports").unwrap();
+            let supports_regex: Option<Array> = plugin.get("supports_regex").unwrap();
+
+            println!("{:#?} and {:#?}", supports_arr, supports_regex);
+
+            if supports_arr.is_none() && supports_regex.is_none() {
+                panic!("Plugin object should have either a 'supports' list or a 'supports_regex' list");
+            }
+
             let priority: i32 = plugin.get("priority").unwrap_or(0);
 
             let mut supports = Vec::new();
             let mut excludes = Vec::new();
 
-            let mut is_complex = false;
+            println!("test");
 
-            for item in supports_array.iter::<String>() {
-                let string = item?;
+            let is_complex = supports_regex.is_some() && !supports_regex.as_ref().unwrap().is_empty();
 
-                if let Some(str) = string.strip_prefix('!') {
-                    excludes.push(to_regex(&to_url(str).unwrap()));
-                } else {
-                    supports.push((to_regex(&to_url(&string).unwrap()), string.len()));
+            println!("test1");
 
-                    if let Some(host) = to_url(&string).unwrap().host() {
-                        let host = host.to_owned();
-                        if let Some(vec) = host_map.get_mut(&host) {
-                            vec.push(PluginId(id));
-                        } else {
-                            host_map.insert(host, vec![PluginId(id)]);
-                        }
+            if let Some(supports_regex) = supports_regex {
+                for item in supports_regex.iter::<String>() {
+                    let string = item?;
+
+                    if let Ok(regex) = Regex::new(&string) {
+                        supports.push((regex, string.len()));
                     } else {
-                        is_complex = true; 
+                        eprintln!("Wrong regex: {}", string);
                     }
                 }
             }
+
+            println!("test2");
+            
+            if let Some(supports_arr) = supports_arr {
+                for item in supports_arr.iter::<String>() {
+                    let string = item?;
+
+                    if let Some(str) = string.strip_prefix('!') {
+                        excludes.push(to_regex(&to_url(str).unwrap()));
+                    } else {
+                        supports.push((to_regex(&to_url(&string).unwrap()), string.len()));
+
+                        println!("checking {}", string);
+                        println!("{}", to_url(&string).unwrap());
+                        println!("{}", to_url(&string).unwrap().authority());
+                        println!("{:#?}", to_url(&string).unwrap().host());
+                        
+                        if let Some(host) = to_url(&string).unwrap().host()  {
+                            let host = host.to_owned();
+                            if let Some(vec) = host_map.get_mut(&host) {
+                                vec.push(PluginId(id));
+                            } else {
+                                host_map.insert(host, vec![PluginId(id)]);
+                            }
+                        }
+                    }
+                }
+            }
+
+            println!("test3");
 
             if is_complex {
                 complex_plugins.push(PluginId(id));
