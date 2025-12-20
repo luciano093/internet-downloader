@@ -36,6 +36,7 @@ pub enum Job {
     GetSize(usize),
     DownloadChunk(usize, (usize, usize)),
     DownloadStream(usize), // file id
+    AwaitingMetadata,
 }
 
 // TODO: try to see if i can implement a get_next_chunk()
@@ -56,6 +57,7 @@ struct SupervisorState {
     file_maps: HashMap<usize, Arc<SharedFileMap>>, // Tracks file maps to get memory mapped files
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
+    idle_permits: Vec<ActiveDownloadPermit>,
     permits_needed: Arc<AtomicUsize>,
 }
 
@@ -82,6 +84,7 @@ impl SupervisorState {
             file_maps: HashMap::new(),
             ui_sender,
             db_manager,
+            idle_permits: Vec::new(),
             permits_needed: Arc::new(files.into()),
         }
     }
@@ -118,7 +121,7 @@ impl SupervisorState {
                 }
             } else if let Some(next_metadata_id) = next_metadata_id {
                 return Some(self.take_metadata_job(next_metadata_id));
-            }
+            } 
         } else {
             if let Some(next_metadata_id) = next_metadata_id {
                 return Some(self.take_metadata_job(next_metadata_id));
@@ -128,6 +131,11 @@ impl SupervisorState {
                     None => (),
                 }
             } 
+        }
+
+        // we found no job, but there are metadata requests active, meaning we have to wait for them to finish
+        if self.active_metadata_requests > 0 {
+            return Some(Job::AwaitingMetadata);
         }
 
         None
@@ -239,17 +247,13 @@ impl SupervisorState {
             if let Some(relative_start) = chunks[cursor..].first_zero() {
                 let start_index = relative_start + cursor;
                 
-                let target_chunk_size = 5242880 / 16384; // 5 MB
+                let target_chunk_size = 5242880 / 16384; // 5 MB / 16 KB
+                let max_end = (start_index + target_chunk_size).min(chunks.len());
 
-                let mut index = 0;
-                for bit in &chunks[start_index..] {
-                    if *bit == true || index >= target_chunk_size {
-                        break;
-                    }
-                    index += 1;
-                }
-
-                let end_index = start_index + index;
+                let end_index = chunks[start_index..max_end]
+                    .first_one()
+                    .map(|idx| idx + start_index)
+                    .unwrap_or(max_end);
 
                 return Some((file_id, (start_index, end_index)));
             }
@@ -306,7 +310,7 @@ impl DownloadSupervisor {
                         Some(message) = receiver.recv() => {
                             match message {
                                 SupervisorMessage::SpawnWorker(permit) => {
-                                    println!("spawning worker for download: {}", state.download.name());
+                                    println!("spawning worker for download: {}, permits: {}, downloads: {}", state.download.name(), state.active_permits, state.active_downloads);
                                     state.active_permits += 1;
 
                                     let sender = sender.clone();
@@ -357,6 +361,9 @@ impl DownloadSupervisor {
                                     };
 
                                     match job {
+                                        Job::AwaitingMetadata => {
+                                            state.idle_permits.push(permit);
+                                        }
                                         Job::GetSize(file_id) => {
                                             println!("getting size for download: {}", state.download.name());
                                             state.active_metadata_requests += 1;
@@ -636,6 +643,11 @@ impl DownloadSupervisor {
                                         SizeResult::PermanentFail => todo!(),
                                     }
 
+                                    while let Some(permit) = state.idle_permits.pop() {
+                                        state.active_permits -= 1; 
+                                        let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+                                    }
+
                                     state.active_permits -= 1; 
                                     let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
                                 },
@@ -653,6 +665,10 @@ impl DownloadSupervisor {
 
             let _ = shutdown_sender.send(state);
         });
+    }
+
+    fn try_spawn_workers(&mut self) {
+
     }
         
     pub fn give_permit(&mut self, permit: ActiveDownloadPermit) {
@@ -711,15 +727,17 @@ async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str) -> Siz
                 if let Some(range_header) = response.headers().get(header::CONTENT_RANGE) {
                     if let Ok(str) = range_header.to_str() {
                         println!("parse successfuly: {}", str);
-                        if let Some(total_size) = parse_content_range(str) {
+                        if let Some(total_size) = parse_content_range(str) && total_size != 0 {
                             println!("parsed correctly!");
                             return SizeResult::Known(total_size);
                         }
+
+                        return SizeResult::Stream; 
                     }
                 }
             }
             StatusCode::OK => {
-                if let Some(len) = response.content_length() {
+                if let Some(len) = response.content_length() && len != 0 {
                     return SizeResult::Known(len)
                 }
 

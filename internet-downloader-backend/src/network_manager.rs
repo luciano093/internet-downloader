@@ -50,7 +50,7 @@ impl NetworkManager {
                     println!("queueing download in network manager");
 
                     let url2 = Url::parse(&url).expect("Invalid URL");
-                    let host = url2.host().unwrap().to_owned();
+                    let host = url2.host().unwrap_or(Host::Domain("unknown")).to_owned();
 
                     let host_handle = if self.host_handle_map.contains_key(&host) {
                         self.host_handle_map.get(&host).unwrap()

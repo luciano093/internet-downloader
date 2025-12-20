@@ -75,11 +75,11 @@ impl HostManager {
                     self.permit_queue.push_back(download.id());
                     self.active_downloads.insert(download.id(), DownloadSupervisor::new(client, download, self.sender.clone(), self.ui_sender.clone(), self.db_manager.clone()));
 
-                    self.distribute_permits();
+                    self.distribute_permits().await;
                 },
                 HostMessage::PermitReleased(owned_semaphore_permit) => {
                     drop(owned_semaphore_permit);
-                    self.distribute_permits();
+                    self.distribute_permits().await;
                 },
                 HostMessage::DownloadFinished(download_id) => {
                     let _ = self.ui_sender.send(UiStateEvent::AddUpdate(crate::download::DownloadUpdate::StatusChanged { id: download_id, status: DownloadStatus::Completed }));
@@ -89,7 +89,7 @@ impl HostManager {
                         self.permit_queue.remove(pos);
                     }
 
-                    self.distribute_permits();
+                    self.distribute_permits().await;
                 },
                 HostMessage::SupervisorSaturated(download_id) => {
                     println!("{} set to saturated", *download_id);
@@ -99,9 +99,10 @@ impl HostManager {
         }
     }
 
-    fn distribute_permits(&mut self) {
+    async fn distribute_permits(&mut self) {
         for download_id in &self.permit_queue {
             while self.connections_budget.available_permits() > 0 {
+                println!("available permis: {}", self.connections_budget.available_permits());
                 let permit = match self.connections_budget.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => break, // no more permits left, so don't keep distributing
@@ -113,11 +114,13 @@ impl HostManager {
                 };
 
                 println!("{} saturated? {}", **download_id, supervisor.is_saturated());
+                tokio::task::yield_now().await; 
 
                 if supervisor.is_saturated() {
                     break;
                 }
 
+                println!("giving permit to supervisor");
                 supervisor.give_permit(ActiveDownloadPermit::new(permit, self.sender.clone()));
             }
         }
