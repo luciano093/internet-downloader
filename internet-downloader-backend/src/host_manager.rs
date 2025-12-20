@@ -53,7 +53,7 @@ impl HostManager {
             sender,
             receiver,
             active_downloads: HashMap::new(),
-            connections_budget: Arc::new(Semaphore::const_new(10)),
+            connections_budget: Arc::new(Semaphore::const_new(16)),
             permit_queue: VecDeque::new(),
             ui_sender,
             db_manager,

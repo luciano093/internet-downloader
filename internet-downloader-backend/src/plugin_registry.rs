@@ -6,7 +6,7 @@ use regex::{Regex, escape};
 use url::{Host, ParseError, Url};
 use tokio_util::sync::CancellationToken;
 
-use crate::download::hosts::{DownloadTask, FileTask, Utils};
+use crate::download::hosts::{DownloadTask, Utils};
 
 struct ParseRequest {
     url: String,
@@ -181,7 +181,7 @@ impl Drop for LoadGuard {
 struct WorkerHandle {
     loaded: HashSet<PluginId>,
     sender: UnboundedSender<WorkerMessage>,
-    runtime: AsyncRuntime,
+    _runtime: AsyncRuntime,
     active_load: Arc<AtomicUsize>, // number of functions the worker is processing
 }
 
@@ -228,7 +228,7 @@ impl WorkerHandle {
         Self {
             loaded: HashSet::new(),
             sender,
-            runtime,
+            _runtime: runtime,
             active_load: Arc::new(0.into()),
         }
     }
@@ -265,21 +265,6 @@ struct RegistryEntry {
 }
 
 impl RegistryEntry {
-    // Returns true only if it matches a supported regex and matches no excludes
-    fn matches(&self, url: &str) -> bool {
-        let supports = self.supports.iter().any(|(regex, _)| regex.is_match(url));
-        if !supports {
-            return false;
-        }
-
-        let excludes = self.excludes.iter().any(|regex| regex.is_match(url));
-        if excludes {
-            return false;
-        }
-
-        true
-    }
-
     fn get_match_metric(&self, url: &str) -> Option<(i32, usize, String)> {
         // excludes any urls are are matched by the excludes regexes
         if self.excludes.iter().any(|regex| regex.is_match(url)) {

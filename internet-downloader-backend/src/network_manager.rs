@@ -62,34 +62,9 @@ impl NetworkManager {
                     println!("sending to host manager");
                     host_handle.process_download(url, id);
                 },
-                // NetworkMessage::HandleDownload(download) => {
-                //     // Url::
-
-                //     // let host_handle = if self.host_handle_map.contains_key(&download.host()) {
-                //     //     self.host_handle_map.get(&download.host()).unwrap()
-                //     // } else {
-                //     //     self.host_handle_map.insert(download.host(), HostHandle::spawn(self.client.clone(), download.host(), self.ui_sender.clone(), self.db_manager.clone()).0);
-                //     //     self.host_handle_map.get(&download.host()).unwrap()
-                //     // };
-                    
-                //     println!("sending to host manager");
-                //     host_handle.queue_download(download);
-                // },
             }
         }   
     }
-
-    // pub fn process_download(&self, url: String, id: usize) -> JoinHandle<()> {
-    //     let sender = self.sender.clone();
-
-    //     tokio::spawn(async move {
-    //         let host = parse_host(&url).unwrap();
-    //         let download_task = host.extract_download_info(&url).await;
-    //         let download = Download::new(id, download_task);
-
-    //         let _ = sender.send(NetworkMessage::HandleDownload(download));
-    //     })
-    // }
 }
 
 #[derive(Clone, Debug)]

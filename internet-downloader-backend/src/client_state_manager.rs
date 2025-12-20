@@ -11,7 +11,6 @@ use tokio::sync::oneshot;
 
 use crate::download::DownloadId;
 use crate::download::FileSize;
-use crate::download::hosts::Host;
 use crate::download::DownloadUpdate;
 use crate::download::FileDownload;
 use crate::download::FolderDownload;
@@ -251,7 +250,6 @@ impl DeltaManager {
 pub struct DownloadDiff {
     url: Option<String>,
     relative_path: Option<PathBuf>,
-    host: Option<Host>,
     status: Option<DownloadStatus>,
     files: HashMap<usize, ItemDiff>,
 }
@@ -264,7 +262,6 @@ impl From<&Download> for DownloadDiff {
 
         DownloadDiff { url: Some(download.url().clone()),
             relative_path: Some(download.relative_path().clone()),
-            host: Some(download.host()),
             status: Some(download.status()),
             files: file_diffs,
         }
@@ -403,7 +400,6 @@ pub fn download_to_json(download: &Download) -> serde_json::Value {
         "name": download.name(),
         "status": download.status(),
         "url": download.url(),
-        "host": download.host(),
         "files": files_json,
     })
 }

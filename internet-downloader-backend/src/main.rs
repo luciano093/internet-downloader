@@ -7,8 +7,7 @@ use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
-use internet_downloader_backend::download::hosts::JsPlugin;
-use internet_downloader_backend::{download::DownloadManagerError, state_manager::StateManager};
+use internet_downloader_backend::state_manager::StateManager;
 use internet_downloader_backend::download::{DownloadId, DownloadManager};
 
 
@@ -18,7 +17,6 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tokio::{fs::File, signal, sync::Mutex};
 use axum::{extract::{Query, State}, routing::post, Router};
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tower_http::cors::{self, Any, CorsLayer};
 
 #[tokio::main]
@@ -83,8 +81,8 @@ async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(
 
     match manager.lock().await.queue_download(params.url).await {
         Ok(_) => StatusCode::OK.into_response(),
-        Err(DownloadManagerError::Parse(err)) => {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        Err(()) => {
+            StatusCode::BAD_REQUEST.into_response()
         },
     }
 }
@@ -112,7 +110,7 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                     match result {
                         Some(Ok(update)) => {
                             let data = serde_json::to_string(&update).unwrap();
-                            println!("sending: {}", data);
+                            // println!("sending: {}", data);
                             yield Ok(Event::default().event("delta").data(data));
                         }
                         Some(Err(err)) => {

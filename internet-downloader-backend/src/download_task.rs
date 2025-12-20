@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode, header};
@@ -11,7 +11,6 @@ use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::client_state_manager::UiStateEvent;
-use crate::download::hosts::Host;
 use crate::download::{Download, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
 use crate::host_manager::{ActiveDownloadPermit, HostMessage};
 use crate::shared_file_map::SharedFileMap;
@@ -58,16 +57,10 @@ struct SupervisorState {
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
     idle_permits: Vec<ActiveDownloadPermit>,
-    permits_needed: Arc<AtomicUsize>,
 }
 
 impl SupervisorState {
     fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
-        let files = download.files.iter().filter(|(_, file)| match file {
-            DownloadType::File(_) => true,
-            DownloadType::Folder(_) => false,
-        }).count();
-
         Self { 
             client,
             download,
@@ -85,7 +78,6 @@ impl SupervisorState {
             ui_sender,
             db_manager,
             idle_permits: Vec::new(),
-            permits_needed: Arc::new(files.into()),
         }
     }
 
@@ -373,11 +365,11 @@ impl DownloadSupervisor {
                                                 DownloadType::File(file_download) => file_download.url().clone(),
                                                 DownloadType::Folder(_) => todo!(),
                                             };
-                                            let host = state.download.host();
+
                                             let client = state.client.clone();
 
                                             tokio::spawn(async move {  
-                                                let size_result = fetch_file_size(host, &client, &url).await;
+                                                let size_result = fetch_file_size(&client, &url).await;
 
                                                 let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, size_result));
                                             });
@@ -391,7 +383,6 @@ impl DownloadSupervisor {
                                             };
 
                                             let client = state.client.clone();
-                                            let host = state.download.host();
                                             let url = file_download.url().clone();
                                             let path = file_download.relative_path().clone();
 
@@ -465,7 +456,7 @@ impl DownloadSupervisor {
 
                                             tokio::spawn(async move {
                                                 // Do worker stuff
-                                                let success = download_range(client, host, &url, range, file_map, expected_len.min(total_size)).await;
+                                                let success = download_range(client, &url, range, file_map, expected_len.min(total_size)).await;
 
                                                 let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, success));
                                             });
@@ -564,9 +555,6 @@ impl DownloadSupervisor {
                                                 let bytes_downloaded = file_download.bytes_downloaded() + bytes_in_range;
                                                 file_download.set_bytes_downloaded(bytes_downloaded);
 
-                                                total_downloaded = bytes_downloaded;
-
-
                                                 let name = file_download.name().to_string();
                                                 let bytes_downloaded = file_download.bytes_downloaded();
 
@@ -590,12 +578,6 @@ impl DownloadSupervisor {
                                         state.retry_ranges.entry(file_id).or_default().push(range);
                                     }
 
-                                    if total_downloaded > 1_000_000_000 { // after 1GB
-                                        println!("Test finished, exiting for profile...");
-                                        //std::process::exit(0);
-                                    }
-
-
                                     // mark the permit as inactive, but still owned
                                     // this has to happen after marking all chunks as finished to avoid a race condition
                                     // otherwise spawn_worker might kill the loop before this finishes
@@ -618,7 +600,6 @@ impl DownloadSupervisor {
                                                 
                                                 // todo, make this a global or store it somewhere
                                                 let chunk_size = 16384; // 16 KB
-                                                let range_size = 5242880 / 16384; // 5 MB
 
                                                 // Initialize chunks
                                                 if size > 0 {
@@ -666,10 +647,6 @@ impl DownloadSupervisor {
             let _ = shutdown_sender.send(state);
         });
     }
-
-    fn try_spawn_workers(&mut self) {
-
-    }
         
     pub fn give_permit(&mut self, permit: ActiveDownloadPermit) {
         if let Some(sender) = &self.sender {
@@ -697,10 +674,9 @@ impl DownloadSupervisor {
     }
 }
 
-async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str) -> SizeResult {
+async fn fetch_file_size(client: &reqwest::Client, url: &str) -> SizeResult {
     // Try a HEAD request first
     let head_result = client.head(url)
-        .headers(host.headers())
         .header("Accept-Encoding", "identity")
         .send()
         .await;
@@ -715,7 +691,6 @@ async fn fetch_file_size(host: Host, client: &reqwest::Client, url: &str) -> Siz
 
     // If HEAD fails or returns no length, do a GET request and abort immediately to avoid downloading body
     let get_result = client.get(url)
-        .headers(host.headers())
         .header("Accept-Encoding", "identity")
         .header("Range", "bytes=0-0")
         .send()
@@ -758,7 +733,7 @@ fn parse_content_range(range_header: &str) -> Option<u64> {
     range_header.rsplit('/').next()?.parse::<u64>().ok()
 }
 
-async fn download_range(client: Client, host: Host, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>, expected_len: u64) -> bool {
+async fn download_range(client: Client, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>, expected_len: u64) -> bool {
     let chunk_size = 16384;
 
     let start_byte = range.0 as u64 * chunk_size;
@@ -767,7 +742,6 @@ async fn download_range(client: Client, host: Host, url: &str, range: (usize, us
     let range_header = format!("bytes={}-{}", start_byte, end_byte);
 
     let request = client.get(url)
-        .headers(host.headers())
         .header("Range", range_header);
 
     let result = async {
