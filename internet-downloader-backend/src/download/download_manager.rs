@@ -20,7 +20,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use tokio::task::JoinSet;
-use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh3::{Xxh3, xxh3_128_with_seed};
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, Host, HostParseError, TaskType};
@@ -681,11 +681,7 @@ async fn hash_file(path: PathBuf) -> u128 {
         
         let mmap = unsafe { MmapOptions::new().map(&file).expect("Failed to mmap file") };
 
-        let mut hasher = Xxh3::with_seed(0);
-        
-        hasher.update(&mmap);
-
-        hasher.digest128()
+        xxh3_128_with_seed(&mmap, 0)
     }).await.expect("Hashing task panicked")
 }
 
