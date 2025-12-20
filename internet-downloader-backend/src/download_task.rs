@@ -290,6 +290,8 @@ impl DownloadSupervisor {
         self.shutdown_receiver = Some(shutdown_receiver);
         let saturated = self.saturated.clone();
 
+        let mut total_downloaded = 0;
+
         tokio::spawn(async move {
             let mut state = if let Some(state) = state.take() {
                 state
@@ -562,25 +564,18 @@ impl DownloadSupervisor {
                                                 let bytes_downloaded = file_download.bytes_downloaded() + bytes_in_range;
                                                 file_download.set_bytes_downloaded(bytes_downloaded);
 
+                                                total_downloaded = bytes_downloaded;
+
 
                                                 let name = file_download.name().to_string();
                                                 let bytes_downloaded = file_download.bytes_downloaded();
 
                                                 let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded } }));
 
-                                                // assume all chunks are done, if a chunk is false, mark this to false too
-                                                let mut all_chunks_done = true; 
 
-                                                // TODO: change this logic to something that doesn't iterate over every single chunk
-                                                for (i, mut chunk) in file_download.chunks_mut().iter_mut().enumerate() {
-                                                    // mark all chunks of the range as finished
-                                                    if i >= range.0 && i < range.1 {
-                                                        *chunk = true;
-                                                    }
-                                                    if !*chunk {
-                                                        all_chunks_done = false;
-                                                    }
-                                                }
+                                                file_download.chunks_mut()[range.0..range.1].fill(true);
+
+                                                let all_chunks_done = file_download.chunks().all();
 
                                                 if all_chunks_done {
                                                     println!("file {} finished! got {} bytes", name, bytes_downloaded);
@@ -593,6 +588,11 @@ impl DownloadSupervisor {
                                         } 
                                     } else {
                                         state.retry_ranges.entry(file_id).or_default().push(range);
+                                    }
+
+                                    if total_downloaded > 1_000_000_000 { // after 1GB
+                                        println!("Test finished, exiting for profile...");
+                                        //std::process::exit(0);
                                     }
 
 
