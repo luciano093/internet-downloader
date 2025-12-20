@@ -11,6 +11,7 @@ use bincode::{Decode, Encode};
 use bitvec::vec::BitVec;
 use futures_util::{StreamExt, stream};
 use indexmap::IndexMap;
+use memmap2::MmapOptions;
 use reqwest::header;
 use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
@@ -216,7 +217,7 @@ impl DownloadManager {
 
                 if let DownloadType::File(file_download) = download_type {
                     if file_download.status() == DownloadStatus::Completed {
-                        let hash = hash_file(file_download.relative_path()).await;
+                        let hash = hash_file(file_download.relative_path().to_path_buf()).await;
 
                         if Some(hash) != file_download.hash {
                             file_download.status = DownloadStatus::Failed(DownloadFailureReason::HashMismatch);
@@ -508,7 +509,7 @@ async fn handle_download_update(download: &mut Download, update: InternalFileUpd
             file.set_status(status);
 
             if file.status() == DownloadStatus::Completed {
-                let hash = hash_file(file.relative_path()).await;
+                let hash = hash_file(file.relative_path().to_path_buf()).await;
                 file.hash = Some(hash);
 
                 if let Some(parent_id) = file.parent_id() {
@@ -674,19 +675,18 @@ async fn download_file(id: usize, url: &str, path: &Path, host: Host, client: &r
     DownloadReturnStatus::Completed
 }
 
-async fn hash_file(path: &Path) -> u128 {
-    let mut file = File::open(path).await.unwrap();
-    let mut hasher = Xxh3::with_seed(0);
-    let mut buffer = vec![0u8; 8192]; // 8KB chunks
+async fn hash_file(path: PathBuf) -> u128 {
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path).expect("Failed to open file for hashing");
+        
+        let mmap = unsafe { MmapOptions::new().map(&file).expect("Failed to mmap file") };
 
-    loop {
-        let bytes_read = file.read(&mut buffer).await.unwrap();
-        if bytes_read == 0 { break; }
+        let mut hasher = Xxh3::with_seed(0);
+        
+        hasher.update(&mmap);
 
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    hasher.digest128()
+        hasher.digest128()
+    }).await.expect("Hashing task panicked")
 }
 
 #[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
