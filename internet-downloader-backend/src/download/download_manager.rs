@@ -302,7 +302,8 @@ pub struct Download {
     url: String,
     relative_path: PathBuf,
     status: DownloadStatus,
-    pub(crate) files: HashMap<usize, DownloadType>,
+    #[bincode(with_serde)]
+    pub(crate) files: IndexMap<usize, DownloadType>,
     name: String,
 }
 
@@ -323,11 +324,11 @@ impl Download {
         self.id
     }
 
-    pub const fn files(&self) -> &HashMap<usize, DownloadType> {
+    pub const fn files(&self) -> &IndexMap<usize, DownloadType> {
         &self.files
     }
 
-    pub const fn files_mut(&mut self) -> &mut HashMap<usize, DownloadType> {
+    pub const fn files_mut(&mut self) -> &mut IndexMap<usize, DownloadType> {
         &mut self.files
     }
 
@@ -356,7 +357,7 @@ impl Download {
     pub fn new(id: usize, value: DownloadTask) -> Self {
         let mut relative_path = PathBuf::new();
 
-        let mut files = HashMap::new();
+        let mut files = IndexMap::new();
         let mut current_id = 0;
         let name;
 
@@ -381,7 +382,7 @@ impl Download {
         }
     }
 
-    fn process_folder_creation(folder_task: &FolderTask, parent_relative_path: &Path, current_id: &mut usize, files: &mut HashMap<usize, DownloadType>, parent_id: Option<usize>) {
+    fn process_folder_creation(folder_task: &FolderTask, parent_relative_path: &Path, current_id: &mut usize, files: &mut IndexMap<usize, DownloadType>, parent_id: Option<usize>) {
         let mut children = Vec::new();
         let mut relative_path = parent_relative_path.join(&folder_task.folder_name());
 

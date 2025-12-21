@@ -204,16 +204,12 @@ impl SupervisorState {
     }
 
     fn get_next_range(&mut self) -> Option<(usize, (usize, usize))> {
-        // leverage the fact that ids are continuous
-        let last_id = *self.download.files().keys().max().unwrap_or(&0);
-
-        for file_id in 0..=last_id {
-            // skip files that are already completed 
-            if let Some(crate::download::DownloadType::File(f)) = self.download.files().get(&file_id) {
-                if f.status() == DownloadStatus::Completed {
-                    continue;
-                }
-            }
+        for (&file_id, download_type) in self.download.files().iter() {
+            // skip files that are already completed and folders
+            let file_download = match download_type {
+            crate::download::DownloadType::File(file) if file.status() != DownloadStatus::Completed => file,
+            _ => continue, // we skip folders
+        };
 
             // Check for retries first on this file
             if let Some(retry_range) = self.retry_ranges.get_mut(&file_id) {
@@ -225,11 +221,8 @@ impl SupervisorState {
             // get cursor for this particular file
             let cursor = *self.chunk_cursors.entry(file_id).or_insert(0);
 
-            let chunks = match self.download.files().get(&file_id).unwrap() {
-                crate::download::DownloadType::File(file_download) => file_download.chunks(),
-                crate::download::DownloadType::Folder(_) => continue,
-            };
-
+            let chunks = file_download.chunks();
+            
             // This means that the metadata is still not fetched, so we can skip it
             if chunks.is_empty() {
                 continue;
