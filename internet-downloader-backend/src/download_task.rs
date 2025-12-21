@@ -27,12 +27,12 @@ pub enum SupervisorMessage {
     SpawnWorker(ActiveDownloadPermit),
     WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), bool), // permit, id, range, success (false if failed)
     StreamFinished(ActiveDownloadPermit, usize, Result<usize, ()>), // permit, id, result containing size
-    MetadataFetched(ActiveDownloadPermit, usize, SizeResult), 
+    MetadataFetched(ActiveDownloadPermit, usize, String, SizeResult), 
 }
 
 #[derive(Debug)]
 pub enum Job {
-    GetSize(usize),
+    GetSize { file_id: usize, url: String },
     DownloadChunk(usize, (usize, usize)),
     DownloadStream(usize), // file id
     AwaitingMetadata,
@@ -47,7 +47,7 @@ struct SupervisorState {
     uninitialized_cursor: usize, // track the last known initialized file
     streams_cursor: usize, // track the last known stream-only file
     retry_ranges: HashMap<usize, Vec<(usize, usize)>>, // ranges that failed but are still buffered
-    retry_uninitialized: Vec<usize>, // tracks the files that failed to get metadata
+    retry_uninitialized: Vec<(usize, String)>, // tracks the files that failed to get metadata
     retry_streams: Vec<usize>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
     active_permits: usize, 
@@ -93,11 +93,11 @@ impl SupervisorState {
 
         let can_download_files = next_range.is_some() || next_stream.is_some();
 
-        if let Some(next_metadata_id) = next_metadata_id {
+        if let Some((next_metadata_id, ref url)) = next_metadata_id {
             // if we hold only one permit, prioritize downloading metadata 
             // likewise if we still have unintialized file, initialize them by getting their metadata
             if self.active_permits == 1 || !can_download_files {
-                return Some(self.take_metadata_job(next_metadata_id));
+                return Some(self.take_metadata_job(next_metadata_id, url.clone()));
             }
         }
 
@@ -111,12 +111,12 @@ impl SupervisorState {
                     Some(job) => return Some(job),
                     None => (),
                 }
-            } else if let Some(next_metadata_id) = next_metadata_id {
-                return Some(self.take_metadata_job(next_metadata_id));
+            } else if let Some((next_metadata_id, url)) = next_metadata_id {
+                return Some(self.take_metadata_job(next_metadata_id, url));
             } 
         } else {
-            if let Some(next_metadata_id) = next_metadata_id {
-                return Some(self.take_metadata_job(next_metadata_id));
+            if let Some((next_metadata_id, url)) = next_metadata_id {
+                return Some(self.take_metadata_job(next_metadata_id, url));
             } else if can_download_files {
                 match self.take_download_job(next_range, next_stream) {
                     Some(job) => return Some(job),
@@ -134,11 +134,11 @@ impl SupervisorState {
     }
 
     /// Gets a metadata job and automatically updates its cursor as needed
-    fn take_metadata_job(&mut self, id: usize) -> Job {
+    fn take_metadata_job(&mut self, id: usize, url: String) -> Job {
         if id >= self.uninitialized_cursor {
             self.uninitialized_cursor = id + 1;
         }
-        Job::GetSize(id)
+        Job::GetSize { file_id: id, url }
     }
 
     // Gets a download job and automatically updates the appropriate cursor as needed
@@ -177,7 +177,7 @@ impl SupervisorState {
         None
     }
 
-    fn get_next_uninitialized_file(&mut self) -> Option<usize> {
+    fn get_next_uninitialized_file(&mut self) -> Option<(usize, String)> {
         if let Some(file_id) = self.retry_uninitialized.pop() {
             return Some(file_id);
         }
@@ -189,13 +189,10 @@ impl SupervisorState {
         // get the cursor of the file, if no cursor exists in the map, then insert one and return 0
         let cursor = self.uninitialized_cursor;
 
-        // leverages the fact that ids are continuous and always start from 0
-        let last_id = *self.download.files().keys().max().unwrap_or(&0);
-
-        for index in cursor..=last_id {
-            if let Some(DownloadType::File(file)) = self.download.files().get(&index) {
+        for (&index, download_type) in self.download.files()[cursor..].iter() {
+            if let DownloadType::File(file) = download_type {
                 if file.size() == None {
-                    return Some(index);
+                    return Some((index, file.url().clone()));
                 }
             }
         }
@@ -207,9 +204,9 @@ impl SupervisorState {
         for (&file_id, download_type) in self.download.files().iter() {
             // skip files that are already completed and folders
             let file_download = match download_type {
-            crate::download::DownloadType::File(file) if file.status() != DownloadStatus::Completed => file,
-            _ => continue, // we skip folders
-        };
+                DownloadType::File(file) if file.status() != DownloadStatus::Completed => file,
+                _ => continue, // we skip folders
+            };
 
             // Check for retries first on this file
             if let Some(retry_range) = self.retry_ranges.get_mut(&file_id) {
@@ -222,7 +219,7 @@ impl SupervisorState {
             let cursor = *self.chunk_cursors.entry(file_id).or_insert(0);
 
             let chunks = file_download.chunks();
-            
+
             // This means that the metadata is still not fetched, so we can skip it
             if chunks.is_empty() {
                 continue;
@@ -351,20 +348,16 @@ impl DownloadSupervisor {
                                         Job::AwaitingMetadata => {
                                             state.idle_permits.push(permit);
                                         }
-                                        Job::GetSize(file_id) => {
+                                        Job::GetSize { file_id, url } => {
                                             println!("getting size for download: {}", state.download.name());
                                             state.active_metadata_requests += 1;
-                                            let url = match state.download.files().get(&file_id).unwrap() {
-                                                DownloadType::File(file_download) => file_download.url().clone(),
-                                                DownloadType::Folder(_) => todo!(),
-                                            };
 
                                             let client = state.client.clone();
 
                                             tokio::spawn(async move {  
                                                 let size_result = fetch_file_size(&client, &url).await;
 
-                                                let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, size_result));
+                                                let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, url, size_result));
                                             });
                                         },
                                         Job::DownloadChunk(file_id, range) => {
@@ -579,7 +572,7 @@ impl DownloadSupervisor {
                                     // try to spawn another worked
                                     let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
                                 },
-                                SupervisorMessage::MetadataFetched(permit, file_id, size_result) => {
+                                SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
                                     println!("got metadata for: {} {}", state.download.name(), file_id);
                                     state.active_metadata_requests -= 1;
 
@@ -612,7 +605,7 @@ impl DownloadSupervisor {
                                             }
                                         },
                                         SizeResult::Retryable(_) => {
-                                            state.retry_uninitialized.push(file_id);
+                                            state.retry_uninitialized.push((file_id, url));
                                         },
                                         SizeResult::PermanentFail => todo!(),
                                     }
