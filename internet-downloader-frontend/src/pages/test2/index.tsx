@@ -23,6 +23,7 @@ export default function Page() {
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const tableContainerRef = useRef<HTMLDivElement>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const rowVirtualizer = useVirtualizer({
     count: downloadIds.length,
@@ -32,9 +33,14 @@ export default function Page() {
   });
 
   const createEventSource = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+    }
+
     // Close existing connection if any
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
+      eventSourceRef.current = null;
     }
 
     const newEventSource = new EventSource("http://localhost:3211/downloads");
@@ -56,6 +62,12 @@ export default function Page() {
 
     newEventSource.onerror = (event) => {
       console.log('Error:', event);
+      newEventSource.close();
+      
+
+      reconnectTimeoutRef.current = setTimeout(() => {
+        createEventSource();
+      }, 500);
     };
 
     newEventSource.onopen = () => {
