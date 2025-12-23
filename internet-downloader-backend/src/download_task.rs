@@ -27,12 +27,12 @@ pub enum SupervisorMessage {
     SpawnWorker(ActiveDownloadPermit),
     WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), bool), // permit, id, range, success (false if failed)
     StreamFinished(ActiveDownloadPermit, usize, Result<usize, ()>), // permit, id, result containing size
-    MetadataFetched(ActiveDownloadPermit, usize, String, SizeResult), 
+    MetadataFetched(ActiveDownloadPermit, usize, Arc<String>, SizeResult), 
 }
 
 #[derive(Debug)]
 pub enum Job {
-    GetSize { file_id: usize, url: String },
+    GetSize { file_id: usize, url: Arc<String> },
     DownloadChunk(usize, (usize, usize)),
     DownloadStream(usize), // file id
     AwaitingMetadata,
@@ -47,7 +47,7 @@ struct SupervisorState {
     uninitialized_cursor: usize, // track the last known initialized file
     streams_cursor: usize, // track the last known stream-only file
     retry_ranges: HashMap<usize, Vec<(usize, usize)>>, // ranges that failed but are still buffered
-    retry_uninitialized: Vec<(usize, String)>, // tracks the files that failed to get metadata
+    retry_uninitialized: Vec<(usize, Arc<String>)>, // tracks the files that failed to get metadata
     retry_streams: Vec<usize>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
     active_permits: usize, 
@@ -134,7 +134,7 @@ impl SupervisorState {
     }
 
     /// Gets a metadata job and automatically updates its cursor as needed
-    fn take_metadata_job(&mut self, id: usize, url: String) -> Job {
+    fn take_metadata_job(&mut self, id: usize, url: Arc<String>) -> Job {
         if id >= self.uninitialized_cursor {
             self.uninitialized_cursor = id + 1;
         }
@@ -177,9 +177,9 @@ impl SupervisorState {
         None
     }
 
-    fn get_next_uninitialized_file(&mut self) -> Option<(usize, String)> {
-        if let Some(file_id) = self.retry_uninitialized.pop() {
-            return Some(file_id);
+    fn get_next_uninitialized_file(&mut self) -> Option<(usize, Arc<String>)> {
+        if let Some(uninitialized) = self.retry_uninitialized.pop() {
+            return Some(uninitialized);
         }
 
         if self.download.files().is_empty() {
@@ -192,7 +192,7 @@ impl SupervisorState {
         for (&index, download_type) in self.download.files()[cursor..].iter() {
             if let DownloadType::File(file) = download_type {
                 if file.size() == None {
-                    return Some((index, file.url().clone()));
+                    return Some((index, file.url()));
                 }
             }
         }
@@ -271,8 +271,6 @@ impl DownloadSupervisor {
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         self.shutdown_receiver = Some(shutdown_receiver);
         let saturated = self.saturated.clone();
-
-        let mut total_downloaded = 0;
 
         tokio::spawn(async move {
             let mut state = if let Some(state) = state.take() {

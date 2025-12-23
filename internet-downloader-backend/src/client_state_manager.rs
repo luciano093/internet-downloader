@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -327,7 +328,7 @@ impl From<&FileDownload> for FileDiff {
     fn from(file: &FileDownload) -> Self {
         FileDiff { 
             status: Some(file.status()),
-            url: Some(file.url().clone()),
+            url: Some(file.url().to_string()),
             file_name: Some(file.name().to_string()),
             relative_path: Some(file.relative_path().clone()),
             hash: file.hash(),

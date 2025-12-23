@@ -5,10 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use bincode::{Decode, Encode};
+use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
 use memmap2::MmapOptions;
+use rkyv::munge::munge;
+use rkyv::rancor::Fallible;
+use rkyv::vec::{ArchivedVec, VecResolver};
+use rkyv::Place;
+use rkyv::with::{ArchiveWith, AsString};
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
@@ -44,7 +49,7 @@ impl FileUpdate {
     }
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Encode, Decode, Ord)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[serde(transparent)]
 pub struct DownloadId(pub usize);
 
@@ -279,7 +284,7 @@ async fn hash_file(path: PathBuf) -> u128 {
     }).await.expect("Hashing task panicked")
 }
 
-#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum DownloadStatus {
     Queued,
     Initializing,
@@ -290,19 +295,20 @@ pub enum DownloadStatus {
     NotFound,
 }
 
-#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[repr(u8)]
 pub enum DownloadFailureReason {
     HashMismatch,
 }
 
 /// Has either a file or folder as the only item in root
-#[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct Download {
     id: DownloadId,
     url: String,
+    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: DownloadStatus,
-    #[bincode(with_serde)]
     pub(crate) files: IndexMap<usize, DownloadType>,
     name: String,
 }
@@ -406,7 +412,7 @@ impl Download {
     }
 }
 
-#[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DownloadType {
     File(FileDownload),
@@ -471,21 +477,75 @@ pub trait DownloadItem {
     fn name(&self) -> &str;
 }
 
-#[derive(Encode, Decode, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct FileDownload {
     parent_id: Option<usize>,
     id: usize,
-    url: String,
+    url: Arc<String>,
     file_name: String,
+    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: DownloadStatus,
     #[serde(serialize_with = "serialize_hash")] 
     hash: Option<u128>,
     #[serde(serialize_with = "serialize_chunks")]
-    #[bincode(with_serde)]
-    chunks: BitVec,
+    #[rkyv(with = AsBitVec)]
+    chunks: BitVec<u8, Msb0>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     bytes_downloaded: u64,
+}
+
+pub struct AsBitVec;
+
+pub struct BitVecResolver {
+    len: u64,
+    inner: VecResolver,
+}
+
+#[derive(rkyv::Portable, bytecheck::CheckBytes)]
+#[repr(C)]
+pub struct ArchivedBitVec {
+    pub data: ArchivedVec<u8>,
+    pub bit_len: rkyv::rend::u64_le,
+}
+
+impl ArchiveWith<BitVec<u8, Msb0>> for AsBitVec {
+    type Archived = ArchivedBitVec;
+    type Resolver = BitVecResolver;
+
+    fn resolve_with(field: &BitVec<u8, Msb0>, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        munge!(let ArchivedBitVec { data, bit_len } = out);
+
+        ArchivedVec::resolve_from_len(field.as_raw_slice().len(), resolver.inner, data);
+
+        bit_len.write(resolver.len.into());
+    }
+}
+
+impl<S: rkyv::ser::Writer + ?Sized + rkyv::rancor::Fallible + rkyv::ser::Allocator> rkyv::with::SerializeWith<BitVec<u8, Msb0>, S> for AsBitVec {
+    fn serialize_with(
+        field: &BitVec<u8, Msb0>,
+        serializer: &mut S,
+    ) -> Result<Self::Resolver, <S as rkyv::rancor::Fallible>::Error> {
+        
+        Ok(BitVecResolver { 
+            len: field.len() as u64,
+            inner: ArchivedVec::serialize_from_slice(field.as_raw_slice(), serializer)?
+        })
+    }
+}
+
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::with::DeserializeWith<ArchivedBitVec, BitVec<u8, Msb0>, D> for AsBitVec 
+    where <D as Fallible>::Error: rkyv::rancor::Source {
+    fn deserialize_with(field: &ArchivedBitVec, deserializer: &mut D)
+        -> Result<BitVec<u8, Msb0>, <D as rkyv::rancor::Fallible>::Error> {
+        let bytes: Vec<u8> = rkyv::Deserialize::deserialize(&field.data, deserializer)?;
+        let mut bitvec = BitVec::<u8, Msb0>::from_vec(bytes);
+        
+        let bit_len: u64 = field.bit_len.into();
+        bitvec.truncate(bit_len as usize);
+        Ok(bitvec)
+    }
 }
 
 fn serialize_hash<S>(hash: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
@@ -502,7 +562,7 @@ where
     }
 }
 
-fn serialize_chunks<S>(chunks: &BitVec, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_chunks<S>(chunks: &BitVec<u8, Msb0>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -561,7 +621,7 @@ impl FileDownload {
         Self { 
             parent_id,
             id,
-            url: file_task.url.to_owned(),
+            url: Arc::new(file_task.url.clone()),
             file_name: file_task.file_name().to_owned(),
             relative_path,
             status: DownloadStatus::Queued,
@@ -572,11 +632,11 @@ impl FileDownload {
         }
     }
 
-    pub const fn chunks(&self) -> &BitVec {
+    pub const fn chunks(&self) -> &BitVec<u8, Msb0> {
         &self.chunks
     }
 
-    pub fn chunks_mut(&mut self) -> &mut BitVec {
+    pub fn chunks_mut(&mut self) -> &mut BitVec<u8, Msb0> {
         &mut self.chunks
     }
 
@@ -584,8 +644,8 @@ impl FileDownload {
         self.hash
     }
 
-    pub const fn url(&self) -> &String {
-        &self.url
+    pub fn url(&self) -> Arc<String> {
+        self.url.clone()
     }
 
     pub fn size(&self) -> Option<FileSize> {
@@ -605,11 +665,12 @@ impl FileDownload {
     }
 }
 
-#[derive(Debug, Encode, Decode, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub struct FolderDownload {
     parent_id: Option<usize>,
     id: usize,
     folder_name: String,
+    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: DownloadStatus,
     children: Vec<usize>,
@@ -660,7 +721,7 @@ impl DownloadItem for FolderDownload {
     }
 }
 
-#[derive(Debug, Encode, Decode, Copy, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 pub enum FileSize {
     Unknown,
     Known(u64)

@@ -49,12 +49,12 @@ impl StateManager {
     }
 
     pub async fn write_download(&self, download: &Download) {
-        let state_blob = bincode::encode_to_vec(download, bincode::config::standard()).unwrap();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(download).unwrap();
 
         sqlx::query("INSERT OR REPLACE INTO download_states (id, url, state_blob) VALUES (?, ?, ?)")
             .bind(*download.id() as i64) // SQLite uses i64
             .bind(download.url())
-            .bind(state_blob)
+            .bind(bytes.as_slice())
             .execute(&self.pool)
             .await
             .unwrap();
@@ -77,10 +77,7 @@ impl StateManager {
         let mut downloads: IndexMap<DownloadId, Download> = IndexMap::new();
 
         for blob in rows {
-            let (download, _): (Download, _) = bincode::decode_from_slice(
-                &blob, 
-                bincode::config::standard()
-            ).unwrap();
+            let download = rkyv::from_bytes::<Download, rkyv::rancor::Error>(&blob).unwrap();
 
             downloads.insert(download.id(), download);
         }
