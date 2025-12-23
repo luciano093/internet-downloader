@@ -25,7 +25,7 @@ pub enum SizeResult {
 
 pub enum SupervisorMessage {
     SpawnWorker(ActiveDownloadPermit),
-    WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, bool), // permit, id, range, url, success (false if failed)
+    WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, bool), // permit, id, range, url, success (false if failed)
     StreamFinished(ActiveDownloadPermit, usize, Arc<String>, PathBuf, Result<usize, ()>), // permit, id, url, result containing size
     MetadataFetched(ActiveDownloadPermit, usize, Arc<String>, SizeResult), 
 }
@@ -33,7 +33,13 @@ pub enum SupervisorMessage {
 #[derive(Debug)]
 pub enum Job {
     GetSize { file_id: usize, url: Arc<String> },
-    DownloadChunk(usize, Arc<String>, (usize, usize)), // file id, url, range
+    DownloadChunk {
+        file_id: usize, 
+        url: Arc<String>,
+        range: (usize, usize),
+        file_map: Arc<SharedFileMap>,
+        expected_len: u64,
+    }, // file id, url, range
     DownloadStream(usize, Arc<String>, PathBuf), // file id, url
     AwaitingMetadata,
 }
@@ -46,7 +52,7 @@ struct SupervisorState {
     chunk_cursors: HashMap<usize, usize>, // used to keep track of last tracked chunk in a file to avoid looping through all the chunks every time
     uninitialized_cursor: usize, // track the last known initialized file
     streams_cursor: usize, // track the last known stream-only file
-    retry_ranges: HashMap<usize, Vec<((usize, usize), Arc<String>)>>, // ranges that failed but are still buffered
+    retry_ranges: HashMap<usize, Vec<((usize, usize), Arc<String>, Arc<SharedFileMap>, u64)>>, // ranges that failed but are still buffered
     retry_uninitialized: Vec<(usize, Arc<String>)>, // tracks the files that failed to get metadata
     retry_streams: Vec<(usize, Arc<String>, PathBuf)>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
@@ -83,20 +89,13 @@ impl SupervisorState {
 
     // Gets the next job the supervisor should perform. It can either be a file download, 
     // or gathering the metadata from a file whose size is still unknown
-    fn get_next_job(&mut self) -> Option<Job> {
+    async fn get_next_job(&mut self) -> Option<Job> {
         // Check for files that need sizes
-        let next_metadata_id = self.get_next_uninitialized_file();
+        let metadata_info = self.get_next_uninitialized_file();
 
-        let next_range = self.get_next_range();
-
-        let next_stream = self.get_next_stream();
-
-        let can_download_files = next_range.is_some() || next_stream.is_some();
-
-        if let Some((next_metadata_id, ref url)) = next_metadata_id {
+        if let Some((next_metadata_id, ref url)) = metadata_info {
             // if we hold only one permit, prioritize downloading metadata 
-            // likewise if we still have unintialized file, initialize them by getting their metadata
-            if self.active_permits == 1 || !can_download_files {
+            if self.active_permits == 1 {
                 return Some(self.take_metadata_job(next_metadata_id, url.clone()));
             }
         }
@@ -106,23 +105,13 @@ impl SupervisorState {
         let prefer_downloads = self.active_downloads < (self.active_permits / 2);
 
         if prefer_downloads {
-            if can_download_files {
-                match self.take_download_job(next_range, next_stream) {
-                    Some(job) => return Some(job),
-                    None => (),
-                }
-            } else if let Some((next_metadata_id, url)) = next_metadata_id {
-                return Some(self.take_metadata_job(next_metadata_id, url));
-            } 
+            if let Some(job) = self.try_take_chunk_job().await { return Some(job); }
+            if let Some(job) = self.try_take_stream_job() { return Some(job); }
+            if let Some((id, url)) = metadata_info { return Some(self.take_metadata_job(id, url)); }
         } else {
-            if let Some((next_metadata_id, url)) = next_metadata_id {
-                return Some(self.take_metadata_job(next_metadata_id, url));
-            } else if can_download_files {
-                match self.take_download_job(next_range, next_stream) {
-                    Some(job) => return Some(job),
-                    None => (),
-                }
-            } 
+            if let Some((id, url)) = metadata_info { return Some(self.take_metadata_job(id, url)); }
+            if let Some(job) = self.try_take_chunk_job().await { return Some(job); }
+            if let Some(job) = self.try_take_stream_job() { return Some(job); }
         }
 
         // we found no job, but there are metadata requests active, meaning we have to wait for them to finish
@@ -133,70 +122,29 @@ impl SupervisorState {
         None
     }
 
-    /// Gets a metadata job and automatically updates its cursor as needed
-    fn take_metadata_job(&mut self, id: usize, url: Arc<String>) -> Job {
-        if id >= self.uninitialized_cursor {
-            self.uninitialized_cursor = id + 1;
-        }
-        Job::GetSize { file_id: id, url }
-    }
-
-    // Gets a download job and automatically updates the appropriate cursor as needed
-    // Prioritizes range downloads as these can be parallelized
-    fn take_download_job(&mut self, range: Option<(usize, Arc<String>, (usize, usize))>, stream: Option<(usize, Arc<String>, PathBuf)>) -> Option<Job> {
-        match (range, stream) {
-            (Some((file_id, url, range)), _) => {
-                self.chunk_cursors.insert(file_id, range.1);
-                Some(Job::DownloadChunk(file_id, url, range))
-            }
-            (None, Some((stream_id, url, path))) => {
-                self.streams_cursor += 1;
-                Some(Job::DownloadStream(stream_id, url, path))
-            }
-            _ => None,
-        }
-    }
-
-    fn get_next_stream(&mut self) -> Option<(usize, Arc<String>, PathBuf)> {
+    /// Tries to get a stream job, if a stream job is found, updates the cursor and returns the job.
+    /// Otherwise, None is returned and the cursor is left unchanged.
+    fn try_take_stream_job(&mut self) -> Option<Job> {
         if let Some((file_id, url, path)) = self.retry_streams.pop() {
-            return Some((file_id, url, path));
+            self.streams_cursor += 1;
+
+            return Some(Job::DownloadStream(file_id, url, path));
         }
         
         let cursor = self.streams_cursor;
 
         for (&file_id, file) in self.download.files()[cursor..].iter() {
             if let DownloadType::File(file) = file && file.size() == Some(FileSize::Unknown) {
-                return Some((file_id, file.url(), file.relative_path().to_owned()));
+                self.streams_cursor += 1;
+
+                return Some(Job::DownloadStream(file_id, file.url(), file.relative_path().to_owned()));
             }
         };
 
         None
     }
 
-    fn get_next_uninitialized_file(&mut self) -> Option<(usize, Arc<String>)> {
-        if let Some(uninitialized) = self.retry_uninitialized.pop() {
-            return Some(uninitialized);
-        }
-
-        if self.download.files().is_empty() {
-            return None;
-        }
-
-        // get the cursor of the file, if no cursor exists in the map, then insert one and return 0
-        let cursor = self.uninitialized_cursor;
-
-        for (&index, download_type) in self.download.files()[cursor..].iter() {
-            if let DownloadType::File(file) = download_type {
-                if file.size() == None {
-                    return Some((index, file.url()));
-                }
-            }
-        }
-        
-        None
-    }
-
-    fn get_next_range(&mut self) -> Option<(usize, Arc<String>, (usize, usize))> {
+    async fn try_take_chunk_job(&mut self) -> Option<Job> {
         for (&file_id, download_type) in self.download.files().iter() {
             // skip files that are already completed and folders
             let file_download = match download_type {
@@ -207,7 +155,9 @@ impl SupervisorState {
             // Check for retries first on this file
             if let Some(retry_range) = self.retry_ranges.get_mut(&file_id) {
                 if !retry_range.is_empty() {
-                    return retry_range.pop().map(|(range, url)| (file_id, url, range));
+                    let (range, url, file_map, expected_len) = retry_range.pop()?;
+                    self.chunk_cursors.insert(file_id, range.1);
+                    return Some(Job::DownloadChunk { file_id, url, range, file_map, expected_len });
                 }
             }
 
@@ -233,11 +183,89 @@ impl SupervisorState {
                     .map(|idx| idx + start_index)
                     .unwrap_or(max_end);
 
-                return Some((file_id, file_download.url(), (start_index, end_index)));
+                self.chunk_cursors.insert(file_id, end_index);
+
+                let range = (start_index, end_index);
+
+                let file_size = match file_download.size()? {
+                    FileSize::Unknown => return None,
+                    FileSize::Known(file_size) => file_size,
+                };
+
+                let expected_len = self.calculate_chunk_expected_len(16384, range, file_size);
+
+                let path = file_download.relative_path();
+
+                if !file_download.relative_path().exists() {
+                    if let Some(parent_path) = path.parent() {
+                        create_dir_all(parent_path).await.unwrap();
+                    }
+
+                    let file = tokio::fs::File::create(&path).await.unwrap();
+
+                    file.set_len(file_size).await.unwrap(); 
+                }
+
+                let file_map = if self.file_maps.contains_key(&file_id) {
+                    self.file_maps.get(&file_id).unwrap().clone()
+                } else {
+                    self.file_maps.insert(file_id, Arc::new(SharedFileMap::new(path, file_size)));
+                    self.file_maps.get(&file_id).unwrap().clone()
+                };
+
+                return Some(Job::DownloadChunk { 
+                    file_id, 
+                    url: file_download.url(), 
+                    range, 
+                    file_map, 
+                    expected_len,
+                })
             }
         }
 
         None
+    }
+
+    /// Gets a metadata job and automatically updates its cursor as needed
+    fn take_metadata_job(&mut self, id: usize, url: Arc<String>) -> Job {
+        if id >= self.uninitialized_cursor {
+            self.uninitialized_cursor = id + 1;
+        }
+        Job::GetSize { file_id: id, url }
+    }
+
+    fn get_next_uninitialized_file(&mut self) -> Option<(usize, Arc<String>)> {
+        if let Some(uninitialized) = self.retry_uninitialized.pop() {
+            return Some(uninitialized);
+        }
+
+        if self.download.files().is_empty() {
+            return None;
+        }
+
+        // get the cursor of the file, if no cursor exists in the map, then insert one and return 0
+        let cursor = self.uninitialized_cursor;
+
+        for (&index, download_type) in self.download.files()[cursor..].iter() {
+            if let DownloadType::File(file) = download_type {
+                if file.size() == None {
+                    return Some((index, file.url()));
+                }
+            }
+        }
+        
+        None
+    }
+
+    fn calculate_chunk_expected_len(&self, chunk_size: u64, range: (usize, usize), file_size: u64) -> u64 {
+        let start_byte = range.0 as u64 * chunk_size;
+        let theoretical_end = range.1 as u64 * chunk_size;
+
+        let actual_end = std::cmp::min(theoretical_end, file_size);
+        let expected_len = actual_end.saturating_sub(start_byte);
+        let expected_len = expected_len.min(file_size);
+
+        expected_len
     }
 }
 
@@ -295,7 +323,7 @@ impl DownloadSupervisor {
 
                                     // no next job means either we are finished or all remaining jobs are already taken
                                     // in any case, we send the permit back to the host
-                                    let job = match state.get_next_job() {
+                                    let job = match state.get_next_job().await {
                                         Some(job) => {
                                             println!("found job {:?} for download: {}", job, state.download.name());
                                             job
@@ -354,90 +382,16 @@ impl DownloadSupervisor {
                                                 let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, url, size_result));
                                             });
                                         },
-                                        Job::DownloadChunk(file_id, url, range) => {
+                                        Job::DownloadChunk { file_id, url, range, file_map, expected_len } => {
                                             state.active_downloads += 1;
 
-                                            let file_download = match state.download.files().get(&file_id).unwrap() {
-                                                DownloadType::File(file_download) => file_download,
-                                                DownloadType::Folder(_) => todo!(),
-                                            };
-
                                             let client = state.client.clone();
-                                            let path = file_download.relative_path().clone();
-
-
-                                            if !file_download.relative_path().exists() {
-                                                if let Some(parent_path) = path.parent() {
-                                                    create_dir_all(parent_path).await.unwrap();
-                                                }
-
-                                                let file = tokio::fs::File::create(&path).await.unwrap();
-
-                                                let size = match file_download.size() {
-                                                    Some(FileSize::Known(size)) => size,
-                                                    Some(FileSize::Unknown) => {
-                                                        eprintln!("Tried to download file with unknown size by chunks!");
-                                                        continue;
-                                                    }
-                                                    None => {
-                                                        eprintln!("Tried to download file with no size!");
-                                                        continue;
-                                                    },
-                                                };
-
-                                                file.set_len(size).await.unwrap(); 
-                                            }
-                                            
-                                            let file_map = if state.file_maps.contains_key(&file_id) {
-                                                state.file_maps.get(&file_id).unwrap().clone()
-                                            } else {
-                                                let size = match file_download.size() {
-                                                    Some(FileSize::Known(size)) => size,
-                                                    Some(FileSize::Unknown) => {
-                                                        eprintln!("Tried to download a chunk of a file with unknown size");
-                                                        continue;
-                                                    },
-                                                    None => {
-                                                        eprintln!("Tried to download a chunk of a file with unresolved size");
-                                                        continue;
-                                                    },
-                                                };
-
-                                                state.file_maps.insert(file_id, Arc::new(SharedFileMap::new(&path, size)));
-                                                state.file_maps.get(&file_id).unwrap().clone()
-                                            };
-
-                                            let chunk_size = 16384u64;
-                                            let start_byte = range.0 as u64 * chunk_size;
-                                            let theoretical_end = range.1 as u64 * chunk_size;
-
-                                            let total_size = match state.download.files().get(&file_id).unwrap() {
-                                                DownloadType::File(file) => match file.size() {
-                                                    Some(FileSize::Known(size)) => size,
-                                                    Some(FileSize::Unknown) => {
-                                                        eprintln!("Tried to download file with unknown size by chunks!");
-                                                        continue;
-                                                    }
-                                                    None => {
-                                                        eprintln!("Tried to download file with no size!");
-                                                        continue;
-                                                    },
-                                                },
-                                                _ => 0,
-                                            };
-
-                                            println!("id: {} total size: {}", file_id, total_size);
-
-                                            let actual_end = std::cmp::min(theoretical_end, total_size);
-                                            let expected_len = actual_end.saturating_sub(start_byte);
-
-                                            println!("id: {} expected_len {}", file_id, expected_len);
-
+          
                                             tokio::spawn(async move {
                                                 // Do worker stuff
-                                                let success = download_range(client, &url, range, file_map, expected_len.min(total_size)).await;
+                                                let success = download_range(client, &url, range, file_map.clone(), expected_len).await;
 
-                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, url, success));
+                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, url, file_map, expected_len, success));
                                             });
                                         },
                                         Job::DownloadStream(file_id, url, path) => {
@@ -492,7 +446,7 @@ impl DownloadSupervisor {
                                     let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
 
                                 },
-                                SupervisorMessage::WorkerFinished(permit, file_id, range, url, success) => {
+                                SupervisorMessage::WorkerFinished(permit, file_id, range, url, file_map, expected_len, success) => {
                                     state.active_downloads -= 1;
 
                                     if success {
@@ -544,7 +498,7 @@ impl DownloadSupervisor {
                                             crate::download::DownloadType::Folder(_) => todo!(),
                                         } 
                                     } else {
-                                        state.retry_ranges.entry(file_id).or_default().push((range, url));
+                                        state.retry_ranges.entry(file_id).or_default().push((range, url, file_map, expected_len));
                                     }
 
                                     // mark the permit as inactive, but still owned

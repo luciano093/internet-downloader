@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use memmap2::MmapMut;
 
+#[derive(Debug)]
 pub struct SharedFileMap {
     _mmap: MmapMut,
     ptr: *mut u8,
