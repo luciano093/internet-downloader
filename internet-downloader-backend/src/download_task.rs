@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -25,16 +25,16 @@ pub enum SizeResult {
 
 pub enum SupervisorMessage {
     SpawnWorker(ActiveDownloadPermit),
-    WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), bool), // permit, id, range, success (false if failed)
-    StreamFinished(ActiveDownloadPermit, usize, Result<usize, ()>), // permit, id, result containing size
+    WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, bool), // permit, id, range, url, success (false if failed)
+    StreamFinished(ActiveDownloadPermit, usize, Arc<String>, PathBuf, Result<usize, ()>), // permit, id, url, result containing size
     MetadataFetched(ActiveDownloadPermit, usize, Arc<String>, SizeResult), 
 }
 
 #[derive(Debug)]
 pub enum Job {
     GetSize { file_id: usize, url: Arc<String> },
-    DownloadChunk(usize, (usize, usize)),
-    DownloadStream(usize), // file id
+    DownloadChunk(usize, Arc<String>, (usize, usize)), // file id, url, range
+    DownloadStream(usize, Arc<String>, PathBuf), // file id, url
     AwaitingMetadata,
 }
 
@@ -46,9 +46,9 @@ struct SupervisorState {
     chunk_cursors: HashMap<usize, usize>, // used to keep track of last tracked chunk in a file to avoid looping through all the chunks every time
     uninitialized_cursor: usize, // track the last known initialized file
     streams_cursor: usize, // track the last known stream-only file
-    retry_ranges: HashMap<usize, Vec<(usize, usize)>>, // ranges that failed but are still buffered
+    retry_ranges: HashMap<usize, Vec<((usize, usize), Arc<String>)>>, // ranges that failed but are still buffered
     retry_uninitialized: Vec<(usize, Arc<String>)>, // tracks the files that failed to get metadata
-    retry_streams: Vec<usize>, // tracks the files that failed to get metadata
+    retry_streams: Vec<(usize, Arc<String>, PathBuf)>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
     active_permits: usize, 
     active_downloads: usize, // tracks how many permits we are using to download files
@@ -143,36 +143,32 @@ impl SupervisorState {
 
     // Gets a download job and automatically updates the appropriate cursor as needed
     // Prioritizes range downloads as these can be parallelized
-    fn take_download_job(&mut self, range: Option<(usize, (usize, usize))>, stream: Option<usize>) -> Option<Job> {
+    fn take_download_job(&mut self, range: Option<(usize, Arc<String>, (usize, usize))>, stream: Option<(usize, Arc<String>, PathBuf)>) -> Option<Job> {
         match (range, stream) {
-            (Some((file_id, range)), _) => {
+            (Some((file_id, url, range)), _) => {
                 self.chunk_cursors.insert(file_id, range.1);
-                Some(Job::DownloadChunk(file_id, range))
+                Some(Job::DownloadChunk(file_id, url, range))
             }
-            (None, Some(stream_id)) => {
+            (None, Some((stream_id, url, path))) => {
                 self.streams_cursor += 1;
-                Some(Job::DownloadStream(stream_id))
+                Some(Job::DownloadStream(stream_id, url, path))
             }
             _ => None,
         }
     }
 
-    fn get_next_stream(&mut self) -> Option<usize> {
-        if let Some(file_id) = self.retry_streams.pop() {
-            return Some(file_id);
+    fn get_next_stream(&mut self) -> Option<(usize, Arc<String>, PathBuf)> {
+        if let Some((file_id, url, path)) = self.retry_streams.pop() {
+            return Some((file_id, url, path));
         }
-
-        // leverage the fact that ids are continuous
-        let last_id = *self.download.files().keys().max().unwrap_or(&0);
-
+        
         let cursor = self.streams_cursor;
 
-        for file_id in cursor..=last_id {
-            if let Some(DownloadType::File(file)) = self.download.files().get(&file_id) 
-                && file.size() == Some(FileSize::Unknown) {
-                    return Some(file_id);
+        for (&file_id, file) in self.download.files()[cursor..].iter() {
+            if let DownloadType::File(file) = file && file.size() == Some(FileSize::Unknown) {
+                return Some((file_id, file.url(), file.relative_path().to_owned()));
             }
-        }
+        };
 
         None
     }
@@ -200,7 +196,7 @@ impl SupervisorState {
         None
     }
 
-    fn get_next_range(&mut self) -> Option<(usize, (usize, usize))> {
+    fn get_next_range(&mut self) -> Option<(usize, Arc<String>, (usize, usize))> {
         for (&file_id, download_type) in self.download.files().iter() {
             // skip files that are already completed and folders
             let file_download = match download_type {
@@ -211,7 +207,7 @@ impl SupervisorState {
             // Check for retries first on this file
             if let Some(retry_range) = self.retry_ranges.get_mut(&file_id) {
                 if !retry_range.is_empty() {
-                    return retry_range.pop().map(|range| (file_id, range));
+                    return retry_range.pop().map(|(range, url)| (file_id, url, range));
                 }
             }
 
@@ -237,7 +233,7 @@ impl SupervisorState {
                     .map(|idx| idx + start_index)
                     .unwrap_or(max_end);
 
-                return Some((file_id, (start_index, end_index)));
+                return Some((file_id, file_download.url(), (start_index, end_index)));
             }
         }
 
@@ -358,7 +354,7 @@ impl DownloadSupervisor {
                                                 let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, url, size_result));
                                             });
                                         },
-                                        Job::DownloadChunk(file_id, range) => {
+                                        Job::DownloadChunk(file_id, url, range) => {
                                             state.active_downloads += 1;
 
                                             let file_download = match state.download.files().get(&file_id).unwrap() {
@@ -367,7 +363,6 @@ impl DownloadSupervisor {
                                             };
 
                                             let client = state.client.clone();
-                                            let url = file_download.url().clone();
                                             let path = file_download.relative_path().clone();
 
 
@@ -442,33 +437,23 @@ impl DownloadSupervisor {
                                                 // Do worker stuff
                                                 let success = download_range(client, &url, range, file_map, expected_len.min(total_size)).await;
 
-                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, success));
+                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, url, success));
                                             });
                                         },
-                                        Job::DownloadStream(file_id) => {
+                                        Job::DownloadStream(file_id, url, path) => {
                                             state.active_downloads += 1;
                                             let client = state.client.clone();
-
-                                            let file_download = match state.download.files.get(&file_id).unwrap() {
-                                                DownloadType::File(file_download) => {
-                                                    file_download
-                                                },
-                                                DownloadType::Folder(_) => todo!(),
-                                            };
-
-                                            let url = file_download.url().clone();
-                                            let path = file_download.relative_path().clone();
                                             
                                             tokio::spawn(async move {
                                                 // Do worker stuff
-                                                let result = download_stream(client, path, &url).await;
+                                                let result = download_stream(client, &path, &url).await;
 
-                                                let _ = sender.send(SupervisorMessage::StreamFinished(permit, file_id, result));
+                                                let _ = sender.send(SupervisorMessage::StreamFinished(permit, file_id, url, path, result));
                                             });
                                         }
                                     }
                                 }
-                                SupervisorMessage::StreamFinished(permit, file_id, result) => {
+                                SupervisorMessage::StreamFinished(permit, file_id, url, path, result) => {
                                     state.active_downloads -= 1;
 
                                     if let Ok(size) = result {
@@ -498,7 +483,7 @@ impl DownloadSupervisor {
                                             DownloadType::Folder(_) => todo!(),
                                         }
                                     } else {
-                                        state.retry_streams.push(file_id);
+                                        state.retry_streams.push((file_id, url, path));
                                     }
 
                                     state.active_permits -= 1;
@@ -507,7 +492,7 @@ impl DownloadSupervisor {
                                     let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
 
                                 },
-                                SupervisorMessage::WorkerFinished(permit, file_id, range, success) => {
+                                SupervisorMessage::WorkerFinished(permit, file_id, range, url, success) => {
                                     state.active_downloads -= 1;
 
                                     if success {
@@ -559,7 +544,7 @@ impl DownloadSupervisor {
                                             crate::download::DownloadType::Folder(_) => todo!(),
                                         } 
                                     } else {
-                                        state.retry_ranges.entry(file_id).or_default().push(range);
+                                        state.retry_ranges.entry(file_id).or_default().push((range, url));
                                     }
 
                                     // mark the permit as inactive, but still owned
@@ -762,7 +747,7 @@ async fn download_range(client: Client, url: &str, range: (usize, usize), file_m
     success
 }
 
-async fn download_stream(client: Client, path: PathBuf, url: &str) -> Result<usize, ()> {
+async fn download_stream(client: Client, path: &Path, url: &str) -> Result<usize, ()> {
     println!("downloading stream: {}", url);
     let mut response = client.get(url)
         .send()
