@@ -33,6 +33,19 @@ pub enum DownloadError {
     ServerError(StatusCode),
     #[error("Client error ({0})")]
     ClientError(StatusCode),
+
+}
+
+#[derive(Debug, Error)]
+pub enum RangeDownloadError {
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+    #[error("Received unexpected status: ({0})")]
+    UnexpectedStatus(StatusCode),
+    #[error("Received download piece with unexpected length: ({0}). Expected ({1})")]
+    UnexpectedLength(u64, u64),
+    #[error("Download does not support range downloads")]
+    RangeNotSupported,
 }
 
 trait FileDownloadRetry {
@@ -123,7 +136,8 @@ pub enum SizeResult {
 pub enum SupervisorMessage {
     ProcessPermit(ActiveDownloadPermit),
     SpawnWorker(ValidDownloadPermit),
-    WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, bool), // permit, id, range, url, success (false if failed)
+    RangeSuccess(ActiveDownloadPermit, usize, (usize, usize)), // permit, id, range
+    RangeFailed(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, RangeDownloadError), // permit, id, range, url
     StreamSuccess(ActiveDownloadPermit, usize, usize), // permit, id, size of file
     StreamFailed(ActiveDownloadPermit, usize, Arc<String>, PathBuf, DownloadError), // permit, id, url, path, error
     MetadataFetched(ActiveDownloadPermit, usize, Arc<String>, SizeResult), 
@@ -133,6 +147,7 @@ pub enum SupervisorMessage {
     RateLimited(ActiveDownloadPermit, Option<u64>, RetryKind), 
     NetworkError(ActiveDownloadPermit, reqwest::Error, RetryKind),
     ServerError(ActiveDownloadPermit, StatusCode, RetryKind),
+    ClientError(ActiveDownloadPermit, StatusCode, RetryKind),
 }
 
 #[derive(Debug)]
@@ -519,9 +534,14 @@ impl DownloadSupervisor {
           
                                             tokio::spawn(async move {
                                                 // Do worker stuff
-                                                let success = download_range(client, &url, range, file_map.clone(), expected_len).await;
-
-                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit.downgrade(), file_id, range, url, file_map, expected_len, success));
+                                                match download_range(client, &url, range, file_map.clone(), expected_len).await {
+                                                    Ok(_) => {
+                                                        let _ = sender.send(SupervisorMessage::RangeSuccess(permit.downgrade(), file_id, range));
+                                                    }
+                                                    Err(download_error) => {
+                                                        let _ = sender.send(SupervisorMessage::RangeFailed(permit.downgrade(), file_id, range, url, file_map, expected_len, download_error));
+                                                    }
+                                                }
                                             });
                                         },
                                         Job::DownloadStream(file_id, url, path) => {
@@ -545,8 +565,6 @@ impl DownloadSupervisor {
                                 SupervisorMessage::StreamFailed(permit, file_id, url, path, result) => {
                                     state.active_downloads -= 1;
 
-                                    let download_id = state.download.id();
-
                                     let retry_kind = RetryKind::StreamDownload(StreamRetry { file_id, url, path });
 
                                     match result {
@@ -563,17 +581,7 @@ impl DownloadSupervisor {
                                             let _ = sender.send(SupervisorMessage::ServerError(permit, status_code, retry_kind));
                                         },
                                         DownloadError::ClientError(status_code) => {
-                                                let file = match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                                DownloadType::File(file) => file,
-                                                DownloadType::Folder(_) => todo!(),
-                                            };
-
-                                            eprintln!("Client error ({}).", status_code);
-                                            file.set_status(DownloadStatus::Failed(DownloadFailureReason::ClientError));
-
-                                            
-                                            let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
-                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                            let _ = sender.send(SupervisorMessage::ClientError(permit, status_code, retry_kind));
                                         },
                                     }
                                 }
@@ -611,71 +619,128 @@ impl DownloadSupervisor {
                                     let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
 
                                 },
-                                SupervisorMessage::WorkerFinished(permit, file_id, range, url, file_map, expected_len, success) => {
+                                SupervisorMessage::RangeSuccess(permit, file_id, range) => {
                                     state.active_downloads -= 1;
 
-                                    if success {
-                                        let download_id = state.download.id();
+                                    let download_id = state.download.id();
 
-                                        let chunk_size = 16384;
-                                        
-                                        match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                            crate::download::DownloadType::File(file_download) => {
-                                                file_download.reset_retries();
+                                    let chunk_size = 16384;
+                                    
+                                    match state.download.files_mut().get_mut(&file_id).unwrap() {
+                                        crate::download::DownloadType::File(file_download) => {
+                                            file_download.reset_retries();
 
-                                                let total_size = match file_download.size() {
-                                                    Some(FileSize::Known(size)) => size,
-                                                    Some(FileSize::Unknown) => {
-                                                        eprintln!("A file with not yet unknown size has had a piece downloaded!");
-                                                        continue;
-                                                    }
-                                                    None => {
-                                                        eprintln!("A file with not yet resolved size has had a piece downloaded!");
-                                                        continue;
-                                                    },
-                                                };
-
-                                                let start_byte = range.0 as u64 * chunk_size;
-                                                let theoretical_end = range.1 as u64 * chunk_size;
-
-                                                let actual_end = std::cmp::min(theoretical_end, total_size);
-                                                let bytes_in_range = actual_end.saturating_sub(start_byte);
-                                        
-
-                                                let bytes_downloaded = file_download.bytes_downloaded() + bytes_in_range;
-                                                file_download.set_bytes_downloaded(bytes_downloaded);
-
-                                                let name = file_download.name().to_string();
-                                                let bytes_downloaded = file_download.bytes_downloaded();
-
-                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded } }));
-
-
-                                                file_download.chunks_mut()[range.0..range.1].fill(true);
-
-                                                let all_chunks_done = file_download.chunks().all();
-
-                                                if all_chunks_done {
-                                                    println!("file {} finished! got {} bytes", name, bytes_downloaded);
-                                                    let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
-                                                    file_download.set_status(DownloadStatus::Completed);
-                                                    state.file_maps.remove(&file_id);
+                                            let total_size = match file_download.size() {
+                                                Some(FileSize::Known(size)) => size,
+                                                Some(FileSize::Unknown) => {
+                                                    eprintln!("A file with not yet unknown size has had a piece downloaded!");
+                                                    continue;
                                                 }
-                                            },
-                                            crate::download::DownloadType::Folder(_) => todo!(),
-                                        } 
-                                    } else {
-                                        println!("retrying download: {}", file_id);
-                                        state.retry_ranges.entry(file_id).or_default().push((range, url, file_map, expected_len));
-                                    }
+                                                None => {
+                                                    eprintln!("A file with not yet resolved size has had a piece downloaded!");
+                                                    continue;
+                                                },
+                                            };
 
-                                    // mark the permit as inactive, but still owned
-                                    // this has to happen after marking all chunks as finished to avoid a race condition
-                                    // otherwise spawn_worker might kill the loop before this finishes
+                                            let start_byte = range.0 as u64 * chunk_size;
+                                            let theoretical_end = range.1 as u64 * chunk_size;
+
+                                            let actual_end = std::cmp::min(theoretical_end, total_size);
+                                            let bytes_in_range = actual_end.saturating_sub(start_byte);
+                                    
+
+                                            let bytes_downloaded = file_download.bytes_downloaded() + bytes_in_range;
+                                            file_download.set_bytes_downloaded(bytes_downloaded);
+
+                                            let name = file_download.name().to_string();
+                                            let bytes_downloaded = file_download.bytes_downloaded();
+
+                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded } }));
+
+
+                                            file_download.chunks_mut()[range.0..range.1].fill(true);
+
+                                            let all_chunks_done = file_download.chunks().all();
+
+                                            if all_chunks_done {
+                                                println!("file {} finished! got {} bytes", name, bytes_downloaded);
+                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
+                                                file_download.set_status(DownloadStatus::Completed);
+                                                state.file_maps.remove(&file_id);
+                                            }
+                                        },
+                                        crate::download::DownloadType::Folder(_) => todo!(),
+                                    } 
 
                                     // try to spawn another worked
                                     let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                 },
+                                SupervisorMessage::RangeFailed(permit, file_id, range, url, file_map, expected_len, download_error) => {
+                                    let retry_kind = RetryKind::RangeDownload(RangeDownload { file_id, range, url: url.clone(), file_map, expected_len });
+                                    let file_id = retry_kind.file_id();
+                                    let download_name = state.download.name().clone();
+
+                                    let file = match state.download.files_mut().get_mut(&file_id) {
+                                        Some(DownloadType::File(file)) => file,
+                                        _ => continue,
+                                    };
+
+                                    match download_error {
+                                        RangeDownloadError::Download(download_error) => {
+                                            match download_error {
+                                                DownloadError::Io(error) =>  {
+                                                    let _ = sender.send(SupervisorMessage::IoError(permit, error, retry_kind));
+                                                },
+                                                DownloadError::Network(error) => {
+                                                    let _ = sender.send(SupervisorMessage::NetworkError(permit, error, retry_kind));
+                                                },
+                                                DownloadError::RateLimited(retry_after) => {
+                                                    let _ = sender.send(SupervisorMessage::RateLimited(permit, retry_after, retry_kind));
+                                                },
+                                                DownloadError::ServerError(status_code) => {
+                                                    let _ = sender.send(SupervisorMessage::ServerError(permit, status_code, retry_kind));
+                                                },
+                                                DownloadError::ClientError(status_code) => {
+                                                    let _ = sender.send(SupervisorMessage::ClientError(permit, status_code, retry_kind));
+                                                },
+                                            }
+                                        },
+                                        RangeDownloadError::UnexpectedStatus(status_code) => {
+                                            println!("got unexpected status code length for: {} {}. received: {}", download_name, file_id, status_code);
+                                            file.increment_retries();
+                                            if file.retries() > 5 { 
+                                                // Try to download this as chunked as fallback
+                                                file.set_size(FileSize::Unknown);
+                                                file.reset_retries();
+                                                state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
+                                            } else {
+                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                            }
+                                        },
+                                        RangeDownloadError::UnexpectedLength(bytes_received, bytes_expected) => {
+                                            println!("got unexpected length for: {} {}. received: {}, expected: {}", download_name, file_id, bytes_received, bytes_expected);
+
+                                            file.increment_retries();
+                                            if file.retries() > 5 { 
+                                                // Try to download this as chunked as fallback
+                                                file.set_size(FileSize::Unknown);
+                                                file.reset_retries();
+                                                state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
+                                            } else {
+                                                // This error is usually from a droppped connection, so don't wait much before retrying
+                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_millis(300), retry_kind));
+                                            }
+                                        },
+                                        RangeDownloadError::RangeNotSupported => {
+                                            println!("got non-range response for: {} {}.", download_name, file_id);
+
+                                            // Set this file as having an unknown length so it can be downloaded as chunked
+                                            file.set_size(FileSize::Unknown);
+                                            file.reset_retries();
+                                            state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
+                                        },
+                                    }
+                                }
                                 SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
                                     println!("got metadata for: {} {}", state.download.name(), file_id);
                                     state.active_metadata_requests -= 1;
@@ -725,6 +790,18 @@ impl DownloadSupervisor {
                                 SupervisorMessage::RetryAfter(permit, duration, retry_kind) => {
                                     let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
 
+                                    let download_id = state.download.id();
+                                    let file_id = retry_kind.file_id();
+
+                                    let file = match state.download.files_mut().get_mut(&file_id).unwrap() {
+                                        DownloadType::File(file) => file,
+                                        DownloadType::Folder(_) => continue,
+                                    };
+
+                                    file.set_status(DownloadStatus::Retrying);
+
+                                    let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Retrying } }));
+
                                     let sender = sender.clone();
 
                                     state.retry_queue_count += 1;
@@ -754,20 +831,17 @@ impl DownloadSupervisor {
                                     }
                                 }
                                 SupervisorMessage::NetworkError(permit, error, retry_kind) => {
-                                    let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
-                                        DownloadType::File(file) => file,
-                                        DownloadType::Folder(_) => continue,
-                                    };
-
                                     eprintln!("Network Error for {}: {}. Retrying...", retry_kind.file_id(), error);
-                                    file.set_status(DownloadStatus::Retrying);
 
                                     let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind)); 
                                 },
                                 SupervisorMessage::ServerError(permit, status_code, retry_kind) => {
                                     eprintln!("Server error ({}). Retrying...", status_code);
 
-                                    let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
+                                    let download_id = state.download.id();
+                                    let file_id = retry_kind.file_id();
+
+                                    let file = match state.download.files_mut().get_mut(&file_id).unwrap() {
                                         DownloadType::File(file) => file,
                                         DownloadType::Folder(_) => continue,
                                     };
@@ -775,10 +849,27 @@ impl DownloadSupervisor {
                                     file.increment_retries();
                                     if file.retries() > 5 { 
                                         file.set_status(DownloadStatus::Failed(DownloadFailureReason::ServerError));
+                                        let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                     } else {
                                         let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
                                     }
                                 },
+                                SupervisorMessage::ClientError(permit, status_code, retry_kind) => {
+                                    eprintln!("Client error ({}).", status_code);
+
+                                    let download_id = state.download.id();
+                                    let file_id = retry_kind.file_id();
+
+                                    let file = match state.download.files_mut().get_mut(&file_id).unwrap() {
+                                        DownloadType::File(file) => file,
+                                        DownloadType::Folder(_) => todo!(),
+                                    };
+
+                                    file.set_status(DownloadStatus::Failed(DownloadFailureReason::ClientError));
+
+                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
+                                    let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                }
                                 SupervisorMessage::RateLimited(_permit, retry_after, retry_kind) => {
                                     let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
                                         DownloadType::File(file) => file,
@@ -973,7 +1064,7 @@ fn parse_content_range(range_header: &str) -> Option<u64> {
     range_header.rsplit('/').next()?.parse::<u64>().ok()
 }
 
-async fn download_range(client: Client, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>, expected_len: u64) -> bool {
+async fn download_range(client: Client, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>, expected_len: u64) -> Result<(), RangeDownloadError> {
     let chunk_size = 16384;
 
     let start_byte = range.0 as u64 * chunk_size;
@@ -984,38 +1075,66 @@ async fn download_range(client: Client, url: &str, range: (usize, usize), file_m
     let request = client.get(url)
         .header("Range", range_header);
 
-    let result = async {
-        let mut response = request.send().await.unwrap();
+    let mut response = match request.send().await {
+        Ok(response) => match response.status() {
+            StatusCode::TOO_MANY_REQUESTS => {
+                let retry_after = response.headers().get(header::RETRY_AFTER).and_then(|header| {
+                    let retry_after_str = header.to_str().ok()?;
+                    
+                    // Try parsing as seconds
+                    if let Ok(seconds) = retry_after_str.parse::<u64>() {
+                        return Some(seconds);
+                    }
 
-        if response.status() != StatusCode::PARTIAL_CONTENT && response.status() != StatusCode::OK {
-            return Err(format!("Server wrong returned status: {}", response.status()));
-        }
+                        // Try parsing as HTTP-Date
+                    if let Ok(date) = DateTime::parse_from_rfc2822(retry_after_str) {
+                        let now = Utc::now();
+                        let diff = date.with_timezone(&Utc).signed_duration_since(now);
+                        return Some(diff.num_seconds().max(0) as u64);
+                    }
 
-        let mut current_offset = start_byte;
-        let mut bytes_received = 0; 
+                    None
+                });
 
-        while let Some(chunk) = response.chunk().await.unwrap() {
-            let chunk_len = chunk.len() as u64;
-            file_map.write_chunk(current_offset as usize, &chunk);
+                Err(DownloadError::RateLimited(retry_after))
+            },
+            status if status.is_server_error() => Err(DownloadError::ServerError(status)),
+            status if status.is_client_error() => Err(DownloadError::ClientError(status)),
+            StatusCode::OK => {
+                if start_byte != 0 {
+                    return Err(RangeDownloadError::RangeNotSupported);
+                }
 
-            current_offset += chunk_len;
-            bytes_received += chunk_len;
-        }
+                if let Some(content_length) = response.content_length() {
+                    if content_length != end_byte + 1 {
+                        return Err(RangeDownloadError::RangeNotSupported);
+                    }
+                };
+                
+                Ok(response)
+            }
+            StatusCode::PARTIAL_CONTENT => Ok(response),
+            status => return Err(RangeDownloadError::UnexpectedStatus(status)),
+        },
+        Err(err) => return Err(DownloadError::Network(err).into()),
+    }?;
 
-        if bytes_received != expected_len {
-            return Err(format!("Incomplete download: expected {} bytes, got {}", expected_len, bytes_received));
-        }
-            
-        Ok(())
-    }.await;
+    let mut current_offset = start_byte;
+    let mut bytes_received = 0; 
 
-    let success = result.is_ok();
+    while let Some(chunk) = response.chunk().await.map_err(DownloadError::from)? {
+        let chunk_len = chunk.len() as u64;
+        file_map.write_chunk(current_offset as usize, &chunk);
 
-    if let Err(error) = result {
-        println!("Download worker failed: {}", error);
+        current_offset += chunk_len;
+        bytes_received += chunk_len;
     }
 
-    success
+    if bytes_received != expected_len {
+        return Err(RangeDownloadError::UnexpectedLength(bytes_received, expected_len));
+    }
+
+    Ok(())
 }
 
 /// Downloads a file from a server that requested `Transfer-Encoding: chunked`. 
