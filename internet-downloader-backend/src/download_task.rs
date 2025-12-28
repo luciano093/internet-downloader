@@ -807,7 +807,6 @@ impl DownloadSupervisor {
                                         std::io::ErrorKind::PermissionDenied |
                                         std::io::ErrorKind::NotADirectory |
                                         std::io::ErrorKind::IsADirectory |
-                                        std::io::ErrorKind::HostUnreachable |
                                         std::io::ErrorKind::InvalidInput |
                                         std::io::ErrorKind::AddrInUse |
                                         std::io::ErrorKind::AddrNotAvailable |
@@ -846,6 +845,7 @@ impl DownloadSupervisor {
                                         std::io::ErrorKind::NotConnected |
                                         std::io::ErrorKind::NetworkDown |
                                         std::io::ErrorKind::BrokenPipe |
+                                        std::io::ErrorKind::HostUnreachable |
                                         std::io::ErrorKind::TimedOut |
                                         std::io::ErrorKind::ResourceBusy |
                                         std::io::ErrorKind::ExecutableFileBusy |
