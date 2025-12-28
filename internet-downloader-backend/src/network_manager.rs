@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use reqwest::Client;
 use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, task::JoinHandle};
@@ -25,6 +25,8 @@ struct NetworkManager {
 impl NetworkManager {
     pub fn new(sender: UnboundedSender<NetworkMessage>, receiver: UnboundedReceiver<NetworkMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager, plugin_registry: PluginRegistryHandler) -> Self {
         let client = reqwest::Client::builder()
+            // .timeout(Duration::from_secs(5))
+            // .read_timeout(Duration::from_secs(5))
             .no_gzip()     // prevents stripping Content-Length
             .no_brotli()   // prevents stripping Content-Length
             .no_deflate()

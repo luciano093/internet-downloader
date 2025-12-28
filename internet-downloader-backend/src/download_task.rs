@@ -234,8 +234,6 @@ impl SupervisorState {
     /// Otherwise, None is returned and the cursor is left unchanged.
     fn try_take_stream_job(&mut self) -> Option<Job> {
         if let Some((file_id, url, path)) = self.retry_streams.pop() {
-            self.streams_cursor += 1;
-
             return Some(Job::DownloadStream(file_id, url, path));
         }
         
@@ -264,7 +262,6 @@ impl SupervisorState {
             if let Some(retry_range) = self.retry_ranges.get_mut(&file_id) {
                 if !retry_range.is_empty() {
                     let (range, url, file_map, expected_len) = retry_range.pop()?;
-                    self.chunk_cursors.insert(file_id, range.1);
                     return Some(Job::DownloadChunk { file_id, url, range, file_map, expected_len });
                 }
             }
@@ -309,9 +306,15 @@ impl SupervisorState {
                         create_dir_all(parent_path).await.unwrap();
                     }
 
-                    let file = tokio::fs::File::create(&path).await.unwrap();
+                    let file = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .await;
 
-                    file.set_len(file_size).await.unwrap(); 
+                    if let Ok(f) = file {
+                        f.set_len(file_size).await.unwrap();
+                    }
                 }
 
                 let file_map = if self.file_maps.contains_key(&file_id) {
@@ -662,6 +665,7 @@ impl DownloadSupervisor {
                                             crate::download::DownloadType::Folder(_) => todo!(),
                                         } 
                                     } else {
+                                        println!("retrying download: {}", file_id);
                                         state.retry_ranges.entry(file_id).or_default().push((range, url, file_map, expected_len));
                                     }
 
