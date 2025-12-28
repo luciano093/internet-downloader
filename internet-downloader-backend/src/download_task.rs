@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -162,7 +162,7 @@ struct SupervisorState {
     retry_uninitialized: Vec<(usize, Arc<String>)>, // tracks the files that failed to get metadata
     retry_streams: Vec<(usize, Arc<String>, PathBuf)>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
-    active_permits: usize, 
+    permit_count: Arc<AtomicUsize>, 
     active_downloads: usize, // tracks how many permits we are using to download files
     active_metadata_requests: usize, // tracks how many permits we are using to gather metadata
     file_maps: HashMap<usize, Arc<SharedFileMap>>, // Tracks file maps to get memory mapped files
@@ -173,7 +173,7 @@ struct SupervisorState {
 }
 
 impl SupervisorState {
-    fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
+    fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager, permit_count: Arc<AtomicUsize>) -> Self {
         Self { 
             client,
             download,
@@ -184,7 +184,7 @@ impl SupervisorState {
             retry_uninitialized: Vec::new(),
             retry_streams: Vec::new(),
             host_sender,
-            active_permits: 0,
+            permit_count,
             active_downloads: 0,
             active_metadata_requests: 0,
             file_maps: HashMap::new(),
@@ -203,14 +203,14 @@ impl SupervisorState {
 
         if let Some((next_metadata_id, ref url)) = metadata_info {
             // if we hold only one permit, prioritize downloading metadata 
-            if self.active_permits == 1 {
+            if self.permit_count.load(Ordering::SeqCst) == 1 {
                 return Some(self.take_metadata_job(next_metadata_id, url.clone()));
             }
         }
 
         // we prefer to file downloads over metadata if less than half of the active permits are being used
         // this way, we can gather the metadata with the permits left
-        let prefer_downloads = self.active_downloads < (self.active_permits / 2);
+        let prefer_downloads = self.active_downloads < (self.permit_count.load(Ordering::SeqCst) / 2);
 
         if prefer_downloads {
             if let Some(job) = self.try_take_chunk_job().await { return Some(job); }
@@ -382,17 +382,20 @@ pub struct DownloadSupervisor {
     sender: Option<UnboundedSender<SupervisorMessage>>,
     shutdown_receiver: Option<oneshot::Receiver<SupervisorState>>,
     saturated: Arc<AtomicBool>,
+    permit_count: Arc<AtomicUsize>,
 }
 
 impl DownloadSupervisor {
     pub fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
         println!("Supervisor created for: {}", download.name());
+        let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
 
         Self {
-            state: Some(SupervisorState::new(client, download, host_sender, ui_sender, db_manager)),
+            state: Some(SupervisorState::new(client, download, host_sender, ui_sender, db_manager, permit_count.clone())),
             sender: None,
             shutdown_receiver: None,
             saturated: Arc::new(false.into()),
+            permit_count,
         }
     }
 
@@ -424,13 +427,16 @@ impl DownloadSupervisor {
                         Some(message) = receiver.recv() => {
                             match message {
                                 SupervisorMessage::ProcessPermit(permit) => {
+
+
                                     if let Some(permit) = permit.validate() {
                                         let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+                                    } else {
+
                                     }
                                 }
                                 SupervisorMessage::SpawnWorker(permit) => {
-                                    println!("spawning worker for download: {}, permits: {}, downloads: {}", state.download.name(), state.active_permits, state.active_downloads);
-                                    state.active_permits += 1;
+                                    println!("spawning worker for download: {}, permits: {}, downloads: {}", state.download.name(), state.permit_count.load(Ordering::SeqCst), state.active_downloads);
 
                                     let sender = sender.clone();
 
@@ -443,15 +449,15 @@ impl DownloadSupervisor {
                                         },
                                         None => {
                                             if state.retry_queue_count > 0 {
+                                                println!("there are still retries in queue");
                                                 // we put ourselves as saturated (not accepting more permits) until at least one retry is ready
-                                                state.active_permits -= 1;
                                                 drop(permit);
                                                 saturated.store(true, Ordering::Relaxed);
                                                 continue;
                                             }
 
                                             println!("no jobs left");
-                                            state.active_permits -= 1;
+
 
                                             // We tell the host manager that we are saturated so it doesn't try to send more permits
                                             saturated.store(true, Ordering::Relaxed);
@@ -460,7 +466,7 @@ impl DownloadSupervisor {
                                             drop(permit);
 
                                             // check if there is no more work to do
-                                            if state.active_permits == 0 && state.active_downloads == 0 {
+                                            if state.permit_count.load(Ordering::SeqCst) == 0 && state.active_downloads == 0 {
                                                 let mut download_complete = true;
                                                 for file in state.download.files().values() {
                                                     if let DownloadType::File(f) = file {
@@ -563,7 +569,6 @@ impl DownloadSupervisor {
                                             file.set_status(DownloadStatus::Failed(DownloadFailureReason::ClientError));
 
                                             
-                                            state.active_permits -= 1;
                                             let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                             let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                         },
@@ -598,8 +603,6 @@ impl DownloadSupervisor {
                                         },
                                         DownloadType::Folder(_) => todo!(),
                                     }
-
-                                    state.active_permits -= 1;
 
                                     // try to spawn another worked
                                     let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
@@ -665,7 +668,6 @@ impl DownloadSupervisor {
                                     // mark the permit as inactive, but still owned
                                     // this has to happen after marking all chunks as finished to avoid a race condition
                                     // otherwise spawn_worker might kill the loop before this finishes
-                                    state.active_permits -= 1;
 
                                     // try to spawn another worked
                                     let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
@@ -711,15 +713,12 @@ impl DownloadSupervisor {
                                     }
 
                                     while let Some(permit) = state.idle_permits.pop() {
-                                        state.active_permits -= 1; 
                                         let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                     }
 
-                                    state.active_permits -= 1; 
                                     let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                 },
                                 SupervisorMessage::RetryAfter(permit, duration, retry_kind) => {
-                                    state.active_permits -= 1;
                                     let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
 
                                     let sender = sender.clone();
@@ -904,6 +903,10 @@ impl DownloadSupervisor {
 
     pub fn set_saturated(&mut self, saturated: bool) {
         self.saturated.store(saturated, Ordering::Relaxed); 
+    }
+
+    pub fn permit_count(&self) -> Arc<AtomicUsize> {
+        self.permit_count.clone()
     }
 }
 

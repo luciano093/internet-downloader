@@ -1,21 +1,39 @@
-use std::{collections::{HashMap, VecDeque}, pin::Pin, sync::{Arc, Weak, atomic::{AtomicUsize, Ordering}}, time::Duration};
+use std::{collections::{HashMap, VecDeque}, sync::{Arc, Weak, atomic::{AtomicUsize, Ordering}}, time::Duration};
 
 use reqwest::Client;
-use tokio::{sync::{OwnedSemaphorePermit, Semaphore, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}, task::JoinHandle, time::Sleep};
+use tokio::{sync::{OwnedSemaphorePermit, Semaphore, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use url::Host;
 
 use crate::{client_state_manager::UiStateEvent, download::{Download, DownloadId, DownloadStatus}, download_task::DownloadSupervisor, plugin_registry::PluginRegistryHandler, state_manager::StateManager};
 
+struct PermitGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl PermitGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self { counter }
+    }
+}
+
+impl Drop for PermitGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct ActiveDownloadPermit {
     permit: Option<OwnedSemaphorePermit>,
     host_sender: UnboundedSender<HostMessage>,
     authority: Weak<()>,
+    _guard: Option<PermitGuard>,
 }
 
 impl ActiveDownloadPermit {
-    pub fn new(permit: OwnedSemaphorePermit, host_sender: UnboundedSender<HostMessage>, authority: Weak<()>) -> Self {
-        Self { permit: Some(permit), host_sender, authority }
+    pub fn new(permit: OwnedSemaphorePermit, host_sender: UnboundedSender<HostMessage>, authority: Weak<()>, _guard: PermitGuard) -> Self {
+        Self { permit: Some(permit), host_sender, authority, _guard: Some(_guard) }
     }
 
     pub fn validate(mut self) -> Option<ValidDownloadPermit> {
@@ -26,7 +44,8 @@ impl ActiveDownloadPermit {
         Some(ValidDownloadPermit { 
             permit: Some(permit), 
             host_sender: self.host_sender.clone(), 
-            authority: self.authority.clone() 
+            authority: self.authority.clone(),
+            _guard: Some(self._guard.take()?),
         })
     }
 }
@@ -43,11 +62,12 @@ pub struct ValidDownloadPermit {
     permit: Option<OwnedSemaphorePermit>,
     host_sender: UnboundedSender<HostMessage>,
     authority: Weak<()>,
+    _guard: Option<PermitGuard>,
 }
 
 impl ValidDownloadPermit {
     pub fn downgrade(mut self) -> ActiveDownloadPermit {
-        ActiveDownloadPermit::new(self.permit.take().unwrap(), self.host_sender.clone(), self.authority.clone())
+        ActiveDownloadPermit::new(self.permit.take().unwrap(), self.host_sender.clone(), self.authority.clone(), self._guard.take().unwrap())
     }
 }
 
@@ -205,8 +225,10 @@ impl HostManager {
                     break;
                 }
 
+                let guard = PermitGuard::new(supervisor.permit_count());
+
                 println!("giving permit to supervisor");
-                supervisor.give_permit(ActiveDownloadPermit::new(permit, self.sender.clone(), Arc::downgrade(&self.authority)));
+                supervisor.give_permit(ActiveDownloadPermit::new(permit, self.sender.clone(), Arc::downgrade(&self.authority), guard));
             }
         }
     }
