@@ -293,12 +293,17 @@ pub enum DownloadStatus {
     Paused,
     Failed(DownloadFailureReason),
     NotFound,
+    Retrying,
+    Waiting(Option<u64>)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[repr(u8)]
 pub enum DownloadFailureReason {
     HashMismatch,
+    DiskError,
+    ClientError,
+    ServerError,
 }
 
 /// Has either a file or folder as the only item in root
@@ -493,6 +498,9 @@ pub struct FileDownload {
     chunks: BitVec<u8, Msb0>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     bytes_downloaded: u64,
+    #[serde(skip)]
+    /// tracks consecutive retries
+    retries: usize, 
 }
 
 pub struct AsBitVec;
@@ -629,6 +637,7 @@ impl FileDownload {
             chunks: BitVec::new(),
             size: None,
             bytes_downloaded: 0,
+            retries: 0,
         }
     }
 
@@ -662,6 +671,18 @@ impl FileDownload {
 
     pub fn set_bytes_downloaded(&mut self, bytes_downloaded: u64) {
         self.bytes_downloaded = bytes_downloaded
+    }
+
+    pub fn retries(&self) -> usize {
+        self.retries
+    }
+
+    pub fn increment_retries(&mut self) {
+        self.retries += 1;
+    }
+
+    pub fn reset_retries(&mut self) {
+        self.retries = 0;
     }
 }
 

@@ -4,17 +4,114 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode, header};
+use thiserror::Error;
 use tokio::fs::create_dir_all;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::client_state_manager::UiStateEvent;
-use crate::download::{Download, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
-use crate::host_manager::{ActiveDownloadPermit, HostMessage};
+use crate::download::{Download, DownloadFailureReason, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
+use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
 use crate::state_manager::StateManager;
+
+#[derive(Debug, Error)]
+pub enum DownloadError {
+    #[error("File system error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
+    #[error("Rate limited (429): {}", match .0 { 
+        Some(retry) => format!("try again in {retry}s"), 
+        None => "try again later".to_string() 
+    })]
+    RateLimited(Option<u64>),
+    #[error("Server error ({0})")]
+    ServerError(StatusCode),
+    #[error("Client error ({0})")]
+    ClientError(StatusCode),
+}
+
+trait FileDownloadRetry {
+    fn file_id(&self) -> usize;
+    fn url(&self) -> Arc<String>;
+}
+
+pub enum RetryKind {
+    Metadata(MetadataRetry),
+    StreamDownload(StreamRetry),
+    RangeDownload(RangeDownload),
+}
+
+impl FileDownloadRetry for RetryKind {
+    fn file_id(&self) -> usize {
+        match self {
+            RetryKind::Metadata(metadata_retry) => metadata_retry.file_id(),
+            RetryKind::StreamDownload(stream_retry) => stream_retry.file_id(),
+            RetryKind::RangeDownload(range_download) => range_download.file_id(),
+        }
+    }
+
+    fn url(&self) -> Arc<String> {
+        match self {
+            RetryKind::Metadata(metadata_retry) => metadata_retry.url(),
+            RetryKind::StreamDownload(stream_retry) => stream_retry.url(),
+            RetryKind::RangeDownload(range_download) => range_download.url(),
+        }
+    }
+}
+
+struct MetadataRetry {
+    file_id: usize,
+    url: Arc<String>,
+}
+
+impl FileDownloadRetry for MetadataRetry {
+    fn file_id(&self) -> usize {
+        self.file_id
+    }
+
+    fn url(&self) -> Arc<String> {
+        self.url.clone()
+    }
+}
+
+struct StreamRetry {
+    file_id: usize,
+    url: Arc<String>,
+    path: PathBuf,
+}
+
+impl FileDownloadRetry for StreamRetry {
+    fn file_id(&self) -> usize {
+        self.file_id
+    }
+
+    fn url(&self) -> Arc<String> {
+        self.url.clone()
+    }
+}
+
+struct RangeDownload {
+    file_id: usize,
+    range: (usize, usize),
+    url: Arc<String>,
+    file_map: Arc<SharedFileMap>,
+    expected_len: u64,
+}
+
+impl FileDownloadRetry for RangeDownload {
+    fn file_id(&self) -> usize {
+        self.file_id
+    }
+
+    fn url(&self) -> Arc<String> {
+        self.url.clone()
+    }
+}
 
 pub enum SizeResult {
     Known(u64),
@@ -24,10 +121,18 @@ pub enum SizeResult {
 }
 
 pub enum SupervisorMessage {
-    SpawnWorker(ActiveDownloadPermit),
+    ProcessPermit(ActiveDownloadPermit),
+    SpawnWorker(ValidDownloadPermit),
     WorkerFinished(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, bool), // permit, id, range, url, success (false if failed)
-    StreamFinished(ActiveDownloadPermit, usize, Arc<String>, PathBuf, Result<usize, ()>), // permit, id, url, result containing size
+    StreamSuccess(ActiveDownloadPermit, usize, usize), // permit, id, size of file
+    StreamFailed(ActiveDownloadPermit, usize, Arc<String>, PathBuf, DownloadError), // permit, id, url, path, error
     MetadataFetched(ActiveDownloadPermit, usize, Arc<String>, SizeResult), 
+    IoError(ActiveDownloadPermit, std::io::Error, RetryKind),
+    RetryAfter(ActiveDownloadPermit, Duration, RetryKind),
+    RetryReady(RetryKind),
+    RateLimited(ActiveDownloadPermit, Option<u64>, RetryKind), 
+    NetworkError(ActiveDownloadPermit, reqwest::Error, RetryKind),
+    ServerError(ActiveDownloadPermit, StatusCode, RetryKind),
 }
 
 #[derive(Debug)]
@@ -52,6 +157,7 @@ struct SupervisorState {
     chunk_cursors: HashMap<usize, usize>, // used to keep track of last tracked chunk in a file to avoid looping through all the chunks every time
     uninitialized_cursor: usize, // track the last known initialized file
     streams_cursor: usize, // track the last known stream-only file
+    // TODO: change this to a vec
     retry_ranges: HashMap<usize, Vec<((usize, usize), Arc<String>, Arc<SharedFileMap>, u64)>>, // ranges that failed but are still buffered
     retry_uninitialized: Vec<(usize, Arc<String>)>, // tracks the files that failed to get metadata
     retry_streams: Vec<(usize, Arc<String>, PathBuf)>, // tracks the files that failed to get metadata
@@ -63,6 +169,7 @@ struct SupervisorState {
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
     idle_permits: Vec<ActiveDownloadPermit>,
+    retry_queue_count: usize, // tracks how many downloads we are trying. Useful for when there are no jobs and nothing in the retry queue due to retry timeout or delay
 }
 
 impl SupervisorState {
@@ -84,6 +191,7 @@ impl SupervisorState {
             ui_sender,
             db_manager,
             idle_permits: Vec::new(),
+            retry_queue_count: 0,
         }
     }
 
@@ -315,6 +423,11 @@ impl DownloadSupervisor {
                     tokio::select! {
                         Some(message) = receiver.recv() => {
                             match message {
+                                SupervisorMessage::ProcessPermit(permit) => {
+                                    if let Some(permit) = permit.validate() {
+                                        let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+                                    }
+                                }
                                 SupervisorMessage::SpawnWorker(permit) => {
                                     println!("spawning worker for download: {}, permits: {}, downloads: {}", state.download.name(), state.active_permits, state.active_downloads);
                                     state.active_permits += 1;
@@ -329,6 +442,14 @@ impl DownloadSupervisor {
                                             job
                                         },
                                         None => {
+                                            if state.retry_queue_count > 0 {
+                                                // we put ourselves as saturated (not accepting more permits) until at least one retry is ready
+                                                state.active_permits -= 1;
+                                                drop(permit);
+                                                saturated.store(true, Ordering::Relaxed);
+                                                continue;
+                                            }
+
                                             println!("no jobs left");
                                             state.active_permits -= 1;
 
@@ -368,7 +489,7 @@ impl DownloadSupervisor {
 
                                     match job {
                                         Job::AwaitingMetadata => {
-                                            state.idle_permits.push(permit);
+                                            state.idle_permits.push(permit.downgrade());
                                         }
                                         Job::GetSize { file_id, url } => {
                                             println!("getting size for download: {}", state.download.name());
@@ -379,7 +500,7 @@ impl DownloadSupervisor {
                                             tokio::spawn(async move {  
                                                 let size_result = fetch_file_size(&client, &url).await;
 
-                                                let _ = sender.send(SupervisorMessage::MetadataFetched(permit, file_id, url, size_result));
+                                                let _ = sender.send(SupervisorMessage::MetadataFetched(permit.downgrade(), file_id, url, size_result));
                                             });
                                         },
                                         Job::DownloadChunk { file_id, url, range, file_map, expected_len } => {
@@ -391,7 +512,7 @@ impl DownloadSupervisor {
                                                 // Do worker stuff
                                                 let success = download_range(client, &url, range, file_map.clone(), expected_len).await;
 
-                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit, file_id, range, url, file_map, expected_len, success));
+                                                let _ = sender.send(SupervisorMessage::WorkerFinished(permit.downgrade(), file_id, range, url, file_map, expected_len, success));
                                             });
                                         },
                                         Job::DownloadStream(file_id, url, path) => {
@@ -400,50 +521,88 @@ impl DownloadSupervisor {
                                             
                                             tokio::spawn(async move {
                                                 // Do worker stuff
-                                                let result = download_stream(client, &path, &url).await;
-
-                                                let _ = sender.send(SupervisorMessage::StreamFinished(permit, file_id, url, path, result));
+                                                match download_stream(client, &path, &url).await {
+                                                    Ok(size_downloaded) => {
+                                                        let _ = sender.send(SupervisorMessage::StreamSuccess(permit.downgrade(), file_id, size_downloaded));
+                                                    },
+                                                    Err(download_error) => {
+                                                        let _ = sender.send(SupervisorMessage::StreamFailed(permit.downgrade(), file_id, url, path, download_error));
+                                                    },
+                                                }
                                             });
                                         }
                                     }
                                 }
-                                SupervisorMessage::StreamFinished(permit, file_id, url, path, result) => {
+                                SupervisorMessage::StreamFailed(permit, file_id, url, path, result) => {
                                     state.active_downloads -= 1;
 
-                                    if let Ok(size) = result {
-                                        let download_id = state.download.id();
-                                        let chunk_size = 16384;
+                                    let download_id = state.download.id();
 
-                                        match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                            DownloadType::File(file) => {
-                                                file.set_size(FileSize::Known(size as u64));
-                                                file.set_bytes_downloaded(size as u64);
+                                    let retry_kind = RetryKind::StreamDownload(StreamRetry { file_id, url, path });
 
-                                                if size > 0 {
-                                                    let chunk_count = (size + chunk_size - 1) / chunk_size;
-                                                    file.chunks_mut().resize(chunk_count as usize, true);
-                                                    println!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
-                                                    file.set_status(DownloadStatus::Completed); 
-                                                } else {
-                                                    println!("got 0 bytes: {}", file.name());
-                                                    // 0 Byte file
-                                                    file.set_status(DownloadStatus::Completed);
-                                                }
+                                    match result {
+                                        DownloadError::Io(error) =>  {
+                                            let _ = sender.send(SupervisorMessage::IoError(permit, error, retry_kind));
+                                        },
+                                        DownloadError::Network(error) => {
+                                            let _ = sender.send(SupervisorMessage::NetworkError(permit, error, retry_kind));
+                                        },
+                                        DownloadError::RateLimited(retry_after) => {
+                                            let _ = sender.send(SupervisorMessage::RateLimited(permit, retry_after, retry_kind));
+                                        },
+                                        DownloadError::ServerError(status_code) => {
+                                            let _ = sender.send(SupervisorMessage::ServerError(permit, status_code, retry_kind));
+                                        },
+                                        DownloadError::ClientError(status_code) => {
+                                                let file = match state.download.files_mut().get_mut(&file_id).unwrap() {
+                                                DownloadType::File(file) => file,
+                                                DownloadType::Folder(_) => todo!(),
+                                            };
 
-                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size as u64 } }));
-                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: size as u64 } }));
-                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
-                                            },
-                                            DownloadType::Folder(_) => todo!(),
-                                        }
-                                    } else {
-                                        state.retry_streams.push((file_id, url, path));
+                                            eprintln!("Client error ({}).", status_code);
+                                            file.set_status(DownloadStatus::Failed(DownloadFailureReason::ClientError));
+
+                                            
+                                            state.active_permits -= 1;
+                                            let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
+                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                        },
+                                    }
+                                }
+                                SupervisorMessage::StreamSuccess(permit, file_id, size) => {
+                                    state.active_downloads -= 1;
+
+                                    let download_id = state.download.id();
+                                    let chunk_size = 16384;
+
+                                    match state.download.files_mut().get_mut(&file_id).unwrap() {
+                                        DownloadType::File(file) => {
+                                            file.reset_retries();
+                                            file.set_size(FileSize::Known(size as u64));
+                                            file.set_bytes_downloaded(size as u64);
+
+                                            if size > 0 {
+                                                let chunk_count = (size + chunk_size - 1) / chunk_size;
+                                                file.chunks_mut().resize(chunk_count as usize, true);
+                                                println!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
+                                                file.set_status(DownloadStatus::Completed); 
+                                            } else {
+                                                println!("got 0 bytes: {}", file.name());
+                                                // 0 Byte file
+                                                file.set_status(DownloadStatus::Completed);
+                                            }
+
+                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size as u64 } }));
+                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: size as u64 } }));
+                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
+                                        },
+                                        DownloadType::Folder(_) => todo!(),
                                     }
 
                                     state.active_permits -= 1;
 
                                     // try to spawn another worked
-                                    let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
 
                                 },
                                 SupervisorMessage::WorkerFinished(permit, file_id, range, url, file_map, expected_len, success) => {
@@ -456,6 +615,8 @@ impl DownloadSupervisor {
                                         
                                         match state.download.files_mut().get_mut(&file_id).unwrap() {
                                             crate::download::DownloadType::File(file_download) => {
+                                                file_download.reset_retries();
+
                                                 let total_size = match file_download.size() {
                                                     Some(FileSize::Known(size)) => size,
                                                     Some(FileSize::Unknown) => {
@@ -507,7 +668,7 @@ impl DownloadSupervisor {
                                     state.active_permits -= 1;
 
                                     // try to spawn another worked
-                                    let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                 },
                                 SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
                                     println!("got metadata for: {} {}", state.download.name(), file_id);
@@ -518,6 +679,7 @@ impl DownloadSupervisor {
                                             let download_id = state.download.id();
 
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
+                                                file.reset_retries();
                                                 file.set_size(FileSize::Known(size));
                                                 let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size } }));
                                                 
@@ -538,6 +700,7 @@ impl DownloadSupervisor {
                                         },
                                         SizeResult::Stream => {
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
+                                                file.reset_retries();
                                                 file.set_size(FileSize::Unknown);
                                             }
                                         },
@@ -549,13 +712,160 @@ impl DownloadSupervisor {
 
                                     while let Some(permit) = state.idle_permits.pop() {
                                         state.active_permits -= 1; 
-                                        let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+                                        let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                     }
 
                                     state.active_permits -= 1; 
-                                    let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
+                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                 },
-                                
+                                SupervisorMessage::RetryAfter(permit, duration, retry_kind) => {
+                                    state.active_permits -= 1;
+                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
+
+                                    let sender = sender.clone();
+
+                                    state.retry_queue_count += 1;
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(duration).await;
+
+                                        let _ = sender.send(SupervisorMessage::RetryReady(retry_kind)); 
+                                    });
+                                },
+                                SupervisorMessage::RetryReady(retry_kind) => {
+                                    state.retry_queue_count -= 1;
+                                    saturated.store(false, Ordering::Relaxed);
+
+                                    match retry_kind {
+                                        RetryKind::Metadata(metadata_retry) => {
+                                            state.retry_uninitialized.push((metadata_retry.file_id, metadata_retry.url));
+                                        },
+                                        RetryKind::StreamDownload(stream_retry) => {
+                                            state.retry_streams.push((stream_retry.file_id, stream_retry.url, stream_retry.path));
+                                        },
+                                        RetryKind::RangeDownload(range_download) => {
+                                            state.retry_ranges
+                                                .entry(range_download.file_id)
+                                                .or_default()
+                                                .push((range_download.range, range_download.url, range_download.file_map, range_download.expected_len));
+                                        },
+                                    }
+                                }
+                                SupervisorMessage::NetworkError(permit, error, retry_kind) => {
+                                    let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
+                                        DownloadType::File(file) => file,
+                                        DownloadType::Folder(_) => continue,
+                                    };
+
+                                    eprintln!("Network Error for {}: {}. Retrying...", retry_kind.file_id(), error);
+                                    file.set_status(DownloadStatus::Retrying);
+
+                                    let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind)); 
+                                },
+                                SupervisorMessage::ServerError(permit, status_code, retry_kind) => {
+                                    eprintln!("Server error ({}). Retrying...", status_code);
+
+                                    let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
+                                        DownloadType::File(file) => file,
+                                        DownloadType::Folder(_) => continue,
+                                    };
+
+                                    file.increment_retries();
+                                    if file.retries() > 5 { 
+                                        file.set_status(DownloadStatus::Failed(DownloadFailureReason::ServerError));
+                                    } else {
+                                        let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                    }
+                                },
+                                SupervisorMessage::RateLimited(_permit, retry_after, retry_kind) => {
+                                    let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
+                                        DownloadType::File(file) => file,
+                                        DownloadType::Folder(_) => continue,
+                                    };
+
+                                    eprintln!("Rate limited for {}.", retry_kind.file_id());
+                                    file.set_status(DownloadStatus::Waiting(retry_after));
+                                    
+                                    state.retry_queue_count += 1;
+                                    let _ = sender.send(SupervisorMessage::RetryReady(retry_kind));
+                                    let _ = state.host_sender.send(HostMessage::RateLimited(retry_after));
+                                },
+                                SupervisorMessage::IoError(permit, error, retry_kind) => {
+                                    let download_id = state.download.id();
+                                    let file_id = retry_kind.file_id();
+
+                                    let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
+                                        DownloadType::File(file) => file,
+                                        DownloadType::Folder(_) => continue,
+                                    };
+
+                                    match error.kind() {
+                                        // Permanent Errors that should not be retried
+                                        std::io::ErrorKind::NotFound |
+                                        std::io::ErrorKind::PermissionDenied |
+                                        std::io::ErrorKind::NotADirectory |
+                                        std::io::ErrorKind::IsADirectory |
+                                        std::io::ErrorKind::HostUnreachable |
+                                        std::io::ErrorKind::InvalidInput |
+                                        std::io::ErrorKind::AddrInUse |
+                                        std::io::ErrorKind::AddrNotAvailable |
+                                        std::io::ErrorKind::AlreadyExists |
+                                        std::io::ErrorKind::DirectoryNotEmpty |
+                                        std::io::ErrorKind::ReadOnlyFilesystem |
+                                        std::io::ErrorKind::StaleNetworkFileHandle |
+                                        std::io::ErrorKind::InvalidData |
+                                        std::io::ErrorKind::NotSeekable |
+                                        std::io::ErrorKind::CrossesDevices |
+                                        std::io::ErrorKind::TooManyLinks |
+                                        std::io::ErrorKind::InvalidFilename |
+                                        std::io::ErrorKind::ArgumentListTooLong |
+                                        std::io::ErrorKind::Unsupported =>  {
+                                            eprintln!("IO error: {error}");
+                                            file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
+                                            // fail
+                                        }
+                                        
+                                        // Storage errors
+                                        std::io::ErrorKind::WriteZero |
+                                        std::io::ErrorKind::StorageFull |
+                                        std::io::ErrorKind::QuotaExceeded |
+                                        std::io::ErrorKind::FileTooLarge |
+                                        std::io::ErrorKind::OutOfMemory => {
+                                            eprintln!("The system has ran out of storage: {error}");
+                                            file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
+                                            // fail
+                                        },
+
+                                        // Retryiable errors
+                                        std::io::ErrorKind::NetworkUnreachable |
+                                        std::io::ErrorKind::WouldBlock |
+                                        std::io::ErrorKind::ConnectionReset |
+                                        std::io::ErrorKind::ConnectionAborted |
+                                        std::io::ErrorKind::NotConnected |
+                                        std::io::ErrorKind::NetworkDown |
+                                        std::io::ErrorKind::BrokenPipe |
+                                        std::io::ErrorKind::TimedOut |
+                                        std::io::ErrorKind::ResourceBusy |
+                                        std::io::ErrorKind::ExecutableFileBusy |
+                                        std::io::ErrorKind::Deadlock |
+                                        std::io::ErrorKind::Interrupted => {
+                                            eprintln!("Temporary OS error: {error}. Retrying...");
+
+                                            let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                        },
+                                        
+                                        _ => {
+                                            eprintln!("OS error: {error}.");
+                                            file.increment_retries();
+                                            if file.retries() > 5 { 
+                                                file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
+                                            } else {
+                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                            }
+                                        },
+                                    }
+
+                                    let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                },
                             }
                         }
                     _ = save_interval.tick() => {
@@ -585,7 +895,7 @@ impl DownloadSupervisor {
             self.spawn(sender, receiver);
         }
 
-        let _ = self.sender.as_ref().unwrap().send(SupervisorMessage::SpawnWorker(permit));
+        let _ = self.sender.as_ref().unwrap().send(SupervisorMessage::ProcessPermit(permit));
     }
 
     pub fn is_saturated(&self) -> bool {
@@ -701,28 +1011,55 @@ async fn download_range(client: Client, url: &str, range: (usize, usize), file_m
     success
 }
 
-async fn download_stream(client: Client, path: &Path, url: &str) -> Result<usize, ()> {
-    println!("downloading stream: {}", url);
-    let mut response = client.get(url)
-        .send()
-        .await
-        .unwrap();
+/// Downloads a file from a server that requested `Transfer-Encoding: chunked`. 
+/// The server doesn't provide a `Content-Length` header for these files and thus they can't be downloaded using a multi-part strategy.
+/// These downloads are non-resumable.
+async fn download_stream(client: Client, path: &Path, url: &str) -> Result<usize, DownloadError> {
+    let mut response = match client.get(url).send().await {
+        Ok(response) => match response.status() {
+            StatusCode::TOO_MANY_REQUESTS => {
+                let retry_after = response.headers().get(header::RETRY_AFTER).and_then(|header| {
+                    let retry_after_str = header.to_str().ok()?;
+                    
+                    // Try parsing as seconds
+                    if let Ok(seconds) = retry_after_str.parse::<u64>() {
+                        return Some(seconds);
+                    }
+
+                        // Try parsing as HTTP-Date
+                    if let Ok(date) = DateTime::parse_from_rfc2822(retry_after_str) {
+                        let now = Utc::now();
+                        let diff = date.with_timezone(&Utc).signed_duration_since(now);
+                        return Some(diff.num_seconds().max(0) as u64);
+                    }
+
+                    None
+                });
+
+                Err(DownloadError::RateLimited(retry_after))
+            },
+            status if status.is_server_error() => Err(DownloadError::ServerError(status)),
+            status if status.is_client_error() => Err(DownloadError::ClientError(status)),
+            _ => Ok(response),
+        },
+        Err(err) => return Err(DownloadError::Network(err)),
+    }?;
 
     if let Some(parent_path) = path.parent() {
-        create_dir_all(parent_path).await.unwrap();
+        create_dir_all(parent_path).await?;
     }
 
-    let file = tokio::fs::File::create(&path).await.unwrap();
+    let file = tokio::fs::File::create(&path).await?;
 
     let mut writer = BufWriter::new(file);
     let mut size = 0;
 
-    while let Some(chunk) = response.chunk().await.unwrap() {
+    while let Some(chunk) = response.chunk().await? {
         size += chunk.len();
-        writer.write_all(&chunk).await.unwrap();
+        writer.write_all(&chunk).await?;
     }
 
-    writer.flush().await.unwrap();
+    writer.flush().await?;
 
     Ok(size)
 }

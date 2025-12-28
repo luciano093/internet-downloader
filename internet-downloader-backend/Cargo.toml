@@ -9,7 +9,9 @@ axum = { version = "0.8.4", features = ["macros"] }
 base64 = "0.22.1"
 bitvec = { version = "1.0.1", features = ["serde"] }
 bytecheck = "0.8.2"
+chrono = "0.4.42"
 futures-util = "0.3.31"
+http = "1.4.0"
 indexmap = { version = "2.10.0", features = ["serde"] }
 memmap2 = "0.9.9"
 regex = { version = "1.12.2", features = ["use_std"] }
