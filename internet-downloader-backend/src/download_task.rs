@@ -789,7 +789,7 @@ impl DownloadSupervisor {
                                         SizeResult::Retryable(_) => {
                                             file.increment_retries();
                                             if file.retries() > 5 { 
-                                                println!("Failed to get metadata size for {}.", file_id);
+                                                println!("Failed to get metadata size for {} after retrying.", file_id);
                                                 file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
                                                 let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                             } else {
@@ -797,7 +797,11 @@ impl DownloadSupervisor {
                                                 state.retry_uninitialized.push((file_id, url));
                                             }
                                         },
-                                        SizeResult::PermanentFail => todo!(),
+                                        SizeResult::PermanentFail => {
+                                            println!("Failed to get metadata size for {}.", file_id);
+                                            file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
+                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                        },
                                     }
 
                                     while let Some(permit) = state.idle_permits.pop() {
