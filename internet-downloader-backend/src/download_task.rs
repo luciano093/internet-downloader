@@ -829,6 +829,8 @@ impl DownloadSupervisor {
                                                 .push((range_download.range, range_download.url, range_download.file_map, range_download.expected_len));
                                         },
                                     }
+
+                                    let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
                                 }
                                 SupervisorMessage::NetworkError(permit, error, retry_kind) => {
                                     eprintln!("Network Error for {}: {}. Retrying...", retry_kind.file_id(), error);

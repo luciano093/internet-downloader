@@ -84,7 +84,7 @@ pub enum HostMessage {
     QueueDownload(Download),
     DownloadFinished(DownloadId),
     PermitReleased(OwnedSemaphorePermit),
-    SupervisorSaturated(DownloadId),
+    RequestPermits(DownloadId),
     RateLimited(Option<u64>),
 }
 
@@ -162,9 +162,9 @@ impl HostManager {
 
                             self.distribute_permits().await;
                         },
-                        HostMessage::SupervisorSaturated(download_id) => {
-                            println!("{} set to saturated", *download_id);
-                            self.active_downloads.get_mut(&download_id).unwrap().set_saturated(true);
+                        HostMessage::RequestPermits(download_id) => {
+                            println!("{} is requesting permits", *download_id);
+                            self.distribute_permits().await;
                         },
                         HostMessage::RateLimited(retry_after) => {
                             let delay = retry_after.map(Duration::from_secs).unwrap_or(Duration::from_secs(5));

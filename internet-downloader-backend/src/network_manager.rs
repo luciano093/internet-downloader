@@ -25,8 +25,8 @@ struct NetworkManager {
 impl NetworkManager {
     pub fn new(sender: UnboundedSender<NetworkMessage>, receiver: UnboundedReceiver<NetworkMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager, plugin_registry: PluginRegistryHandler) -> Self {
         let client = reqwest::Client::builder()
-            // .timeout(Duration::from_secs(5))
-            // .read_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(2)) // no connection for 2 seconds
+            .read_timeout(Duration::from_secs(5)) // no data for 5 seconds
             .no_gzip()     // prevents stripping Content-Length
             .no_brotli()   // prevents stripping Content-Length
             .no_deflate()
