@@ -445,8 +445,6 @@ impl DownloadSupervisor {
                         Some(message) = receiver.recv() => {
                             match message {
                                 SupervisorMessage::ProcessPermit(permit) => {
-
-
                                     if let Some(permit) = permit.validate() {
                                         let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
                                     } else {
@@ -514,6 +512,7 @@ impl DownloadSupervisor {
                                     match job {
                                         Job::AwaitingMetadata => {
                                             state.idle_permits.push(permit.downgrade());
+                                            saturated.store(true, Ordering::Relaxed);
                                         }
                                         Job::GetSize { file_id, url } => {
                                             println!("getting size for download: {}", state.download.name());
@@ -726,6 +725,7 @@ impl DownloadSupervisor {
                                                 file.set_size(FileSize::Unknown);
                                                 file.reset_retries();
                                                 state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
+                                                let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                             } else {
                                                 // This error is usually from a droppped connection, so don't wait much before retrying
                                                 let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_millis(300), retry_kind));
@@ -738,15 +738,25 @@ impl DownloadSupervisor {
                                             file.set_size(FileSize::Unknown);
                                             file.reset_retries();
                                             state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
+                                            let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                         },
                                     }
                                 }
                                 SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
                                     println!("got metadata for: {} {}", state.download.name(), file_id);
                                     state.active_metadata_requests -= 1;
+                                    saturated.store(false, Ordering::Relaxed);
+                                    let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
+
+                                    let download_id = state.download.id();
+                                    let file = match state.download.files_mut().get_mut(&file_id) {
+                                        Some(DownloadType::File(file)) => file,
+                                        _ => continue,
+                                    };
 
                                     match size_result {
                                         SizeResult::Known(size) => {
+                                            println!("Got known metadata size for {}. Got {}", file_id, size);
                                             let download_id = state.download.id();
 
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
@@ -770,13 +780,22 @@ impl DownloadSupervisor {
                                             }
                                         },
                                         SizeResult::Stream => {
+                                            println!("Got no known metadata size for {}. Setting to stream.", file_id);
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Unknown);
                                             }
                                         },
                                         SizeResult::Retryable(_) => {
-                                            state.retry_uninitialized.push((file_id, url));
+                                            file.increment_retries();
+                                            if file.retries() > 5 { 
+                                                println!("Failed to get metadata size for {}.", file_id);
+                                                file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
+                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                            } else {
+                                                println!("Failed to get metadata size for {}. Retrying.", file_id);
+                                                state.retry_uninitialized.push((file_id, url));
+                                            }
                                         },
                                         SizeResult::PermanentFail => todo!(),
                                     }

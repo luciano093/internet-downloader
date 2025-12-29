@@ -304,6 +304,7 @@ pub enum DownloadFailureReason {
     DiskError,
     ClientError,
     ServerError,
+    MetadataFetchError,
 }
 
 /// Has either a file or folder as the only item in root
