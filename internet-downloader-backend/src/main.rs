@@ -24,6 +24,9 @@ async fn main() {
     // let plugin = JsPlugin::new("./plugins/test.js").await;
     // plugin.parse("./plugins/test.js");
 
+    rustls::crypto::ring::default_provider().install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let db_file= File::open("mydb.sqlite3").await;
     if db_file.is_err() {
         File::create_new("mydb.sqlite3").await.unwrap();
