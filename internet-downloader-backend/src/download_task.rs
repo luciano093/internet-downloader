@@ -711,6 +711,7 @@ impl DownloadSupervisor {
                                                 // Try to download this as chunked as fallback
                                                 file.set_size(FileSize::Unknown);
                                                 file.reset_retries();
+                                                state.file_maps.remove(&file.id());
                                                 state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
                                             } else {
                                                 let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
@@ -724,6 +725,7 @@ impl DownloadSupervisor {
                                                 // Try to download this as chunked as fallback
                                                 file.set_size(FileSize::Unknown);
                                                 file.reset_retries();
+                                                state.file_maps.remove(&file.id());
                                                 state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
                                                 let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                             } else {
@@ -737,6 +739,7 @@ impl DownloadSupervisor {
                                             // Set this file as having an unknown length so it can be downloaded as chunked
                                             file.set_size(FileSize::Unknown);
                                             file.reset_retries();
+                                            state.file_maps.remove(&file.id());
                                             state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
                                             let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                         },
