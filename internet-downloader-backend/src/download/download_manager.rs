@@ -276,11 +276,15 @@ impl DownloadManager {
 
 async fn hash_file(path: PathBuf) -> u128 {
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(&path).expect("Failed to open file for hashing");
+        let mut hasher = blake3::Hasher::new();
         
-        let mmap = unsafe { MmapOptions::new().map(&file).expect("Failed to mmap file") };
+        hasher.update_mmap_rayon(&path).expect("Failed to hash file");
 
-        xxh3_128_with_seed(&mmap, 0)
+        let mut output = [0u8; 16];
+
+        hasher.finalize_xof().fill(&mut output);
+
+        u128::from_le_bytes(output)
     }).await.expect("Hashing task panicked")
 }
 
