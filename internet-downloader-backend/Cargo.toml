@@ -20,7 +20,6 @@ reqwest = { version = "0.13.1", default-features = false, features = ["json", "r
 rkyv = { version = "0.8.12", features = ["arrayvec-0_7", "bytecheck", "bytes-1", "indexmap-2"] }
 rquickjs = { version = "0.10.0", features = ["full-async", "parallel"] }
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "std", "tls12"] } # replaces aws-lc-rs in reqwest which at the moment depends on having cmake installed in windows
-scraper = "0.23.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.148"
 serde_with = "3.16.1"
@@ -31,8 +30,6 @@ tokio-stream = { version = "0.1.17", features = ["sync"] }
 tokio-util = "0.7.17"
 tower-http = { version = "0.6.8", features = ["cors"] }
 url = "2.5.7"
-xxh3 = "0.1.1"
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [profile.release]
 debug = true

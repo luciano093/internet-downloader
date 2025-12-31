@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
-use memmap2::MmapOptions;
 use rkyv::munge::munge;
 use rkyv::rancor::Fallible;
 use rkyv::vec::{ArchivedVec, VecResolver};
@@ -17,7 +16,6 @@ use rkyv::with::{ArchiveWith, AsString};
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
-use xxhash_rust::xxh3::xxh3_128_with_seed;
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
