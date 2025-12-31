@@ -1096,7 +1096,7 @@ async fn download_range(client: Client, url: &str, range: (usize, usize), file_m
     let chunk_size = 16384;
 
     let start_byte = range.0 as u64 * chunk_size;
-    let end_byte = (range.1 as u64 * chunk_size) - 1; // -1 because http ranges are inclusive
+    let end_byte = start_byte + expected_len - 1; // -1 because http ranges are inclusive
 
     let range_header = format!("bytes={}-{}", start_byte, end_byte);
 
