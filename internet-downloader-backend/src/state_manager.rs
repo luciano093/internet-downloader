@@ -25,6 +25,9 @@ impl StateManager {
             .await
             .map_err(StateManagerError::ConnectionError)?;
 
+        sqlx::query("PRAGMA journal_mode = WAL;").execute(&pool).await.map_err(StateManagerError::ConnectionError)?;
+        sqlx::query("PRAGMA synchronous = NORMAL;").execute(&pool).await.map_err(StateManagerError::ConnectionError)?;
+
         Ok(Self {
             pool
         })
