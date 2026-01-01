@@ -123,8 +123,8 @@ impl Worker {
                                     let exception = value.catch(); 
                                     
                                     // Print the main error message
-                                    if let Some(msg) = exception.as_string() {
-                                        warn!("JS Exception: {}", msg.to_string().unwrap_or_default());
+                                    if let Some(message) = exception.as_object().and_then(|o| o.get::<_, String>("message").ok()) {
+                                        warn!("JS exception:\n{}", message);
                                     }
 
                                     // Print the stack trace
