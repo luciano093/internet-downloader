@@ -2,6 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use reqwest::Client;
 use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, task::JoinHandle};
+use tracing::debug;
 use url::{Host, Url};
 
 use crate::{client_state_manager::UiStateEvent, download::DownloadId, host_manager::HostHandle, plugin_registry::PluginRegistryHandler, state_manager::StateManager};
@@ -49,7 +50,7 @@ impl NetworkManager {
         while let Some(message) = self.receiver.recv().await {
             match message {
                 NetworkMessage::QueueDownload(url, id) => {
-                    println!("queueing download in network manager");
+                    debug!("queueing download in network manager");
 
                     let url2 = Url::parse(&url).expect("Invalid URL");
                     let host = url2.host().unwrap_or(Host::Domain("unknown")).to_owned();
@@ -61,7 +62,7 @@ impl NetworkManager {
                         self.host_handle_map.get(&host).unwrap()
                     };
                     
-                    println!("sending to host manager");
+                    debug!("sending to host manager");
                     host_handle.process_download(url, id);
                 },
             }

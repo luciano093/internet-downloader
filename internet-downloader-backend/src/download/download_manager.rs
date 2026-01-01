@@ -16,6 +16,7 @@ use rkyv::with::{ArchiveWith, AsString};
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
+use tracing::{debug, trace};
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
@@ -116,7 +117,8 @@ impl DownloadManager {
 
         self.next_id.as_mut().unwrap().store(*max_id + 1, Ordering::Relaxed);
 
-        println!("restored: {:#?}", restored_downloads);
+        debug!(count = ?restored_downloads.len(), "Restored download from disk");
+        trace!("Detailed download restore data:\n{:#?}", restored_downloads);
 
         for (id, download) in restored_downloads {
             self.unprocessed_downloads.insert(id, download.clone());
@@ -148,8 +150,6 @@ impl DownloadManager {
                 download.status = DownloadStatus::Failed(DownloadFailureReason::HashMismatch);
             }
         }
-
-        println!("restored: {:#?}", self.unprocessed_downloads);
     }
 
     pub async fn queue_download(&mut self, url: String) -> Result<(), ()> {
@@ -212,10 +212,10 @@ impl DownloadManager {
                     Some(command) = command_receiver.recv() => {
                         match command {
                             ManagerCommand::QueueDownload(url) => {
-                                println!("registry: {:#?}", url_registry);
-                                println!("url: {}", url);
+                                debug!("registry: {:#?}", url_registry);
+                                debug!("url: {}", url);
                                 if url_registry.contains_key(&url) {
-                                    println!("Download already exists: {}", url);
+                                    debug!("Download already exists: {}", url);
                                     continue; 
                                 }
 
@@ -233,7 +233,7 @@ impl DownloadManager {
 
                                  // Try to remove from Pending Queue
                                 if queue.shift_remove(&id).is_some() {
-                                    println!("Removed pending download {}", id);
+                                    debug!("Removed pending download {}", id);
                                     db_manager.delete_download(id).await;
                                 } 
                                 // If not in queue, it might be running. Send Cancel signal.
@@ -242,7 +242,7 @@ impl DownloadManager {
                                 }
                                 // Else if it's already done or doesn't exist; just DB delete
                                 else {
-                                    println!("Removed completed download {}", id);
+                                    debug!("Removed completed download {}", id);
                                     db_manager.delete_download(id).await;
                                 }
                                 let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*id));

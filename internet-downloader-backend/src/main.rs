@@ -18,11 +18,33 @@ use tokio_stream::StreamExt;
 use tokio::{fs::File, signal, sync::Mutex};
 use axum::{extract::{Query, State}, routing::post, Router};
 use tower_http::cors::{self, Any, CorsLayer};
+use tracing::{debug, info};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 #[tokio::main]
 async fn main() {
-    // let plugin = JsPlugin::new("./plugins/test.js").await;
-    // plugin.parse("./plugins/test.js");
+    let _ = std::fs::remove_file("debug.log");
+    let file_appender = tracing_appender::rolling::never(".", "debug.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .pretty()
+        .with_target(false)
+        .with_filter(EnvFilter::new("internet_downloader_backend=trace"));
+
+    let console_layer = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_target(false)
+        .with_filter(EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(file_layer)
+        .init();
 
     rustls::crypto::ring::default_provider().install_default()
         .expect("Failed to install rustls crypto provider");
@@ -62,13 +84,13 @@ async fn main() {
     tokio::spawn(async move {
         signal::ctrl_c().await.unwrap();
 
-        println!("Exiting program.");
+        info!("Exiting program.");
 
         exit(0);
     });
 
     let addr = listener.local_addr().unwrap();
-    println!("Server started at localhost:{}", addr.port());
+    info!("Server started at localhost:{}", addr.port());
 
     axum::serve(listener, app).await.unwrap();
 }
@@ -80,7 +102,7 @@ struct DownloadQuery {
 
 #[axum::debug_handler] 
 async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<DownloadQuery>) -> impl IntoResponse {
-    println!("received: {:?}", params);
+    debug!(url = %params.url, "Received download query");
 
     match manager.lock().await.queue_download(params.url).await {
         Ok(_) => StatusCode::OK.into_response(),
@@ -113,7 +135,6 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                     match result {
                         Some(Ok(update)) => {
                             let data = serde_json::to_string(&update).unwrap();
-                            // println!("sending: {}", data);
                             yield Ok(Event::default().event("delta").data(data));
                         }
                         Some(Err(err)) => {
@@ -123,7 +144,6 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                     }
                 }
                 _ = snapshot_interval.tick() => {
-                    println!("sending snapshot");
                     let snapshot = manager.lock().await.get_snapshot().await;
 
                     let snapshot_json = serde_json::to_string(&snapshot).unwrap();
@@ -147,7 +167,7 @@ struct DownloadDeletion {
 
 #[axum::debug_handler] 
 async fn delete_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<DownloadDeletion>) -> impl IntoResponse {
-    println!("received: {:?}", params);
+    debug!(url = %params.id, "Received download deletion query");
 
     manager.lock().await.remove_download(DownloadId(params.id)).await;
 

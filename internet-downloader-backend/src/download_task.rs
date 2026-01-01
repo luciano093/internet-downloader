@@ -11,6 +11,7 @@ use tokio::fs::create_dir_all;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tracing::{debug, error, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::download::{Download, DownloadFailureReason, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
@@ -405,7 +406,7 @@ pub struct DownloadSupervisor {
 
 impl DownloadSupervisor {
     pub fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
-        println!("Supervisor created for: {}", download.name());
+        debug!("Supervisor created for: {}", download.name());
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
 
         Self {
@@ -452,7 +453,7 @@ impl DownloadSupervisor {
                                     }
                                 }
                                 SupervisorMessage::SpawnWorker(permit) => {
-                                    println!("spawning worker for download: {}, permits: {}, downloads: {}", state.download.name(), state.permit_count.load(Ordering::SeqCst), state.active_downloads);
+                                    trace!("spawning worker for download: {}, permits: {}, downloads: {}", state.download.name(), state.permit_count.load(Ordering::SeqCst), state.active_downloads);
 
                                     let sender = sender.clone();
 
@@ -460,19 +461,19 @@ impl DownloadSupervisor {
                                     // in any case, we send the permit back to the host
                                     let job = match state.get_next_job().await {
                                         Some(job) => {
-                                            println!("found job {:?} for download: {}", job, state.download.name());
+                                            trace!("found job {:?} for download: {}", job, state.download.name());
                                             job
                                         },
                                         None => {
                                             if state.retry_queue_count > 0 {
-                                                println!("there are still retries in queue");
+                                                trace!("there are still retries in queue");
                                                 // we put ourselves as saturated (not accepting more permits) until at least one retry is ready
                                                 drop(permit);
                                                 saturated.store(true, Ordering::Relaxed);
                                                 continue;
                                             }
 
-                                            println!("no jobs left");
+                                            trace!("no jobs left");
 
 
                                             // We tell the host manager that we are saturated so it doesn't try to send more permits
@@ -515,7 +516,7 @@ impl DownloadSupervisor {
                                             saturated.store(true, Ordering::Relaxed);
                                         }
                                         Job::GetSize { file_id, url } => {
-                                            println!("getting size for download: {}", state.download.name());
+                                            trace!("getting size for download: {}", state.download.name());
                                             state.active_metadata_requests += 1;
 
                                             let client = state.client.clone();
@@ -599,10 +600,10 @@ impl DownloadSupervisor {
                                             if size > 0 {
                                                 let chunk_count = (size + chunk_size - 1) / chunk_size;
                                                 file.chunks_mut().resize(chunk_count as usize, true);
-                                                println!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
+                                                trace!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
                                                 file.set_status(DownloadStatus::Completed); 
                                             } else {
-                                                println!("got 0 bytes: {}", file.name());
+                                                trace!("got 0 bytes: {}", file.name());
                                                 // 0 Byte file
                                                 file.set_status(DownloadStatus::Completed);
                                             }
@@ -632,11 +633,11 @@ impl DownloadSupervisor {
                                             let total_size = match file_download.size() {
                                                 Some(FileSize::Known(size)) => size,
                                                 Some(FileSize::Unknown) => {
-                                                    eprintln!("A file with not yet unknown size has had a piece downloaded!");
+                                                    error!("A file with not yet unknown size has had a piece downloaded!");
                                                     continue;
                                                 }
                                                 None => {
-                                                    eprintln!("A file with not yet resolved size has had a piece downloaded!");
+                                                    error!("A file with not yet resolved size has had a piece downloaded!");
                                                     continue;
                                                 },
                                             };
@@ -662,7 +663,7 @@ impl DownloadSupervisor {
                                             let all_chunks_done = file_download.chunks().all();
 
                                             if all_chunks_done {
-                                                println!("file {} finished! got {} bytes", name, bytes_downloaded);
+                                                trace!("file {} finished! got {} bytes", name, bytes_downloaded);
                                                 let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
                                                 file_download.set_status(DownloadStatus::Completed);
                                                 state.file_maps.remove(&file_id);
@@ -705,7 +706,7 @@ impl DownloadSupervisor {
                                             }
                                         },
                                         RangeDownloadError::UnexpectedStatus(status_code) => {
-                                            println!("got unexpected status code length for: {} {}. received: {}", download_name, file_id, status_code);
+                                            warn!("got unexpected status code length for: {} {}. received: {}", download_name, file_id, status_code);
                                             file.increment_retries();
                                             if file.retries() > 5 { 
                                                 // Try to download this as chunked as fallback
@@ -718,7 +719,7 @@ impl DownloadSupervisor {
                                             }
                                         },
                                         RangeDownloadError::UnexpectedLength(bytes_received, bytes_expected) => {
-                                            println!("got unexpected length for: {} {}. received: {}, expected: {}", download_name, file_id, bytes_received, bytes_expected);
+                                            warn!("got unexpected length for: {} {}. received: {}, expected: {}", download_name, file_id, bytes_received, bytes_expected);
 
                                             file.increment_retries();
                                             if file.retries() > 5 { 
@@ -734,7 +735,7 @@ impl DownloadSupervisor {
                                             }
                                         },
                                         RangeDownloadError::RangeNotSupported => {
-                                            println!("got non-range response for: {} {}.", download_name, file_id);
+                                            warn!("got non-range response for: {} {}.", download_name, file_id);
 
                                             // Set this file as having an unknown length so it can be downloaded as chunked
                                             file.set_size(FileSize::Unknown);
@@ -746,7 +747,7 @@ impl DownloadSupervisor {
                                     }
                                 }
                                 SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
-                                    println!("got metadata for: {} {}", state.download.name(), file_id);
+                                    trace!("got metadata for: {} {}", state.download.name(), file_id);
                                     state.active_metadata_requests -= 1;
                                     saturated.store(false, Ordering::Relaxed);
                                     let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
@@ -759,7 +760,7 @@ impl DownloadSupervisor {
 
                                     match size_result {
                                         SizeResult::Known(size) => {
-                                            println!("Got known metadata size for {}. Got {}", file_id, size);
+                                            trace!("Got known metadata size for {}. Got {}", file_id, size);
                                             let download_id = state.download.id();
 
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
@@ -776,14 +777,14 @@ impl DownloadSupervisor {
                                                     file.chunks_mut().resize(chunk_count as usize, false);
                                                     file.set_status(DownloadStatus::InProgress); 
                                                 } else {
-                                                    println!("got 0 bytes: {}", file.name());
+                                                    warn!("got 0 bytes: {}", file.name());
                                                     // 0 Byte file
                                                     file.set_status(DownloadStatus::Completed);
                                                 }
                                             }
                                         },
                                         SizeResult::Stream => {
-                                            println!("Got no known metadata size for {}. Setting to stream.", file_id);
+                                            debug!("Got no known metadata size for {}. Setting to stream.", file_id);
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Unknown);
@@ -792,16 +793,16 @@ impl DownloadSupervisor {
                                         SizeResult::Retryable(_) => {
                                             file.increment_retries();
                                             if file.retries() > 5 { 
-                                                println!("Failed to get metadata size for {} after retrying.", file_id);
+                                                warn!("Failed to get metadata size for {} after retrying.", file_id);
                                                 file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
                                                 let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                             } else {
-                                                println!("Failed to get metadata size for {}. Retrying.", file_id);
+                                                warn!("Failed to get metadata size for {}. Retrying.", file_id);
                                                 state.retry_uninitialized.push((file_id, url));
                                             }
                                         },
                                         SizeResult::PermanentFail => {
-                                            println!("Failed to get metadata size for {}.", file_id);
+                                            warn!("Failed to get metadata size for {}.", file_id);
                                             file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
                                             let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                         },
@@ -859,12 +860,12 @@ impl DownloadSupervisor {
                                     let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
                                 }
                                 SupervisorMessage::NetworkError(permit, error, retry_kind) => {
-                                    eprintln!("Network Error for {}: {}. Retrying...", retry_kind.file_id(), error);
+                                    warn!("Network Error for {}: {}. Retrying...", retry_kind.file_id(), error);
 
                                     let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind)); 
                                 },
                                 SupervisorMessage::ServerError(permit, status_code, retry_kind) => {
-                                    eprintln!("Server error ({}). Retrying...", status_code);
+                                    warn!("Server error ({}). Retrying...", status_code);
 
                                     let download_id = state.download.id();
                                     let file_id = retry_kind.file_id();
@@ -883,7 +884,7 @@ impl DownloadSupervisor {
                                     }
                                 },
                                 SupervisorMessage::ClientError(permit, status_code, retry_kind) => {
-                                    eprintln!("Client error ({}).", status_code);
+                                    error!("Client error ({}).", status_code);
 
                                     let download_id = state.download.id();
                                     let file_id = retry_kind.file_id();
@@ -904,7 +905,7 @@ impl DownloadSupervisor {
                                         DownloadType::Folder(_) => continue,
                                     };
 
-                                    eprintln!("Rate limited for {}.", retry_kind.file_id());
+                                    warn!("Rate limited for {}.", retry_kind.file_id());
                                     file.set_status(DownloadStatus::Waiting(retry_after));
                                     
                                     state.retry_queue_count += 1;
@@ -940,7 +941,7 @@ impl DownloadSupervisor {
                                         std::io::ErrorKind::InvalidFilename |
                                         std::io::ErrorKind::ArgumentListTooLong |
                                         std::io::ErrorKind::Unsupported =>  {
-                                            eprintln!("IO error: {error}");
+                                            error!("IO error: {error}");
                                             file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
                                             // fail
                                         }
@@ -951,7 +952,7 @@ impl DownloadSupervisor {
                                         std::io::ErrorKind::QuotaExceeded |
                                         std::io::ErrorKind::FileTooLarge |
                                         std::io::ErrorKind::OutOfMemory => {
-                                            eprintln!("The system has ran out of storage: {error}");
+                                            error!("The system has ran out of storage: {error}");
                                             file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
                                             // fail
                                         },
@@ -970,13 +971,13 @@ impl DownloadSupervisor {
                                         std::io::ErrorKind::ExecutableFileBusy |
                                         std::io::ErrorKind::Deadlock |
                                         std::io::ErrorKind::Interrupted => {
-                                            eprintln!("Temporary OS error: {error}. Retrying...");
+                                            warn!("Temporary OS error: {error}. Retrying...");
 
                                             let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
                                         },
                                         
                                         _ => {
-                                            eprintln!("OS error: {error}.");
+                                            error!("OS error: {error}.");
                                             file.increment_retries();
                                             if file.retries() > 5 { 
                                                 file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
@@ -1060,9 +1061,9 @@ async fn fetch_file_size(client: &reqwest::Client, url: &str) -> SizeResult {
             | StatusCode::PARTIAL_CONTENT => {
                 if let Some(range_header) = response.headers().get(header::CONTENT_RANGE) {
                     if let Ok(str) = range_header.to_str() {
-                        println!("parse successfuly: {}", str);
+                        trace!("parse successfuly: {}", str);
                         if let Some(total_size) = parse_content_range(str) && total_size != 0 {
-                            println!("parsed correctly!");
+                            trace!("parsed correctly!");
                             return SizeResult::Known(total_size);
                         }
 

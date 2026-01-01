@@ -3,6 +3,7 @@ use std::{collections::{HashMap, VecDeque}, sync::{Arc, Weak, atomic::{AtomicUsi
 use reqwest::Client;
 use tokio::{sync::{OwnedSemaphorePermit, Semaphore, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, trace, warn};
 use url::Host;
 
 use crate::{client_state_manager::UiStateEvent, download::{Download, DownloadId, DownloadStatus}, download_task::DownloadSupervisor, plugin_registry::PluginRegistryHandler, state_manager::StateManager};
@@ -129,7 +130,7 @@ impl HostManager {
         loop {
             tokio::select! {
                 _ = &mut rate_limit_timer, if self.rate_limited => {
-                    println!("Rate limit lifted, resuming downloads.");
+                    debug!("Rate limit lifted, resuming downloads.");
                     self.rate_limited = false;
                     self.distribute_permits().await;
                 }
@@ -139,7 +140,7 @@ impl HostManager {
                             self.process_download(url, download_id);
                         },
                         HostMessage::QueueDownload(download) => {
-                            println!("queueing download: {}", download.name());
+                            trace!("queueing download: {}", download.name());
                             let client = self.client.clone();
 
                             let _ = self.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
@@ -163,7 +164,7 @@ impl HostManager {
                             self.distribute_permits().await;
                         },
                         HostMessage::RequestPermits(download_id) => {
-                            println!("{} is requesting permits", *download_id);
+                            trace!("{} is requesting permits", *download_id);
                             self.distribute_permits().await;
                         },
                         HostMessage::RateLimited(retry_after) => {
@@ -207,7 +208,6 @@ impl HostManager {
 
         for download_id in &self.permit_queue {
             while self.connections_budget.available_permits() > 0 {
-                println!("available permis: {}", self.connections_budget.available_permits());
                 let permit = match self.connections_budget.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => break, // no more permits left, so don't keep distributing
@@ -218,7 +218,6 @@ impl HostManager {
                     None => break,
                 };
 
-                println!("{} saturated? {}", **download_id, supervisor.is_saturated());
                 tokio::task::yield_now().await; 
 
                 if supervisor.is_saturated() {
@@ -227,7 +226,6 @@ impl HostManager {
 
                 let guard = PermitGuard::new(supervisor.permit_count());
 
-                println!("giving permit to supervisor");
                 supervisor.give_permit(ActiveDownloadPermit::new(permit, self.sender.clone(), Arc::downgrade(&self.authority), guard));
             }
         }
@@ -250,7 +248,7 @@ impl HostManager {
                 }
 
                 else {
-                    eprintln!("No plugin found for url: {}", url);
+                    warn!("No plugin found for url: {}", url);
                 }
             };
         })
@@ -279,7 +277,7 @@ impl HostHandle {
     }
 
     pub fn process_download(&self, url: String, download_id: DownloadId) {
-        println!("sending through handle");
+        trace!("sending through handle");
         let _ = self.sender.send(HostMessage::ProcessDownload(url, download_id));
     }
 }

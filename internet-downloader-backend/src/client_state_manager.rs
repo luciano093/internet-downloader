@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tracing::debug;
+use tracing::info;
 
 use crate::download::DownloadId;
 use crate::download::FileSize;
@@ -123,12 +125,10 @@ impl UiStateManager {
                     Some(event) = event_receiver.recv() => {
                         match event {
                             UiStateEvent::AddDownload(download) => {
-                                println!("sending add event");
                                 removed_ids.remove(&download.id());
                                 let _ = delta_sender.send(FrontendMessage::DownloadAdded(download));
                             },
                             UiStateEvent::RemoveDownload(id) => {
-                                println!("sending remove event");
                                 removed_ids.insert(id);
                                 delta_manager.deltas.remove(&id);
 
@@ -162,7 +162,7 @@ impl UiStateManager {
                         }
                     }
                     _ = &mut shutdown_receiver => {
-                        println!("UI state manager shutting down");
+                        info!("UI state manager shutting down");
                         break;
                     }
                 }

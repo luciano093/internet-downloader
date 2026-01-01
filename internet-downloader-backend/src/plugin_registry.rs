@@ -3,6 +3,7 @@ use std::{collections::{HashMap, HashSet}, ops::Deref, sync::{Arc, atomic::{Atom
 use rquickjs::{Array, AsyncContext, AsyncRuntime, Context, Function, Module, Object, Promise, Runtime, WriteOptions};
 use tokio::{fs::read_dir, sync::{mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}};
 use regex::{Regex, escape};
+use tracing::{debug, error, info, trace, warn};
 use url::{Host, ParseError, Url};
 use tokio_util::sync::CancellationToken;
 
@@ -71,7 +72,6 @@ impl Worker {
         let ParseRequest { url, plugin_id, bytecode, load_guard, .. } = request;
 
         self.context.with(move |context| {
-            println!("in context");
             self.last_start.store(current_millis(), Ordering::Relaxed);
             let globals = context.globals();
 
@@ -103,23 +103,19 @@ impl Worker {
 
             
             let parse: Function = default_export.get("parse").unwrap();
-            println!("made parse");
 
             self.last_start.store(0, Ordering::Relaxed); 
             let promise: Promise = parse.call((url, Utils { })).unwrap();
-            println!("made promise");
             let future = promise.into_future::<DownloadTask>();
-            println!("made future");
 
             let value = context.clone();
 
             context.spawn(async move {
-                println!("spawning parse");
                 tokio::select! {
                     result = future => {
                         match result {
                             Ok(download_task) => {
-                                println!("got task!: {:#?}", download_task);
+                                debug!("got task!: {:#?}", download_task);
                                 let _ = load_guard.send(Some(download_task));
                             }
                             Err(err) => {
@@ -128,16 +124,16 @@ impl Worker {
                                     
                                     // Print the main error message
                                     if let Some(msg) = exception.as_string() {
-                                        println!("JS Exception: {}", msg.to_string().unwrap_or_default());
+                                        warn!("JS Exception: {}", msg.to_string().unwrap_or_default());
                                     }
 
                                     // Print the stack trace
                                     if let Some(stack) = exception.as_object().and_then(|o| o.get::<_, String>("stack").ok()) {
-                                        println!("Stack Trace:\n{}", stack);
+                                        warn!("Stack Trace:\n{}", stack);
                                     }
                                 } else {
                                     // Rust error
-                                    println!("Rust/Internal Error: {}", err);
+                                    error!("Rust error: {}", err);
                                 }
 
                                 let _ = load_guard.send(None);
@@ -150,8 +146,6 @@ impl Worker {
                 }
 
             });
-
-            println!("after spawn");
         }).await;
     }
 }
@@ -271,20 +265,14 @@ impl RegistryEntry {
             return None; 
         }
 
-        println!("passed excludes");
-
         // we get all regexes that match our url, if there are multiple, we get the one with a highest score (matches more of the url)
         let best_specificity = self.supports.iter()
             .filter(|(regex, _)| {
-                println!("{} is match {}: {}", regex, url, regex.is_match(url));
                 regex.is_match(url)
             })
             .map(|(_, score)| *score)
             .max()?; 
-
-        println!("passed specificity");
         
-
         Some((self.priority, best_specificity, self.plugin_name.clone()))
     }
 }
@@ -324,7 +312,7 @@ impl PluginRegistry {
                         candidates.insert(*id);
                     }
 
-                    println!("host name: {:#?}", Url::parse(&url).unwrap().host());
+                    debug!("host name: {:#?}", Url::parse(&url).unwrap().host());
 
                     if let Some(host) = Url::parse(&url).unwrap().host() {
                         if let Some(ids) = self.host_cache.get(&host.to_owned()) {
@@ -336,11 +324,11 @@ impl PluginRegistry {
 
                     let candidates: Vec<PluginId> = candidates.into_iter().collect();
                     for candiate in &candidates {
-                        println!("found candidate: {}", self.entries[**candiate].plugin_name);
+                        debug!("found candidate: {}", self.entries[**candiate].plugin_name);
                     }
 
                     if let Some(plugin_id) = self.find_best_plugin(&url, &candidates) {
-                        println!("found best plugin: {}", self.entries[*plugin_id].plugin_name);
+                        debug!("found best plugin: {}", self.entries[*plugin_id].plugin_name);
                         let worker_index = self.select_best_worker(plugin_id);
                         let worker = &mut self.runtimes[worker_index];
 
@@ -355,10 +343,9 @@ impl PluginRegistry {
 
                         worker.active_load.fetch_add(1, Ordering::Relaxed);
 
-                        println!("sending worker parse");
                         worker.parse(url, plugin_id, bytecode, sender, cancel_token);
                     } else { 
-                        println!("didn't find plugin");
+                        warn!("didn't find plugin");
                         let _ = sender.send(None);
                     }
                 },
@@ -375,8 +362,6 @@ impl PluginRegistry {
             let entry = entry.get_match_metric(url).map(|(priority, specificity, name)| {
                 (plugin_id, priority, specificity, name)
             });
-
-            println!("{} is {:#?}", self.entries[*plugin_id].plugin_name, entry);
 
             entry
         })
@@ -461,7 +446,7 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
         let name = path.file_name().to_str().unwrap().to_string();
         let path = path.path();
 
-        println!("found {} {}", name, path.extension().unwrap().to_str().unwrap());
+        trace!("Found {}", name);
 
         // Skip non-js paths
         if path.extension().map_or(false, |extension| extension != "js") {
@@ -490,8 +475,6 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
             let supports_arr: Option<Array> = plugin.get("supports").unwrap();
             let supports_regex: Option<Array> = plugin.get("supports_regex").unwrap();
 
-            println!("{:#?} and {:#?}", supports_arr, supports_regex);
-
             if supports_arr.is_none() && supports_regex.is_none() {
                 panic!("Plugin object should have either a 'supports' list or a 'supports_regex' list");
             }
@@ -501,11 +484,7 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
             let mut supports = Vec::new();
             let mut excludes = Vec::new();
 
-            println!("test");
-
             let is_complex = supports_regex.is_some() && !supports_regex.as_ref().unwrap().is_empty();
-
-            println!("test1");
 
             if let Some(supports_regex) = supports_regex {
                 for item in supports_regex.iter::<String>() {
@@ -514,12 +493,10 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
                     if let Ok(regex) = Regex::new(&string) {
                         supports.push((regex, string.len()));
                     } else {
-                        eprintln!("Wrong regex: {}", string);
+                        warn!("Plugin {} had a wrong regex: {}", name, string);
                     }
                 }
             }
-
-            println!("test2");
             
             if let Some(supports_arr) = supports_arr {
                 for item in supports_arr.iter::<String>() {
@@ -529,11 +506,6 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
                         excludes.push(to_regex(&to_url(str).unwrap()));
                     } else {
                         supports.push((to_regex(&to_url(&string).unwrap()), string.len()));
-
-                        println!("checking {}", string);
-                        println!("{}", to_url(&string).unwrap());
-                        println!("{}", to_url(&string).unwrap().authority());
-                        println!("{:#?}", to_url(&string).unwrap().host());
                         
                         if let Some(host) = to_url(&string).unwrap().host()  {
                             let host = host.to_owned();
@@ -546,8 +518,6 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
                     }
                 }
             }
-
-            println!("test3");
 
             if is_complex {
                 complex_plugins.push(PluginId(id));
@@ -568,6 +538,8 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
             priority,
         });
     }
+
+    info!(count = entries.len(), "Loaded all plugins");
 
     (entries, host_map, complex_plugins)
 }
