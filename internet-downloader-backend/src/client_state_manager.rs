@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -9,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tracing::debug;
 use tracing::info;
 
 use crate::download::DownloadId;
