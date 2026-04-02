@@ -7,3 +7,4 @@ pub mod download_task;
 pub mod shared_file_map;
 pub mod plugin_registry;
 pub mod context;
+pub mod utils;

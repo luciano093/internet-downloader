@@ -4,7 +4,6 @@ use std::{fs::File, path::PathBuf};
 pub struct SharedFileMap {
     file: File,
     size: u64,
-    path: PathBuf,
 }
 
 impl SharedFileMap {
@@ -37,7 +36,7 @@ impl SharedFileMap {
 
         file.set_len(size).unwrap();
         
-        Self { file, size, path }
+        Self { file, size }
     }
 
     pub fn write_chunk(&self, offset: usize, data: &[u8]) {
@@ -58,71 +57,6 @@ impl SharedFileMap {
         {
             use std::os::unix::fs::FileExt;
             self.file.write_at(data, offset as u64).unwrap();
-        }
-    }
-
-    pub fn delete(self) {
-        // Windows
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Storage::FileSystem::{
-                SetFileInformationByHandle, 
-                FileDispositionInfoEx, 
-                FILE_DISPOSITION_INFO_EX, 
-                FILE_DISPOSITION_FLAG_DELETE, 
-                FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-                FileDispositionInfo,
-                FILE_DISPOSITION_INFO
-            };
-
-            let handle = self.file.as_raw_handle() as isize;
-
-            // Try  Windows 10+ POSIX semantics first.
-            // This flag forcefully overrides Windows Defender / Antivirus memory-map locks
-            // allowing the file to be unlinked immediately even if a background process is scanning it.
-            let mut fdi_ex = FILE_DISPOSITION_INFO_EX { 
-                Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS 
-            };
-
-            let mut success = unsafe {
-                SetFileInformationByHandle(
-                    handle as _,
-                    FileDispositionInfoEx,
-                    &mut fdi_ex as *mut _ as *mut std::ffi::c_void,
-                    std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
-                )
-            };
-
-            // Fallback for older Windows versions (or FAT32 drives)
-            if success == 0 {
-                let err = std::io::Error::last_os_error();
-                // ERROR_INVALID_PARAMETER (87) means POSIX semantics aren't supported on this OS/Drive
-                if err.raw_os_error() == Some(87) { 
-                    
-                    let mut fdi = FILE_DISPOSITION_INFO { DeleteFile: true }; 
-                    
-                    success = unsafe {
-                        SetFileInformationByHandle(
-                            handle as _,
-                            FileDispositionInfo,
-                            &mut fdi as *mut _ as *mut std::ffi::c_void,
-                            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
-                        )
-                    };
-                }
-            }
-
-            if success == 0 {
-                use tracing::error;
-                let err = std::io::Error::last_os_error();
-                error!("Failed to mark file {:?} for deletion! OS Error: {}", self.path, err);
-            }
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = std::fs::remove_file(&self.path);
         }
     }
 }

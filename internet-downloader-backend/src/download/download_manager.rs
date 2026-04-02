@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -16,12 +16,13 @@ use rkyv::with::{ArchiveWith, AsString};
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Semaphore, broadcast, mpsc};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
 use crate::plugin_registry::PluginRegistryHandler;
-use crate::{download, network_manager};
+use crate::utils::file_utils::force_delete_file;
+use crate::network_manager;
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::state_manager::StateManager;
@@ -85,7 +86,7 @@ pub enum DownloadCommand {
 
 pub enum ManagerCommand {
     QueueDownload(String),
-    RemoveDownload(DownloadId),
+    RemoveDownload(DownloadId, bool), // true if we want to remove from disk too
     CleanUpDownload(DownloadId),
     Shutdown,
 }
@@ -161,9 +162,9 @@ impl DownloadManager {
         Ok(())
     }
 
-    pub async fn remove_download(&mut self, id: DownloadId) {
+    pub async fn remove_download(&mut self, id: DownloadId, from_disk: bool) {
         if let Some(sender) = &self.command_sender {
-            let _ = sender.send(ManagerCommand::RemoveDownload(id));
+            let _ = sender.send(ManagerCommand::RemoveDownload(id, from_disk));
         }
     }
 
@@ -221,7 +222,7 @@ impl DownloadManager {
 
         let next_id = self.next_id.take().unwrap();
         
-        let mut removed_downloads = HashSet::new();
+        let mut removed_downloads = HashMap::new();
 
         tokio::spawn(async move {
             loop {
@@ -242,10 +243,10 @@ impl DownloadManager {
 
                                 network_manager.queue_download(url, id);
                             },
-                            ManagerCommand::RemoveDownload(id) => {
+                            ManagerCommand::RemoveDownload(id, from_disk) => {
                                 info!("Removing download");
                                 // First, we set it as removed
-                                removed_downloads.insert(id);
+                                removed_downloads.insert(id, from_disk);
 
                                  // Try to remove from Pending Queue
                                 if queue.shift_remove(&id).is_some() {
@@ -255,7 +256,7 @@ impl DownloadManager {
                                 // If not in queue, it might be running. Send Cancel signal.
                                 else if let Some(url) = id_registry.get(&id) {
                                     // In this case, we have to wait for the download to finish so it sends the clean up command
-                                    network_manager.cancel_download(url.clone(), download::download_manager::DownloadId(*id));
+                                    network_manager.cancel_download(url.clone(), DownloadId(*id));
                                 }
                                 // Else if it's already done or doesn't exist; just clean up
                                 else {
@@ -270,7 +271,27 @@ impl DownloadManager {
                                 }
                                 
                                 // Finally, we clean it up from the set
-                                if removed_downloads.remove(&download_id) {
+                                if let Some(from_disk) = removed_downloads.remove(&download_id) {
+                                    if from_disk {
+                                        match db_manager.load_download(download_id).await {
+                                            Ok(download) => {
+                                                for file_type in download.files().values() {
+                                                    if let DownloadType::File(file) = file_type {
+                                                        let path = file.relative_path(); 
+                                                        if path.exists() {
+                                                            force_delete_file(&path); 
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // We couldn't load it the download from the db. 
+                                                // Maybe it was never saved to the db?
+                                                warn!("Could not load download {} from DB to delete physical files. Skipping file deletion.", download_id);
+                                            }
+                                        } 
+                                    }
+
                                     db_manager.delete_download(download_id).await;
                                     let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*download_id));
                                 }

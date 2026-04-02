@@ -169,7 +169,5 @@ struct DownloadDeletion {
 async fn delete_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<DownloadDeletion>) -> impl IntoResponse {
     debug!(url = %params.id, "Received download deletion query");
 
-    manager.lock().await.remove_download(DownloadId(params.id)).await;
-
-    "test"
+    manager.lock().await.remove_download(DownloadId(params.id), params.from_disk.unwrap_or(false)).await;
 }

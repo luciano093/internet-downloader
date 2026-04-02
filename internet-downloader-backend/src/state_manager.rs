@@ -71,6 +71,26 @@ impl StateManager {
             .unwrap();
     }
 
+    pub async fn load_download(&self, id: DownloadId) -> Result<Download, ()> {
+        let row: Option<Vec<u8>> = sqlx::query_scalar("SELECT state_blob FROM download_states WHERE id = ?")
+            .bind(*id as i64) 
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap(); 
+
+        match row {
+            Some(blob) => {
+                // The blob exists, deserialize it
+                let download = rkyv::from_bytes::<Download, rkyv::rancor::Error>(&blob).unwrap();
+                Ok(download)
+            }
+            None => {
+                // The ID was not found in the database
+                Err(()) 
+            }
+        }
+    }
+
     pub async fn load_downloads(&self) -> Result<IndexMap<DownloadId, Download>, ()> {
         let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT state_blob FROM download_states ORDER BY id ASC" )
             .fetch_all(&self.pool)
