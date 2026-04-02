@@ -1,12 +1,11 @@
 use std::{collections::{HashMap, VecDeque}, sync::{Arc, Weak, atomic::{AtomicUsize, Ordering}}, time::Duration};
 
-use reqwest::Client;
 use tokio::{sync::{OwnedSemaphorePermit, Semaphore, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, download::{Download, DownloadId, DownloadStatus, ManagerCommand}, download_task::DownloadSupervisor, plugin_registry::PluginRegistryHandler, state_manager::StateManager};
+use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{Download, DownloadId, DownloadStatus}, download_task::DownloadSupervisor};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -91,36 +90,28 @@ pub enum HostMessage {
 }
 
 pub struct HostManager {
-    client: Client,
     host: Host,
     sender: UnboundedSender<HostMessage>,
     receiver: UnboundedReceiver<HostMessage>,
     active_downloads: HashMap<DownloadId, DownloadSupervisor>, // Maybe change this to a BTreeMap for order
     connections_budget: Arc<Semaphore>,
     permit_queue: VecDeque<DownloadId>,
-    download_manager: UnboundedSender<ManagerCommand>,
-    ui_sender: UnboundedSender<UiStateEvent>,
-    db_manager: StateManager,
-    plugin_registry: PluginRegistryHandler,
+    app_context: AppContext,
     download_supervisors_debt: Arc<AtomicUsize>, // How many permits the supervisors still have to return
     authority: Arc<()>,
     rate_limited: bool,
 }
 
 impl HostManager {
-    pub fn new(client: Client, host: Host, sender: UnboundedSender<HostMessage>, receiver: UnboundedReceiver<HostMessage>, download_manager: UnboundedSender<ManagerCommand>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager, plugin_registry: PluginRegistryHandler) -> Self {
+    pub fn new(app_context: AppContext, host: Host, sender: UnboundedSender<HostMessage>, receiver: UnboundedReceiver<HostMessage>) -> Self {
         Self {
-            client,
             host,
             sender,
             receiver,
             active_downloads: HashMap::new(),
             connections_budget: Arc::new(Semaphore::const_new(16)),
             permit_queue: VecDeque::new(),
-            download_manager,
-            ui_sender,
-            db_manager,
-            plugin_registry,
+            app_context,
             download_supervisors_debt: Arc::new(0.into()),
             authority: Arc::new(()),
             rate_limited: false,
@@ -144,11 +135,10 @@ impl HostManager {
                         },
                         HostMessage::QueueDownload(download) => {
                             trace!("queueing download: {}", download.name());
-                            let client = self.client.clone();
 
-                            let _ = self.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
+                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
                             self.permit_queue.push_back(download.id());
-                            self.active_downloads.insert(download.id(), DownloadSupervisor::new(client, download, self.sender.clone(), self.download_manager.clone(), self.ui_sender.clone(), self.db_manager.clone()));
+                            self.active_downloads.insert(download.id(), DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone()));
 
                             self.distribute_permits().await;
                         },
@@ -173,7 +163,7 @@ impl HostManager {
                             self.distribute_permits().await
                         },
                         HostMessage::DownloadFinished(download_id) => {
-                            let _ = self.ui_sender.send(UiStateEvent::AddUpdate(crate::download::DownloadUpdate::StatusChanged { id: download_id, status: DownloadStatus::Completed }));
+                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(crate::download::DownloadUpdate::StatusChanged { id: download_id, status: DownloadStatus::Completed }));
                             self.active_downloads.remove(&download_id);
         
                             if let Some(pos) = self.permit_queue.iter().position(|x| *x == download_id) {
@@ -273,7 +263,7 @@ impl HostManager {
 
     fn process_download(&self, url: String, id: DownloadId) -> JoinHandle<()> {
         let self_sender = self.sender.clone();
-        let plugin_registry = self.plugin_registry.clone();
+        let plugin_registry = self.app_context.plugin_registry.clone();
 
         tokio::spawn(async move {
             let (sender, receiver) = oneshot::channel();
@@ -300,10 +290,10 @@ pub struct HostHandle {
 }
 
 impl HostHandle {
-    pub fn spawn(client: Client, host: Host, download_manager: UnboundedSender<ManagerCommand>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager, plugin_registry: PluginRegistryHandler) -> (Self, JoinHandle<()>) {
+    pub fn spawn(app_context: AppContext, host: Host) -> (Self, JoinHandle<()>) {
         let (host_sender, host_receiver) = unbounded_channel();
 
-        let host_manager = HostManager::new(client, host, host_sender.clone(), host_receiver, download_manager, ui_sender, db_manager, plugin_registry);
+        let host_manager = HostManager::new(app_context, host, host_sender.clone(), host_receiver);
 
         let handle = tokio::spawn(async move {
             host_manager.run().await;

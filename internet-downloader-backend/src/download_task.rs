@@ -15,10 +15,10 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
+use crate::context::AppContext;
 use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate, ManagerCommand};
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
-use crate::state_manager::StateManager;
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -165,16 +165,23 @@ pub enum Job {
     DownloadStream(usize, Arc<String>, PathBuf), // file id, url
 }
 
+#[derive(Debug)]
+pub struct RangeRetryJob {
+    pub range: (usize, usize),
+    pub url: Arc<String>,
+    pub file_map: Arc<SharedFileMap>,
+    pub expected_len: u64,
+}
+
 // TODO: try to see if i can implement a get_next_chunk()
 
 struct SupervisorState {
-    client: Client,
     download: Download,
     chunk_cursors: HashMap<usize, usize>, // used to keep track of last tracked chunk in a file to avoid looping through all the chunks every time
     uninitialized_cursor: usize, // track the last known initialized file
     streams_cursor: usize, // track the last known stream-only file
     // TODO: change this to a vec
-    retry_ranges: HashMap<usize, Vec<((usize, usize), Arc<String>, Arc<SharedFileMap>, u64)>>, // ranges that failed but are still buffered
+    retry_ranges: HashMap<usize, Vec<RangeRetryJob>>, // ranges that failed but are still buffered
     retry_uninitialized: Vec<(usize, Arc<String>)>, // tracks the files that failed to get metadata
     retry_streams: Vec<(usize, Arc<String>, PathBuf)>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
@@ -182,15 +189,13 @@ struct SupervisorState {
     active_downloads: usize, // tracks how many permits we are using to download files
     active_metadata_requests: usize, // tracks how many permits we are using to gather metadata
     file_maps: HashMap<usize, Arc<SharedFileMap>>, // Tracks file maps to get memory mapped files
-    ui_sender: UnboundedSender<UiStateEvent>,
-    db_manager: StateManager,
+    app_context: AppContext,
     retry_queue_count: usize, // tracks how many downloads we are trying. Useful for when there are no jobs and nothing in the retry queue due to retry timeout or delay
 }
 
 impl SupervisorState {
-    fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager, permit_count: Arc<AtomicUsize>) -> Self {
+    fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>, permit_count: Arc<AtomicUsize>) -> Self {
         Self { 
-            client,
             download,
             chunk_cursors: HashMap::new(),
             uninitialized_cursor: 0,
@@ -203,8 +208,7 @@ impl SupervisorState {
             active_downloads: 0,
             active_metadata_requests: 0,
             file_maps: HashMap::new(),
-            ui_sender,
-            db_manager,
+            app_context,
             retry_queue_count: 0,
         }
     }
@@ -269,11 +273,18 @@ impl SupervisorState {
             };
 
             // Check for retries first on this file
-            if let Some(retry_range) = self.retry_ranges.get_mut(&file_id) {
-                if !retry_range.is_empty() {
-                    let (range, url, file_map, expected_len) = retry_range.pop()?;
-                    return Some(Job::DownloadChunk { file_id, url, range, file_map, expected_len });
-                }
+            if let Some(retry_range) = self.retry_ranges.get_mut(&file_id) 
+                && !retry_range.is_empty()
+            {
+                let retry_range_job = retry_range.pop()?;
+
+                return Some(Job::DownloadChunk {
+                    file_id,
+                    url: retry_range_job.url,
+                    range: retry_range_job.range,
+                    file_map: retry_range_job.file_map,
+                    expected_len: retry_range_job.expected_len
+                });
             }
 
             // get cursor for this particular file
@@ -327,12 +338,12 @@ impl SupervisorState {
                     }
                 }
 
-                let file_map = if self.file_maps.contains_key(&file_id) {
-                    self.file_maps.get(&file_id).unwrap().clone()
-                } else {
-                    self.file_maps.insert(file_id, Arc::new(SharedFileMap::new(path.to_path_buf(), file_size)));
-                    self.file_maps.get(&file_id).unwrap().clone()
-                };
+                let file_map = self.file_maps
+                    .entry(file_id)
+                    .or_insert_with(|| {
+                        Arc::new(SharedFileMap::new(path.to_path_buf(), file_size))
+                    })
+                    .clone();
 
                 return Some(Job::DownloadChunk { 
                     file_id, 
@@ -368,10 +379,10 @@ impl SupervisorState {
         let cursor = self.uninitialized_cursor;
 
         for (&index, download_type) in self.download.files()[cursor..].iter() {
-            if let DownloadType::File(file) = download_type {
-                if file.size() == None {
-                    return Some((index, file.url()));
-                }
+            if let DownloadType::File(file) = download_type
+                && file.size().is_none()
+            {
+                return Some((index, file.url()));
             }
         }
         
@@ -384,9 +395,8 @@ impl SupervisorState {
 
         let actual_end = std::cmp::min(theoretical_end, file_size);
         let expected_len = actual_end.saturating_sub(start_byte);
-        let expected_len = expected_len.min(file_size);
-
-        expected_len
+        
+        expected_len.min(file_size)
     }
 }
 
@@ -402,11 +412,11 @@ pub struct DownloadSupervisor {
     handle: Option<JoinHandle<()>>,
     download_id: DownloadId,
 
-    download_manager: UnboundedSender<ManagerCommand>,
+    app_context: AppContext,
 }
 
 impl DownloadSupervisor {
-    pub fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, download_manager: UnboundedSender<ManagerCommand>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
+    pub fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>) -> Self {
         debug!("Supervisor created for: {}", download.name());
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
         let download_id = download.id();
@@ -418,14 +428,14 @@ impl DownloadSupervisor {
             .count();
 
         Self {
-            state: Some(SupervisorState::new(client, download, host_sender, ui_sender, db_manager, permit_count.clone())),
+            state: Some(SupervisorState::new(app_context.clone(), download, host_sender, permit_count.clone())),
             sender: None,
             shutdown_receiver: None,
             demand: Arc::new(AtomicUsize::new(files_to_download_count)),
             permit_count,
             handle: None,
             download_id,
-            download_manager,
+            app_context,
         }
     }
 
@@ -459,8 +469,6 @@ impl DownloadSupervisor {
                                 SupervisorMessage::ProcessPermit(permit) => {
                                     if let Some(permit) = permit.validate() {
                                         let _ = sender.send(SupervisorMessage::SpawnWorker(permit));
-                                    } else {
-
                                     }
                                 }
                                 SupervisorMessage::SpawnWorker(permit) => {
@@ -495,16 +503,16 @@ impl DownloadSupervisor {
                                             if state.permit_count.load(Ordering::SeqCst) == 0 && state.active_downloads == 0 {
                                                 let mut download_complete = true;
                                                 for file in state.download.files().values() {
-                                                    if let DownloadType::File(f) = file {
-                                                        if f.status() != DownloadStatus::Completed {
-                                                            download_complete = false;
-                                                            break;
-                                                        }
+                                                    if let DownloadType::File(f) = file 
+                                                        && f.status() != DownloadStatus::Completed
+                                                    {
+                                                        download_complete = false;
+                                                        break;
                                                     }
                                                 }
 
                                                 if download_complete {                 
-                                                    state.db_manager.write_download(&state.download).await;
+                                                    state.app_context.db_manager.write_download(&state.download).await;
                                                     state.download.set_status(DownloadStatus::Completed);
                                                     let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
                                                     break;
@@ -524,7 +532,7 @@ impl DownloadSupervisor {
                                             trace!("getting size for download: {}", state.download.name());
                                             state.active_metadata_requests += 1;
 
-                                            let client = state.client.clone();
+                                            let client = state.app_context.client.clone();
 
                                             tokio::spawn(async move {  
                                                 let size_result = fetch_file_size(&client, &url).await;
@@ -535,7 +543,7 @@ impl DownloadSupervisor {
                                         Job::DownloadChunk { file_id, url, range, file_map, expected_len } => {
                                             state.active_downloads += 1;
 
-                                            let client = state.client.clone();
+                                            let client = state.app_context.client.clone();
           
                                             tokio::spawn(async move {
                                                 // Do worker stuff
@@ -551,7 +559,7 @@ impl DownloadSupervisor {
                                         },
                                         Job::DownloadStream(file_id, url, path) => {
                                             state.active_downloads += 1;
-                                            let client = state.client.clone();
+                                            let client = state.app_context.client.clone();
                                             
                                             tokio::spawn(async move {
                                                 // Do worker stuff
@@ -604,8 +612,8 @@ impl DownloadSupervisor {
                                             file.set_bytes_downloaded(size as u64);
 
                                             if size > 0 {
-                                                let chunk_count = (size + chunk_size - 1) / chunk_size;
-                                                file.chunks_mut().resize(chunk_count as usize, true);
+                                                let chunk_count = size.div_ceil(chunk_size);
+                                                file.chunks_mut().resize(chunk_count, true);
                                                 trace!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
                                                 file.set_status(DownloadStatus::Completed); 
                                             } else {
@@ -614,9 +622,9 @@ impl DownloadSupervisor {
                                                 file.set_status(DownloadStatus::Completed);
                                             }
 
-                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size as u64 } }));
-                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: size as u64 } }));
-                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size as u64 } }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: size as u64 } }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
                                         },
                                         DownloadType::Folder(_) => todo!(),
                                     }
@@ -658,7 +666,7 @@ impl DownloadSupervisor {
                                             let name = file_download.name().to_string();
                                             let bytes_downloaded = file_download.bytes_downloaded();
 
-                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded } }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded } }));
 
 
                                             file_download.chunks_mut()[range.0..range.1].fill(true);
@@ -667,7 +675,7 @@ impl DownloadSupervisor {
 
                                             if all_chunks_done {
                                                 trace!("file {} finished! got {} bytes", name, bytes_downloaded);
-                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
+                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
                                                 file_download.set_status(DownloadStatus::Completed);
                                                 state.file_maps.remove(&file_id);
                                             }
@@ -764,7 +772,7 @@ impl DownloadSupervisor {
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Known(size));
-                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size } }));
+                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size } }));
                                                 
                                                 // todo, make this a global or store it somewhere
                                                 let chunk_size = 16384; // 16 KB
@@ -773,12 +781,12 @@ impl DownloadSupervisor {
                                                 // Initialize chunks
                                                 if size > 0 {
                                                     // Calculate how many 16KB chunks exist
-                                                    let chunk_count = (size + chunk_size - 1) / chunk_size;
+                                                    let chunk_count = size.div_ceil(chunk_size);
                                                     file.chunks_mut().resize(chunk_count as usize, false);
                                                     file.set_status(DownloadStatus::InProgress); 
 
                                                     // Calculate how many ranges (jobs) are needed for this file
-                                                    let job_count = (chunk_count + target_range_size - 1) / target_range_size;
+                                                    let job_count = chunk_count.div_ceil(target_range_size);
                                                     
                                                     // Add the required jobs to our demand
                                                     demand.fetch_add(job_count as usize, Ordering::SeqCst);
@@ -806,7 +814,7 @@ impl DownloadSupervisor {
                                             if file.retries() > 5 { 
                                                 warn!("Failed to get metadata size for {} after retrying.", file_id);
                                                 file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
-                                                let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                             } else {
                                                 warn!("Failed to get metadata size for {}. Retrying.", file_id);
                                                 let retry_kind = RetryKind::Metadata(MetadataRetry { file_id, url });
@@ -816,7 +824,7 @@ impl DownloadSupervisor {
                                         SizeResult::PermanentFail => {
                                             warn!("Failed to get metadata size for {}.", file_id);
                                             file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
-                                            let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                         },
                                     }
                                 },
@@ -831,7 +839,7 @@ impl DownloadSupervisor {
 
                                     file.set_status(DownloadStatus::Retrying);
 
-                                    let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Retrying } }));
+                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Retrying } }));
 
                                     drop(permit); 
                                     let sender = sender.clone();
@@ -858,7 +866,12 @@ impl DownloadSupervisor {
                                             state.retry_ranges
                                                 .entry(range_download.file_id)
                                                 .or_default()
-                                                .push((range_download.range, range_download.url, range_download.file_map, range_download.expected_len));
+                                                .push(RangeRetryJob {
+                                                    range: range_download.range,
+                                                    url: range_download.url,
+                                                    file_map: range_download.file_map,
+                                                    expected_len: range_download.expected_len
+                                                });
                                         },
                                     }
 
@@ -883,7 +896,7 @@ impl DownloadSupervisor {
                                     file.increment_retries();
                                     if file.retries() > 5 { 
                                         file.set_status(DownloadStatus::Failed(DownloadFailureReason::ServerError));
-                                        let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                        let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                     } else {
                                         let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
                                     }
@@ -902,7 +915,7 @@ impl DownloadSupervisor {
 
                                     file.set_status(DownloadStatus::Failed(DownloadFailureReason::ClientError));
 
-                                    let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                 }
                                 SupervisorMessage::RateLimited(_permit, retry_after, retry_kind) => {
                                     let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
@@ -992,18 +1005,18 @@ impl DownloadSupervisor {
                                         },
                                     }
 
-                                    let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                 },
                             }
                         }
                     _ = save_interval.tick() => {
-                        state.db_manager.write_download(&state.download).await;
+                        state.app_context.db_manager.write_download(&state.download).await;
                     }
                 }
         
             }
             // saves to db here for persitence and in case oneshot fails
-            state.db_manager.write_download(&state.download).await;
+            state.app_context.db_manager.write_download(&state.download).await;
 
             let _ = shutdown_sender.send(state);
         });
@@ -1016,10 +1029,8 @@ impl DownloadSupervisor {
     }
         
     pub fn give_permit(&mut self, permit: ActiveDownloadPermit) {
-        if let Some(sender) = &self.sender {
-            if sender.is_closed() {
-                self.sender = None;
-            }
+        if let Some(sender) = &self.sender && sender.is_closed() {
+            self.sender = None;
         }
 
         if self.sender.is_none() {
@@ -1043,7 +1054,7 @@ impl DownloadSupervisor {
 
 impl Drop for DownloadSupervisor {
     fn drop(&mut self) {
-        let _ = self.download_manager.send(ManagerCommand::CleanUpDownload(self.download_id));
+        let _ = self.app_context.download_manager.send(ManagerCommand::CleanUpDownload(self.download_id));
     }
 }
 
@@ -1054,12 +1065,11 @@ async fn fetch_file_size(client: &reqwest::Client, url: &str) -> SizeResult {
         .send()
         .await;
 
-    if let Ok(response) = head_result {
-        if let Some(len) = response.content_length() && response.status().is_success() {
-            if len != 0 {
-                return SizeResult::Known(len);
-            }
-        }
+    if let Ok(response) = head_result
+        && let Some(len) = response.content_length()
+        && response.status().is_success() && len != 0
+    {
+        return SizeResult::Known(len);
     }
 
     // If HEAD fails or returns no length, do a GET request and abort immediately to avoid downloading body
@@ -1072,16 +1082,16 @@ async fn fetch_file_size(client: &reqwest::Client, url: &str) -> SizeResult {
     if let Ok(response) = get_result {
         match response.status() {
             | StatusCode::PARTIAL_CONTENT => {
-                if let Some(range_header) = response.headers().get(header::CONTENT_RANGE) {
-                    if let Ok(str) = range_header.to_str() {
-                        trace!("parse successfuly: {}", str);
-                        if let Some(total_size) = parse_content_range(str) && total_size != 0 {
-                            trace!("parsed correctly!");
-                            return SizeResult::Known(total_size);
-                        }
-
-                        return SizeResult::Stream; 
+                if let Some(range_header) = response.headers().get(header::CONTENT_RANGE)
+                    && let Ok(str) = range_header.to_str()
+                {
+                    trace!("parse successfuly: {}", str);
+                    if let Some(total_size) = parse_content_range(str) && total_size != 0 {
+                        trace!("parsed correctly!");
+                        return SizeResult::Known(total_size);
                     }
+
+                    return SizeResult::Stream; 
                 }
             }
             StatusCode::OK => {
@@ -1147,10 +1157,10 @@ async fn download_range(client: Client, url: &str, range: (usize, usize), file_m
                     return Err(RangeDownloadError::RangeNotSupported);
                 }
 
-                if let Some(content_length) = response.content_length() {
-                    if content_length != end_byte + 1 {
-                        return Err(RangeDownloadError::RangeNotSupported);
-                    }
+                if let Some(content_length) = response.content_length() 
+                    && content_length != end_byte + 1
+                {
+                    return Err(RangeDownloadError::RangeNotSupported);
                 };
                 
                 Ok(response)

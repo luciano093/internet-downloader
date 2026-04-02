@@ -116,7 +116,7 @@ impl Worker {
                         match result {
                             Ok(download_task) => {
                                 debug!("got task!: {:#?}", download_task);
-                                let _ = load_guard.send(Some(download_task));
+                                load_guard.send(Some(download_task));
                             }
                             Err(err) => {
                                 if err.is_exception() {
@@ -136,7 +136,7 @@ impl Worker {
                                     error!("Rust error: {}", err);
                                 }
 
-                                let _ = load_guard.send(None);
+                                load_guard.send(None);
                             }
                         }
                     }
@@ -314,11 +314,11 @@ impl PluginRegistry {
 
                     debug!("host name: {:#?}", Url::parse(&url).unwrap().host());
 
-                    if let Some(host) = Url::parse(&url).unwrap().host() {
-                        if let Some(ids) = self.host_cache.get(&host.to_owned()) {
-                            for id in ids {
-                                candidates.insert(*id);
-                            }
+                    if let Some(host) = Url::parse(&url).unwrap().host()
+                        && let Some(ids) = self.host_cache.get(&host.to_owned())
+                    {
+                        for id in ids {
+                            candidates.insert(*id);
                         }
                     }
 
@@ -359,11 +359,10 @@ impl PluginRegistry {
         .filter_map(|&plugin_id| {
             let entry = &self.entries[*plugin_id];
 
-            let entry = entry.get_match_metric(url).map(|(priority, specificity, name)| {
+            // Return gotten entry
+            entry.get_match_metric(url).map(|(priority, specificity, name)| {
                 (plugin_id, priority, specificity, name)
-            });
-
-            entry
+            })
         })
         .max_by(|(_, specificity_a, priority_a, name_a), (_, specificity_b, priority_b, name_b)| {
             // First we check specificity, for example in "https://youtube.com/watch/?v=", 
@@ -431,6 +430,13 @@ impl PluginRegistryHandler {
     }
 }
 
+pub struct CompiledPlugin {
+    pub supports: Vec<(Regex, usize)>,
+    pub excludes: Vec<Regex>,
+    pub priority: i32,
+    pub bytecode: Vec<u8>,
+}
+
 async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, Vec<PluginId>>, Vec<PluginId>) {
     let mut plugin_folder = read_dir(plugins_path).await.unwrap();
 
@@ -449,7 +455,7 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
         trace!("Found {}", name);
 
         // Skip non-js paths
-        if path.extension().map_or(false, |extension| extension != "js") {
+        if path.extension().is_some_and(|extension| extension != "js") {
             continue;
         }
 
@@ -461,7 +467,7 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
         let absolute_path = tokio::fs::canonicalize(&path).await.unwrap();
         let module_name = absolute_path.to_string_lossy().replace("\\", "/");
 
-        let result = context.with(|context| -> rquickjs::Result<(Vec<(Regex, usize)>, Vec<Regex>, i32, Vec<u8>)> {
+        let result = context.with(|context| -> rquickjs::Result<CompiledPlugin> {
             
             // Compile module
             let module = Module::declare(context.clone(), module_name, source_code).unwrap();
@@ -524,18 +530,23 @@ async fn load_plugins(plugins_path: &str) -> (Vec<RegistryEntry>, HashMap<Host, 
             }
 
             id += 1;
-            Ok((supports, excludes, priority, bytecode))
+            Ok(CompiledPlugin {
+                supports,
+                excludes,
+                priority,
+                bytecode
+            })
         });
 
-        let (supports, excludes, priority, bytecode) = result.unwrap();
+        let compiled_plugin = result.unwrap();
 
         entries.push(RegistryEntry {
             plugin_path: path.to_str().unwrap().to_owned(),
             plugin_name: name,
-            bytecode: Arc::new(bytecode),
-            supports,
-            excludes,
-            priority,
+            bytecode: Arc::new(compiled_plugin.bytecode),
+            supports: compiled_plugin.supports,
+            excludes: compiled_plugin.excludes,
+            priority: compiled_plugin.priority,
         });
     }
 

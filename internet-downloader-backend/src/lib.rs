@@ -6,3 +6,4 @@ pub mod host_manager;
 pub mod download_task;
 pub mod shared_file_map;
 pub mod plugin_registry;
+pub mod context;

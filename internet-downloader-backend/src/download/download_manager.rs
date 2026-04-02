@@ -19,9 +19,11 @@ use tokio::sync::{Semaphore, broadcast, mpsc};
 use tracing::{debug, info, trace};
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
-use crate::download;
+use crate::context::AppContext;
+use crate::plugin_registry::PluginRegistryHandler;
+use crate::{download, network_manager};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
-use crate::network_manager::NetworkHandle;
+use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::state_manager::StateManager;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -135,13 +137,12 @@ impl DownloadManager {
                     fail = true;
                 }
 
-                if let DownloadType::File(file_download) = download_type {
-                    if file_download.status() == DownloadStatus::Completed {
-                        let hash = hash_file(file_download.relative_path().to_path_buf()).await;
+                if let DownloadType::File(file_download) = download_type 
+                    && file_download.status() == DownloadStatus::Completed {
+                    let hash = hash_file(file_download.relative_path().to_path_buf()).await;
 
-                        if Some(hash) != file_download.hash {
-                            file_download.status = DownloadStatus::Failed(DownloadFailureReason::HashMismatch);
-                        }
+                    if Some(hash) != file_download.hash {
+                        file_download.status = DownloadStatus::Failed(DownloadFailureReason::HashMismatch);
                     }
                 }
             }
@@ -183,7 +184,22 @@ impl DownloadManager {
 
         let mut queue: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
 
-        let (network_manager, _) = NetworkHandle::spawn(ui_event_sender.clone(), command_sender.clone(), db_manager.clone()).await;
+        let plugin_registry = PluginRegistryHandler::spawn().await;
+
+        
+        let network_config = NetworkConfig::default();
+        let client = network_manager::build_global_client(&network_config);
+        
+        let app_context = AppContext {
+            client,
+            network_config,
+            download_manager: command_sender.clone(),
+            ui_sender: ui_event_sender.clone(),
+            db_manager: db_manager.clone(),
+            plugin_registry
+        };
+
+        let (network_manager, _) = NetworkHandle::spawn(app_context).await;
 
         // Download registry for deduplication purposes
         let mut url_registry: HashMap<String, DownloadId> = HashMap::new();
@@ -239,7 +255,7 @@ impl DownloadManager {
                                 // If not in queue, it might be running. Send Cancel signal.
                                 else if let Some(url) = id_registry.get(&id) {
                                     // In this case, we have to wait for the download to finish so it sends the clean up command
-                                    let _ = network_manager.cancel_download(url.clone(), download::download_manager::DownloadId(*id));
+                                    network_manager.cancel_download(url.clone(), download::download_manager::DownloadId(*id));
                                 }
                                 // Else if it's already done or doesn't exist; just clean up
                                 else {
@@ -340,11 +356,10 @@ impl Download {
         &self.url
     }
 
-    pub fn get_file_mut(&mut self, id: &usize) -> Result<&mut FileDownload, ()> {
+    pub fn get_file_mut(&mut self, id: &usize) -> Option<&mut FileDownload> {
         match self.files.get_mut(id) {
-            Some(DownloadType::File(file)) => Ok(file),
-            Some(DownloadType::Folder(_)) => Err(()),
-            None => Err(()),
+            Some(DownloadType::File(file)) => Some(file),
+            _ => None,
         }
     }
 
@@ -383,7 +398,7 @@ impl Download {
 
 impl Download {
     pub fn new(id: usize, value: DownloadTask) -> Self {
-        let mut relative_path = PathBuf::new();
+        let relative_path = PathBuf::new();
 
         let mut files = IndexMap::new();
         let mut current_id = 0;
@@ -396,7 +411,7 @@ impl Download {
             },
             TaskType::Folder(folder_task) => {
                 name = folder_task.folder_name().clone();
-                Self::process_folder_creation(&folder_task, &mut relative_path, &mut current_id, &mut files, None);
+                Self::process_folder_creation(&folder_task, &relative_path, &mut current_id, &mut files, None);
             },
         }
 
@@ -405,14 +420,14 @@ impl Download {
             url: value.url,
             relative_path: PathBuf::from("./"),
             status: DownloadStatus::Queued,
-            files: files,
+            files,
             name,
         }
     }
 
     fn process_folder_creation(folder_task: &FolderTask, parent_relative_path: &Path, current_id: &mut usize, files: &mut IndexMap<usize, DownloadType>, parent_id: Option<usize>) {
         let mut children = Vec::new();
-        let mut relative_path = parent_relative_path.join(&folder_task.folder_name());
+        let relative_path = parent_relative_path.join(folder_task.folder_name());
 
         let folder_id = *current_id;
         *current_id += 1;
@@ -420,17 +435,17 @@ impl Download {
         for file_type in &folder_task.files {
             match file_type {
                 TaskType::File(file_task) => {
-                    files.insert(*current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, *current_id, Some(folder_id))));
+                    files.insert(*current_id, DownloadType::File(FileDownload::new(file_task, &relative_path, *current_id, Some(folder_id))));
                     children.push(*current_id);
                     *current_id += 1;
                 },
                 TaskType::Folder(folder_task) => {
-                    Self::process_folder_creation(folder_task, &mut relative_path, current_id, files, Some(folder_id));
+                    Self::process_folder_creation(folder_task, &relative_path, current_id, files, Some(folder_id));
                 },
             }
         }
 
-        files.insert(folder_id, DownloadType::Folder(FolderDownload::new(&folder_task, &parent_relative_path, folder_id, children, parent_id)));
+        files.insert(folder_id, DownloadType::Folder(FolderDownload::new(folder_task, parent_relative_path, folder_id, children, parent_id)));
     }
 }
 
@@ -641,7 +656,7 @@ impl Debug for FileDownload {
 
 impl FileDownload {
     pub(super) fn new(file_task: &FileTask, relative_path: &Path, id: usize, parent_id: Option<usize>) -> Self {
-        let relative_path = relative_path.join(&file_task.file_name());
+        let relative_path = relative_path.join(file_task.file_name());
 
         Self { 
             parent_id,
@@ -716,7 +731,7 @@ pub struct FolderDownload {
 
 impl FolderDownload {
     pub(super) fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<usize>, parent_id: Option<usize>) -> Self {
-        let relative_path = parent_relative_path.join(&folder_task.folder_name());
+        let relative_path = parent_relative_path.join(folder_task.folder_name());
 
         Self { 
             parent_id,

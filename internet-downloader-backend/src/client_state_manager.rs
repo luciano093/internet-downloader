@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -175,6 +176,12 @@ impl UiStateManager {
     }
 }
 
+impl Default for UiStateManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub async fn get_snapshot(db_state_manager: &StateManager) -> DownloadSnapshot {
     DownloadSnapshot(db_state_manager.load_downloads().await.unwrap())
 }
@@ -218,20 +225,21 @@ impl DeltaManager {
     pub fn add_update(&mut self, download_update: DownloadUpdate) {
         match download_update {
             DownloadUpdate::StatusChanged { id, status } => {
-                let download_diff = self.deltas.entry(*id).or_insert(DownloadDiff::default());
+                let download_diff = self.deltas.entry(*id).or_default();
             
                 download_diff.status = Some(status);
             },
             DownloadUpdate::FileUpdated { id, file_update } => {
-                let download_diff = self.deltas.entry(*id).or_insert(DownloadDiff::default());
+                let download_diff = self.deltas.entry(*id).or_default();
 
                 let file_id = file_update.id();
-                if let None = download_diff.files.get(&file_id) {
+
+                if let hash_map::Entry::Vacant(entry) = download_diff.files.entry(file_id) {
                     let mut file_diff = FileDiff::new();
 
                     file_diff.update(file_update);
 
-                    download_diff.files.insert(file_id, ItemDiff::File(file_diff));
+                    entry.insert( ItemDiff::File(file_diff));
                 } else {
                     let file_diff = download_diff.files.get_mut(&file_id).unwrap();
 
@@ -241,6 +249,12 @@ impl DeltaManager {
                 }
             }
         }
+    }
+}
+
+impl Default for DeltaManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
