@@ -33,7 +33,7 @@ pub struct ActiveDownloadPermit {
 }
 
 impl ActiveDownloadPermit {
-    pub fn new(permit: OwnedSemaphorePermit, host_sender: UnboundedSender<HostMessage>, authority: Weak<()>, _guard: PermitGuard) -> Self {
+    fn new(permit: OwnedSemaphorePermit, host_sender: UnboundedSender<HostMessage>, authority: Weak<()>, _guard: PermitGuard) -> Self {
         Self { permit: Some(permit), host_sender, authority, _guard: Some(_guard) }
     }
 
@@ -153,8 +153,24 @@ impl HostManager {
                             self.distribute_permits().await;
                         },
                         HostMessage::PermitReleased(owned_semaphore_permit) => {
-                            drop(owned_semaphore_permit);
-                            self.distribute_permits().await;
+                            // Check if we owe debt because of the global limit having been reduced
+                            let current_debt = self.download_supervisors_debt.load(Ordering::Acquire);
+    
+                            if current_debt > 0 {
+                                // We need to shrink the global pool.
+                                // Instead of dropping it (which returns it to the pool), we forget it (permanently decreases max permits).
+                                owned_semaphore_permit.forget();
+                                
+                                // We pay 1 unit of debt
+                                self.download_supervisors_debt.fetch_sub(1, Ordering::SeqCst);
+                                trace!("Permit forgotten to pay debt. Remaining debt: {}", current_debt - 1);
+                            } else {
+                                // If we have no debt, we drop normally
+                                drop(owned_semaphore_permit);
+                            }
+
+                            // Now we distribute whatever is left in the pool based on demand
+                            self.distribute_permits().await
                         },
                         HostMessage::DownloadFinished(download_id) => {
                             let _ = self.ui_sender.send(UiStateEvent::AddUpdate(crate::download::DownloadUpdate::StatusChanged { id: download_id, status: DownloadStatus::Completed }));
@@ -241,7 +257,7 @@ impl HostManager {
                     Err(_) => return,
                 };
 
-                let previous = supervisor.demand().fetch_sub(1, Ordering::SeqCst);
+                supervisor.demand().fetch_sub(1, Ordering::SeqCst);
 
                 let guard = PermitGuard::new(supervisor.permit_count());
 
