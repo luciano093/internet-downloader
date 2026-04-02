@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -12,7 +12,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate, ManagerCommand};
@@ -163,7 +163,6 @@ pub enum Job {
         expected_len: u64,
     }, // file id, url, range
     DownloadStream(usize, Arc<String>, PathBuf), // file id, url
-    AwaitingMetadata,
 }
 
 // TODO: try to see if i can implement a get_next_chunk()
@@ -185,7 +184,6 @@ struct SupervisorState {
     file_maps: HashMap<usize, Arc<SharedFileMap>>, // Tracks file maps to get memory mapped files
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
-    idle_permits: Vec<ActiveDownloadPermit>,
     retry_queue_count: usize, // tracks how many downloads we are trying. Useful for when there are no jobs and nothing in the retry queue due to retry timeout or delay
 }
 
@@ -207,7 +205,6 @@ impl SupervisorState {
             file_maps: HashMap::new(),
             ui_sender,
             db_manager,
-            idle_permits: Vec::new(),
             retry_queue_count: 0,
         }
     }
@@ -239,11 +236,7 @@ impl SupervisorState {
             if let Some(job) = self.try_take_stream_job() { return Some(job); }
         }
 
-        // we found no job, but there are metadata requests active, meaning we have to wait for them to finish
-        if self.active_metadata_requests > 0 {
-            return Some(Job::AwaitingMetadata);
-        }
-
+        // we found no job
         None
     }
 
@@ -404,7 +397,7 @@ pub struct DownloadSupervisor {
     state: Option<SupervisorState>,
     sender: Option<UnboundedSender<SupervisorMessage>>,
     shutdown_receiver: Option<oneshot::Receiver<SupervisorState>>,
-    saturated: Arc<AtomicBool>,
+    demand: Arc<AtomicUsize>,
     permit_count: Arc<AtomicUsize>,
     handle: Option<JoinHandle<()>>,
     download_id: DownloadId,
@@ -415,15 +408,20 @@ pub struct DownloadSupervisor {
 impl DownloadSupervisor {
     pub fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, download_manager: UnboundedSender<ManagerCommand>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
         debug!("Supervisor created for: {}", download.name());
-        info!("Download started: {}", download.name());
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
         let download_id = download.id();
+
+        // We get only files that are not folders (as we don't really download folders so
+        // they aren't counted for how many total files we need to download)
+        let files_to_download_count = download.files().values()
+            .filter(|f| matches!(f, DownloadType::File(_)))
+            .count();
 
         Self {
             state: Some(SupervisorState::new(client, download, host_sender, ui_sender, db_manager, permit_count.clone())),
             sender: None,
             shutdown_receiver: None,
-            saturated: Arc::new(false.into()),
+            demand: Arc::new(AtomicUsize::new(files_to_download_count)),
             permit_count,
             handle: None,
             download_id,
@@ -437,7 +435,7 @@ impl DownloadSupervisor {
 
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         self.shutdown_receiver = Some(shutdown_receiver);
-        let saturated = self.saturated.clone();
+        let demand = self.demand.clone();
 
         let handle = tokio::spawn(async move {
             let mut state = if let Some(state) = state.take() {
@@ -480,17 +478,15 @@ impl DownloadSupervisor {
                                         None => {
                                             if state.retry_queue_count > 0 {
                                                 trace!("there are still retries in queue");
-                                                // we put ourselves as saturated (not accepting more permits) until at least one retry is ready
+                                                // We drop the permit so that it returns to the global pool.
+                                                // When the retry timer is finished, it will increment the demand and request a new permit
                                                 drop(permit);
-                                                saturated.store(true, Ordering::Relaxed);
                                                 continue;
                                             }
 
                                             trace!("no jobs left");
-
-
-                                            // We tell the host manager that we are saturated so it doesn't try to send more permits
-                                            saturated.store(true, Ordering::Relaxed);
+                                            // We have no jobs, and no retries so our demand must be 0.
+                                            demand.store(0, Ordering::SeqCst);
                         
                                             // We drop the permit so it gets sent back to the host manager
                                             drop(permit);
@@ -524,10 +520,6 @@ impl DownloadSupervisor {
                                     };
 
                                     match job {
-                                        Job::AwaitingMetadata => {
-                                            state.idle_permits.push(permit.downgrade());
-                                            saturated.store(true, Ordering::Relaxed);
-                                        }
                                         Job::GetSize { file_id, url } => {
                                             trace!("getting size for download: {}", state.download.name());
                                             state.active_metadata_requests += 1;
@@ -600,6 +592,7 @@ impl DownloadSupervisor {
                                 }
                                 SupervisorMessage::StreamSuccess(permit, file_id, size) => {
                                     state.active_downloads -= 1;
+                                    drop(permit);
 
                                     let download_id = state.download.id();
                                     let chunk_size = 16384;
@@ -627,13 +620,10 @@ impl DownloadSupervisor {
                                         },
                                         DownloadType::Folder(_) => todo!(),
                                     }
-
-                                    // try to spawn another worked
-                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
-
                                 },
                                 SupervisorMessage::RangeSuccess(permit, file_id, range) => {
                                     state.active_downloads -= 1;
+                                    drop(permit); 
 
                                     let download_id = state.download.id();
 
@@ -683,10 +673,7 @@ impl DownloadSupervisor {
                                             }
                                         },
                                         crate::download::DownloadType::Folder(_) => todo!(),
-                                    } 
-
-                                    // try to spawn another worked
-                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
+                                    }
                                 },
                                 SupervisorMessage::RangeFailed(permit, file_id, range, url, file_map, expected_len, download_error) => {
                                     let retry_kind = RetryKind::RangeDownload(RangeDownload { file_id, range, url: url.clone(), file_map, expected_len });
@@ -727,6 +714,7 @@ impl DownloadSupervisor {
                                                 file.reset_retries();
                                                 state.file_maps.remove(&file.id());
                                                 state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
+                                                demand.fetch_add(1, Ordering::SeqCst); 
                                             } else {
                                                 let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
                                             }
@@ -741,7 +729,7 @@ impl DownloadSupervisor {
                                                 file.reset_retries();
                                                 state.file_maps.remove(&file.id());
                                                 state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
-                                                let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
+                                                demand.fetch_add(1, Ordering::SeqCst); 
                                             } else {
                                                 // This error is usually from a droppped connection, so don't wait much before retrying
                                                 let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_millis(300), retry_kind));
@@ -755,15 +743,12 @@ impl DownloadSupervisor {
                                             file.reset_retries();
                                             state.file_maps.remove(&file.id());
                                             state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
-                                            let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
+                                            demand.fetch_add(1, Ordering::SeqCst); 
                                         },
                                     }
                                 }
                                 SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
                                     trace!("got metadata for: {} {}", state.download.name(), file_id);
-                                    state.active_metadata_requests -= 1;
-                                    saturated.store(false, Ordering::Relaxed);
-                                    let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
 
                                     let download_id = state.download.id();
                                     let file = match state.download.files_mut().get_mut(&file_id) {
@@ -783,12 +768,21 @@ impl DownloadSupervisor {
                                                 
                                                 // todo, make this a global or store it somewhere
                                                 let chunk_size = 16384; // 16 KB
+                                                let target_range_size = 5242880 / 16384; // 320 chunks (5 MB)
 
                                                 // Initialize chunks
                                                 if size > 0 {
+                                                    // Calculate how many 16KB chunks exist
                                                     let chunk_count = (size + chunk_size - 1) / chunk_size;
                                                     file.chunks_mut().resize(chunk_count as usize, false);
                                                     file.set_status(DownloadStatus::InProgress); 
+
+                                                    // Calculate how many ranges (jobs) are needed for this file
+                                                    let job_count = (chunk_count + target_range_size - 1) / target_range_size;
+                                                    
+                                                    // Add the required jobs to our demand
+                                                    demand.fetch_add(job_count as usize, Ordering::SeqCst);
+                                                    let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
                                                 } else {
                                                     warn!("got 0 bytes: {}", file.name());
                                                     // 0 Byte file
@@ -801,6 +795,10 @@ impl DownloadSupervisor {
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Unknown);
+                                                file.set_status(DownloadStatus::InProgress); 
+
+                                                demand.fetch_add(1, Ordering::SeqCst);
+                                                let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
                                             }
                                         },
                                         SizeResult::Retryable(_) => {
@@ -811,7 +809,8 @@ impl DownloadSupervisor {
                                                 let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                             } else {
                                                 warn!("Failed to get metadata size for {}. Retrying.", file_id);
-                                                state.retry_uninitialized.push((file_id, url));
+                                                let retry_kind = RetryKind::Metadata(MetadataRetry { file_id, url });
+                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
                                             }
                                         },
                                         SizeResult::PermanentFail => {
@@ -820,16 +819,8 @@ impl DownloadSupervisor {
                                             let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                         },
                                     }
-
-                                    while let Some(permit) = state.idle_permits.pop() {
-                                        let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
-                                    }
-
-                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                 },
                                 SupervisorMessage::RetryAfter(permit, duration, retry_kind) => {
-                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
-
                                     let download_id = state.download.id();
                                     let file_id = retry_kind.file_id();
 
@@ -842,6 +833,7 @@ impl DownloadSupervisor {
 
                                     let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Retrying } }));
 
+                                    drop(permit); 
                                     let sender = sender.clone();
 
                                     state.retry_queue_count += 1;
@@ -853,7 +845,7 @@ impl DownloadSupervisor {
                                 },
                                 SupervisorMessage::RetryReady(retry_kind) => {
                                     state.retry_queue_count -= 1;
-                                    saturated.store(false, Ordering::Relaxed);
+                                    demand.fetch_add(1, Ordering::SeqCst);
 
                                     match retry_kind {
                                         RetryKind::Metadata(metadata_retry) => {
@@ -898,6 +890,7 @@ impl DownloadSupervisor {
                                 },
                                 SupervisorMessage::ClientError(permit, status_code, retry_kind) => {
                                     error!("Client error ({}).", status_code);
+                                    drop(permit); 
 
                                     let download_id = state.download.id();
                                     let file_id = retry_kind.file_id();
@@ -909,7 +902,6 @@ impl DownloadSupervisor {
 
                                     file.set_status(DownloadStatus::Failed(DownloadFailureReason::ClientError));
 
-                                    let _ = sender.send(SupervisorMessage::ProcessPermit(permit));
                                     let _ = state.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                 }
                                 SupervisorMessage::RateLimited(_permit, retry_after, retry_kind) => {
@@ -1040,16 +1032,12 @@ impl DownloadSupervisor {
         let _ = self.sender.as_ref().unwrap().send(SupervisorMessage::ProcessPermit(permit));
     }
 
-    pub fn is_saturated(&self) -> bool {
-        self.saturated.load(Ordering::Acquire).into()
-    }
-
-    pub fn set_saturated(&mut self, saturated: bool) {
-        self.saturated.store(saturated, Ordering::Relaxed); 
-    }
-
     pub fn permit_count(&self) -> Arc<AtomicUsize> {
         self.permit_count.clone()
+    }
+
+    pub fn demand(&self) -> Arc<AtomicUsize> {
+        self.demand.clone()
     }
 }
 

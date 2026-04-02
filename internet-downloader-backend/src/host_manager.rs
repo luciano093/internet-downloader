@@ -182,8 +182,6 @@ impl HostManager {
                             rate_limit_timer.as_mut().reset(deadline);
                         },
                         HostMessage::CancelDownload(download_id) => {
-                            let _ = self.ui_sender.send(UiStateEvent::RemoveDownload(*download_id));
-
                             // Remove it from the queue if it was pending
                             if let Some(pos) = self.permit_queue.iter().position(|x| *x == download_id) {
                                 self.permit_queue.remove(pos);
@@ -229,26 +227,30 @@ impl HostManager {
         }
 
         for download_id in &self.permit_queue {
-            while self.connections_budget.available_permits() > 0 {
+            let supervisor = match self.active_downloads.get_mut(download_id) {
+                Some(supervisor) => supervisor,
+                None => break,
+            };
+
+            while self.connections_budget.available_permits() > 0 
+            && supervisor.demand().load(Ordering::Acquire) > 0 
+            {
+                
                 let permit = match self.connections_budget.clone().try_acquire_owned() {
                     Ok(permit) => permit,
-                    Err(_) => break, // no more permits left, so don't keep distributing
+                    Err(_) => return,
                 };
 
-                let supervisor = match self.active_downloads.get_mut(download_id) {
-                    Some(supervisor) => supervisor,
-                    None => break,
-                };
-
-                tokio::task::yield_now().await; 
-
-                if supervisor.is_saturated() {
-                    break;
-                }
+                let previous = supervisor.demand().fetch_sub(1, Ordering::SeqCst);
 
                 let guard = PermitGuard::new(supervisor.permit_count());
 
-                supervisor.give_permit(ActiveDownloadPermit::new(permit, self.sender.clone(), Arc::downgrade(&self.authority), guard));
+                supervisor.give_permit(ActiveDownloadPermit::new(
+                    permit, 
+                    self.sender.clone(), 
+                    Arc::downgrade(&self.authority), 
+                    guard
+                ));
             }
         }
     }
