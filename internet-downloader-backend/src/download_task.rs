@@ -55,7 +55,7 @@ trait FileDownloadRetry {
     fn url(&self) -> Arc<String>;
 }
 
-pub enum RetryKind {
+enum RetryKind {
     Metadata(MetadataRetry),
     StreamDownload(StreamRetry),
     RangeDownload(RangeDownload),
@@ -135,7 +135,7 @@ pub enum SizeResult {
     PermanentFail,
 }
 
-pub enum SupervisorMessage {
+enum SupervisorMessage {
     ProcessPermit(ActiveDownloadPermit),
     SpawnWorker(ValidDownloadPermit),
     RangeSuccess(ActiveDownloadPermit, usize, (usize, usize)), // permit, id, range
