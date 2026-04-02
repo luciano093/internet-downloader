@@ -60,10 +60,8 @@ impl SharedFileMap {
             self.file.write_at(data, offset as u64).unwrap();
         }
     }
-}
 
-impl Drop for SharedFileMap {
-    fn drop(&mut self) {
+    pub fn delete(self) {
         // Windows
         #[cfg(target_os = "windows")]
         {

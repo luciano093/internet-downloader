@@ -234,7 +234,6 @@ impl DownloadManager {
                                  // Try to remove from Pending Queue
                                 if queue.shift_remove(&id).is_some() {
                                     debug!("Removed pending download {}", id);
-                                    db_manager.delete_download(id).await;
                                     let _ = command_sender.send(ManagerCommand::CleanUpDownload(id));
                                 } 
                                 // If not in queue, it might be running. Send Cancel signal.
@@ -242,26 +241,24 @@ impl DownloadManager {
                                     // In this case, we have to wait for the download to finish so it sends the clean up command
                                     let _ = network_manager.cancel_download(url.clone(), download::download_manager::DownloadId(*id));
                                 }
-                                // Else if it's already done or doesn't exist; just DB delete
+                                // Else if it's already done or doesn't exist; just clean up
                                 else {
                                     debug!("Removed completed download {}", id);
-                                    db_manager.delete_download(id).await;
                                     let _ = command_sender.send(ManagerCommand::CleanUpDownload(id));
-                                }
-                                let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*id));
+                                } 
                             },
                             ManagerCommand::CleanUpDownload(download_id) => {
-                                db_manager.delete_download(download_id).await;
-
                                 // Remove from registry now that we know the download is 100% removed
                                 if let Some(url) = id_registry.remove(&download_id) {
                                     url_registry.remove(&url);
                                 }
                                 
                                 // Finally, we clean it up from the set
-                                removed_downloads.remove(&download_id);
+                                if removed_downloads.remove(&download_id) {
+                                    db_manager.delete_download(download_id).await;
+                                    let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*download_id));
+                                }
 
-                                let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*download_id));
                                 info!("Download cleaned up");
                             },
                             ManagerCommand::Shutdown => {
