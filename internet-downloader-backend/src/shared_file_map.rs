@@ -116,7 +116,7 @@ impl SharedFileMap {
             if success == 0 {
                 use tracing::error;
                 let err = std::io::Error::last_os_error();
-                error!("Failed to mark file for deletion! OS Error: {}", err);
+                error!("Failed to mark file {:?} for deletion! OS Error: {}", self.path, err);
             }
         }
 
