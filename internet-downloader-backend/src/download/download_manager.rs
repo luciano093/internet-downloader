@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -15,10 +15,11 @@ use rkyv::Place;
 use rkyv::with::{ArchiveWith, AsString};
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
-use tracing::{debug, trace};
+use tokio::sync::{Semaphore, broadcast, mpsc};
+use tracing::{debug, info, trace};
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
+use crate::download;
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::network_manager::NetworkHandle;
 use crate::state_manager::StateManager;
@@ -80,9 +81,10 @@ pub enum DownloadCommand {
     Cancel,
 }
 
-enum ManagerCommand {
+pub enum ManagerCommand {
     QueueDownload(String),
     RemoveDownload(DownloadId),
+    CleanUpDownload(DownloadId),
     Shutdown,
 }
 
@@ -91,7 +93,6 @@ pub struct DownloadManager {
     next_id: Option<AtomicUsize>,
     db_state_manager: StateManager,
     unprocessed_downloads: IndexMap<DownloadId, Download>,
-    download_command_sender: Arc<Mutex<HashMap<DownloadId, tokio::sync::broadcast::Sender<DownloadCommand>>>>, 
     ui_state_handle: Option<UiStateHandle>,
     command_sender: Option<UnboundedSender<ManagerCommand>>,
     concurrency_limit: Arc<Semaphore>,
@@ -103,7 +104,6 @@ impl DownloadManager {
             next_id: Some(AtomicUsize::new(0)), 
             db_state_manager,
             unprocessed_downloads: IndexMap::new(),
-            download_command_sender: Arc::new(Mutex::new(HashMap::new())),
             ui_state_handle: None,
             command_sender: None,
             concurrency_limit: Arc::new(Semaphore::const_new(10))
@@ -180,11 +180,10 @@ impl DownloadManager {
         let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
         let concurrency_limit = self.concurrency_limit.clone();
         let db_manager = self.db_state_manager.clone();
-        let command_broadcast_map = self.download_command_sender.clone();
 
         let mut queue: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
 
-        let (network_manager, _) = NetworkHandle::spawn(ui_event_sender.clone(), db_manager.clone()).await;
+        let (network_manager, _) = NetworkHandle::spawn(ui_event_sender.clone(), command_sender.clone(), db_manager.clone()).await;
 
         // Download registry for deduplication purposes
         let mut url_registry: HashMap<String, DownloadId> = HashMap::new();
@@ -205,6 +204,8 @@ impl DownloadManager {
         }
 
         let next_id = self.next_id.take().unwrap();
+        
+        let mut removed_downloads = HashSet::new();
 
         tokio::spawn(async move {
             loop {
@@ -226,26 +227,42 @@ impl DownloadManager {
                                 network_manager.queue_download(url, id);
                             },
                             ManagerCommand::RemoveDownload(id) => {
-                                // First, remove from registry
-                                if let Some(url) = id_registry.remove(&id) {
-                                    url_registry.remove(&url);
-                                }
+                                info!("Removing download");
+                                // First, we set it as removed
+                                removed_downloads.insert(id);
 
                                  // Try to remove from Pending Queue
                                 if queue.shift_remove(&id).is_some() {
                                     debug!("Removed pending download {}", id);
                                     db_manager.delete_download(id).await;
+                                    let _ = command_sender.send(ManagerCommand::CleanUpDownload(id));
                                 } 
                                 // If not in queue, it might be running. Send Cancel signal.
-                                else if let Some(sender) = command_broadcast_map.lock().await.get(&id) {
-                                    let _ = sender.send(DownloadCommand::Cancel);
+                                else if let Some(url) = id_registry.get(&id) {
+                                    // In this case, we have to wait for the download to finish so it sends the clean up command
+                                    let _ = network_manager.cancel_download(url.clone(), download::download_manager::DownloadId(*id));
                                 }
                                 // Else if it's already done or doesn't exist; just DB delete
                                 else {
                                     debug!("Removed completed download {}", id);
                                     db_manager.delete_download(id).await;
+                                    let _ = command_sender.send(ManagerCommand::CleanUpDownload(id));
                                 }
                                 let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*id));
+                            },
+                            ManagerCommand::CleanUpDownload(download_id) => {
+                                db_manager.delete_download(download_id).await;
+
+                                // Remove from registry now that we know the download is 100% removed
+                                if let Some(url) = id_registry.remove(&download_id) {
+                                    url_registry.remove(&url);
+                                }
+                                
+                                // Finally, we clean it up from the set
+                                removed_downloads.remove(&download_id);
+
+                                let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*download_id));
+                                info!("Download cleaned up");
                             },
                             ManagerCommand::Shutdown => {
                                 break;

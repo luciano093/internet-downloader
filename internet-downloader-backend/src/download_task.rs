@@ -11,10 +11,11 @@ use tokio::fs::create_dir_all;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tracing::{debug, error, trace, warn};
+use tokio::task::JoinHandle;
+use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
-use crate::download::{Download, DownloadFailureReason, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
+use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate, ManagerCommand};
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
 use crate::state_manager::StateManager;
@@ -336,7 +337,7 @@ impl SupervisorState {
                 let file_map = if self.file_maps.contains_key(&file_id) {
                     self.file_maps.get(&file_id).unwrap().clone()
                 } else {
-                    self.file_maps.insert(file_id, Arc::new(SharedFileMap::new(path, file_size)));
+                    self.file_maps.insert(file_id, Arc::new(SharedFileMap::new(path.to_path_buf(), file_size)));
                     self.file_maps.get(&file_id).unwrap().clone()
                 };
 
@@ -396,18 +397,27 @@ impl SupervisorState {
     }
 }
 
+pub struct Active;
+pub struct Inactive;
+
 pub struct DownloadSupervisor {
     state: Option<SupervisorState>,
     sender: Option<UnboundedSender<SupervisorMessage>>,
     shutdown_receiver: Option<oneshot::Receiver<SupervisorState>>,
     saturated: Arc<AtomicBool>,
     permit_count: Arc<AtomicUsize>,
+    handle: Option<JoinHandle<()>>,
+    download_id: DownloadId,
+
+    download_manager: UnboundedSender<ManagerCommand>,
 }
 
 impl DownloadSupervisor {
-    pub fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
+    pub fn new(client: Client, download: Download, host_sender: UnboundedSender<HostMessage>, download_manager: UnboundedSender<ManagerCommand>, ui_sender: UnboundedSender<UiStateEvent>, db_manager: StateManager) -> Self {
         debug!("Supervisor created for: {}", download.name());
+        info!("Download started: {}", download.name());
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
+        let download_id = download.id();
 
         Self {
             state: Some(SupervisorState::new(client, download, host_sender, ui_sender, db_manager, permit_count.clone())),
@@ -415,6 +425,9 @@ impl DownloadSupervisor {
             shutdown_receiver: None,
             saturated: Arc::new(false.into()),
             permit_count,
+            handle: None,
+            download_id,
+            download_manager,
         }
     }
 
@@ -426,7 +439,7 @@ impl DownloadSupervisor {
         self.shutdown_receiver = Some(shutdown_receiver);
         let saturated = self.saturated.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut state = if let Some(state) = state.take() {
                 state
             } else if let Some(previous_shutdown_receiver) = previous_shutdown_receiver.take() {
@@ -1002,6 +1015,12 @@ impl DownloadSupervisor {
 
             let _ = shutdown_sender.send(state);
         });
+
+        self.handle = Some(handle);
+    }
+
+    pub fn handle_mut(&mut self) -> Option<&mut JoinHandle<()>> {
+        self.handle.as_mut()
     }
         
     pub fn give_permit(&mut self, permit: ActiveDownloadPermit) {
@@ -1031,6 +1050,12 @@ impl DownloadSupervisor {
 
     pub fn permit_count(&self) -> Arc<AtomicUsize> {
         self.permit_count.clone()
+    }
+}
+
+impl Drop for DownloadSupervisor {
+    fn drop(&mut self) {
+        let _ = self.download_manager.send(ManagerCommand::CleanUpDownload(self.download_id));
     }
 }
 
