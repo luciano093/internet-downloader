@@ -2,10 +2,10 @@ use std::{collections::{HashMap, VecDeque}, sync::{Arc, Weak, atomic::{AtomicUsi
 
 use tokio::{sync::{OwnedSemaphorePermit, Semaphore, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{Download, DownloadId, DownloadStatus}, download_task::DownloadSupervisor};
+use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{Download, DownloadId, DownloadStatus, DownloadUpdate, ManagerCommand}, download_task::DownloadSupervisor};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -83,6 +83,8 @@ pub enum HostMessage {
     ProcessDownload(String, DownloadId),
     QueueDownload(Download),
     CancelDownload(DownloadId),
+    PauseDownload(DownloadId),
+    ResumeDownload(Download),
     DownloadFinished(DownloadId),
     PermitReleased(OwnedSemaphorePermit),
     RequestPermits(DownloadId),
@@ -136,9 +138,9 @@ impl HostManager {
                         HostMessage::QueueDownload(download) => {
                             trace!("queueing download: {}", download.name());
 
-                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
                             self.permit_queue.push_back(download.id());
-                            self.active_downloads.insert(download.id(), DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone()));
+                            self.active_downloads.insert(download.id(), DownloadSupervisor::new(self.app_context.clone(), download.clone(), self.sender.clone()));
+                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddDownload(download));
 
                             self.distribute_permits().await;
                         },
@@ -188,21 +190,67 @@ impl HostManager {
                             rate_limit_timer.as_mut().reset(deadline);
                         },
                         HostMessage::CancelDownload(download_id) => {
-                            // Remove it from the queue if it was pending
+                            // Remove it from the permit queue so manager doesn't give permits to a canceled download
                             if let Some(pos) = self.permit_queue.iter().position(|x| *x == download_id) {
                                 self.permit_queue.remove(pos);
                             }
 
                             if let Some(mut supervisor) = self.active_downloads.remove(&download_id) {
+                                let download_manager = self.app_context.download_manager.clone();
                                 tokio::spawn(async move {
                                     if let Some(handle) = supervisor.handle_mut() { 
                                         handle.abort();
                                         let _ = handle.await; 
                                         
-                                        drop(supervisor); 
+                                        drop(supervisor);
                                     }
+
+                                    let _ = download_manager.send(ManagerCommand::CleanUpDownload(download_id));
                                 });
+                            } else {
+                                let _ = self.app_context.download_manager.send(ManagerCommand::CleanUpDownload(download_id));
                             }
+                        },
+                        HostMessage::PauseDownload(download_id) => {
+                            // Remove it from the permit queue so manager doesn't give permits to a paused download
+                            if let Some(pos) = self.permit_queue.iter().position(|x| *x == download_id) {
+                                self.permit_queue.remove(pos);
+                            }
+
+                            if let Some(supervisor) = self.active_downloads.remove(&download_id) {
+                                supervisor.pause();
+                                
+                                drop(supervisor);
+                            }
+                        },
+                        HostMessage::ResumeDownload(mut download) => {
+                            if download.status() == DownloadStatus::Completed {
+                                debug!("Download {} is already completed! Ignoring resume command.", download.name());
+                                return;
+                            }
+
+                            let id = download.id();
+                            
+                            if self.active_downloads.contains_key(&id) || self.permit_queue.contains(&id) {
+                                warn!("Download {} is already active! Ignoring resume command.", id);
+                                return;
+                            }
+
+                            trace!("Resuming download: {}", download.name());
+
+                            download.set_status(DownloadStatus::InProgress);
+
+                            self.permit_queue.push_back(id);
+                            self.active_downloads.insert(id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone()));
+                            
+                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                DownloadUpdate::StatusChanged { 
+                                    id, 
+                                    status: DownloadStatus::InProgress 
+                                }
+                            ));
+
+                            self.distribute_permits().await;
                         },
                     }
                 }
@@ -246,6 +294,8 @@ impl HostManager {
                     Ok(permit) => permit,
                     Err(_) => return,
                 };
+
+                info!("Giving permit to {}", supervisor.download_id());
 
                 supervisor.demand().fetch_sub(1, Ordering::SeqCst);
 
@@ -313,5 +363,13 @@ impl HostHandle {
 
     pub fn cancel_download(&self, download_id: DownloadId) {
         let _ = self.sender.send(HostMessage::CancelDownload(download_id));
+    }
+
+    pub fn pause_download(&self, download_id: DownloadId) {
+        let _ = self.sender.send(HostMessage::PauseDownload(download_id));
+    }
+
+    pub fn queue_download(&self, download: Download) {
+        let _ = self.sender.send(HostMessage::ResumeDownload(download));
     }
 }

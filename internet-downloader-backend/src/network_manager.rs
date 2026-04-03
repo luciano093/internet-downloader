@@ -2,14 +2,16 @@ use std::{collections::HashMap, time::Duration};
 
 use reqwest::Client;
 use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, task::JoinHandle};
-use tracing::debug;
+use tracing::{debug, warn};
 use url::{Host, Url};
 
-use crate::{context::AppContext, download::{DownloadId, ManagerCommand}, host_manager::HostHandle};
+use crate::{context::AppContext, download::{Download, DownloadId, ManagerCommand}, host_manager::HostHandle};
 
 pub enum NetworkMessage {
     QueueDownload(String, DownloadId),
     CancelDownload(String, DownloadId),
+    PauseDownload(String, DownloadId),
+    ResumeDownload(Download),
     // HandleDownload(Download)
 }
 
@@ -59,6 +61,30 @@ impl NetworkManager {
                         let _ = self.app_context.download_manager.send(ManagerCommand::CleanUpDownload(download_id));
                     }
                 },
+                NetworkMessage::PauseDownload(url, download_id) => {
+                    let host = NetworkManager::parse_host(&url);
+
+                    if let Some(host_handle) = self.host_handle_map.get(&host) {
+                        host_handle.pause_download(download_id);
+                    } else {
+                        warn!("Tried to pause a download with a host not tracked by the manager. url: {} id: {}", url, download_id);
+                    }
+                },
+                NetworkMessage::ResumeDownload(download) => {
+                    debug!("Resuming download in network manager");
+
+                    let url = download.url().clone();
+                    let host = Self::parse_host(&url);
+
+                    let host_handle = if self.host_handle_map.contains_key(&host) {
+                        self.host_handle_map.get(&host).unwrap()
+                    } else {
+                        self.host_handle_map.insert(host.clone(), HostHandle::spawn(self.app_context.clone(), host.clone()).0);
+                        self.host_handle_map.get(&host).unwrap()
+                    };
+                    
+                    host_handle.queue_download(download);
+                },
             }
         }   
     }
@@ -95,6 +121,14 @@ impl NetworkHandle {
 
     pub fn cancel_download(&self, url: String, id: DownloadId) {
         let _ = self.sender.send(NetworkMessage::CancelDownload(url, id));
+    }
+
+    pub fn pause_download(&self, url: String, id: DownloadId) {
+        let _ = self.sender.send(NetworkMessage::PauseDownload(url, id));
+    }
+
+    pub fn resume_download(&self, download: Download) {
+        let _ = self.sender.send(NetworkMessage::ResumeDownload(download));
     }
 }
 

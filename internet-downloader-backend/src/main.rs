@@ -76,6 +76,8 @@ async fn main() {
         .route("/add-download", post(add_download))
         .route("/downloads", get(download_stream))
         .route("/delete-download", delete(delete_download))
+        .route("/pause-download", post(pause_download))
+        .route("/resume-download", post(resume_download))
         .with_state(download_manager)
         .layer(cors);
 
@@ -170,4 +172,28 @@ async fn delete_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Que
     debug!(url = %params.id, "Received download deletion query");
 
     manager.lock().await.remove_download(DownloadId(params.id), params.from_disk.unwrap_or(false)).await;
+}
+
+#[derive(Deserialize, Debug)]
+struct PauseDownload {
+    id: DownloadId,
+}
+
+#[axum::debug_handler] 
+async fn pause_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<PauseDownload>) -> impl IntoResponse {
+    debug!(download_id = %params.id, "Received download pause query");
+
+    manager.lock().await.pause_download(params.id).await;
+}
+
+#[derive(Deserialize, Debug)]
+struct ResumeDownload {
+    id: DownloadId,
+}
+
+#[axum::debug_handler] 
+async fn resume_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Query(params): Query<ResumeDownload>) -> impl IntoResponse {
+    debug!(download_id = %params.id, "Received download pause query");
+
+    manager.lock().await.resume_download(params.id).await;
 }

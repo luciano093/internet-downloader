@@ -88,6 +88,8 @@ pub enum ManagerCommand {
     QueueDownload(String),
     RemoveDownload(DownloadId, bool), // true if we want to remove from disk too
     CleanUpDownload(DownloadId),
+    PauseDownload(DownloadId),
+    ResumeDownload(DownloadId),
     Shutdown,
 }
 
@@ -165,6 +167,18 @@ impl DownloadManager {
     pub async fn remove_download(&mut self, id: DownloadId, from_disk: bool) {
         if let Some(sender) = &self.command_sender {
             let _ = sender.send(ManagerCommand::RemoveDownload(id, from_disk));
+        }
+    }
+
+    pub async fn pause_download(&mut self, download_id: DownloadId) {
+        if let Some(sender) = &self.command_sender {
+            let _ = sender.send(ManagerCommand::PauseDownload(download_id));
+        }
+    }
+
+    pub async fn resume_download(&mut self, download_id: DownloadId) {
+        if let Some(sender) = &self.command_sender {
+            let _ = sender.send(ManagerCommand::ResumeDownload(download_id));
         }
     }
 
@@ -297,6 +311,14 @@ impl DownloadManager {
                                 }
 
                                 info!("Download cleaned up");
+                            },
+                            ManagerCommand::PauseDownload(download_id) => {
+                                if let Some(url) = id_registry.get(&download_id) {
+                                    network_manager.pause_download(url.to_string(), download_id);
+                                }
+                            },
+                            ManagerCommand::ResumeDownload(download_id) => if let Ok(download) = db_manager.load_download(download_id).await {
+                                network_manager.resume_download(download);
                             },
                             ManagerCommand::Shutdown => {
                                 break;

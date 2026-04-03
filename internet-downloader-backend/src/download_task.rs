@@ -12,11 +12,12 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, trace, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
-use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate, ManagerCommand};
+use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
 
@@ -137,6 +138,7 @@ pub enum SizeResult {
 
 enum SupervisorMessage {
     ProcessPermit(ActiveDownloadPermit),
+    Pause,
     SpawnWorker(ValidDownloadPermit),
     RangeSuccess(ActiveDownloadPermit, usize, (usize, usize)), // permit, id, range
     RangeFailed(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, RangeDownloadError), // permit, id, range, url
@@ -411,8 +413,7 @@ pub struct DownloadSupervisor {
     permit_count: Arc<AtomicUsize>,
     handle: Option<JoinHandle<()>>,
     download_id: DownloadId,
-
-    app_context: AppContext,
+    cancel_token: CancellationToken, // Used for killing workers forcefully if needed
 }
 
 impl DownloadSupervisor {
@@ -421,21 +422,17 @@ impl DownloadSupervisor {
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
         let download_id = download.id();
 
-        // We get only files that are not folders (as we don't really download folders so
-        // they aren't counted for how many total files we need to download)
-        let files_to_download_count = download.files().values()
-            .filter(|f| matches!(f, DownloadType::File(_)))
-            .count();
+        let initial_demand = Self::calculate_initial_demand(&download);
 
         Self {
             state: Some(SupervisorState::new(app_context.clone(), download, host_sender, permit_count.clone())),
             sender: None,
             shutdown_receiver: None,
-            demand: Arc::new(AtomicUsize::new(files_to_download_count)),
+            demand: Arc::new(AtomicUsize::new(initial_demand)),
             permit_count,
             handle: None,
             download_id,
-            app_context,
+            cancel_token: CancellationToken::new(),
         }
     }
 
@@ -446,6 +443,7 @@ impl DownloadSupervisor {
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         self.shutdown_receiver = Some(shutdown_receiver);
         let demand = self.demand.clone();
+        let cancel_token = self.cancel_token.clone();
 
         let handle = tokio::spawn(async move {
             let mut state = if let Some(state) = state.take() {
@@ -534,42 +532,67 @@ impl DownloadSupervisor {
 
                                             let client = state.app_context.client.clone();
 
-                                            tokio::spawn(async move {  
-                                                let size_result = fetch_file_size(&client, &url).await;
+                                            let cancel_token = cancel_token.clone();
 
-                                                let _ = sender.send(SupervisorMessage::MetadataFetched(permit.downgrade(), file_id, url, size_result));
+                                            tokio::spawn(async move {  
+                                                tokio::select! {
+                                                    _ = cancel_token.cancelled() => {
+                                                        return; 
+                                                    }
+
+                                                    size_result = fetch_file_size(&client, &url) => {
+                                                        let _ = sender.send(SupervisorMessage::MetadataFetched(permit.downgrade(), file_id, url, size_result));
+                                                    }
+                                                }
                                             });
                                         },
                                         Job::DownloadChunk { file_id, url, range, file_map, expected_len } => {
                                             state.active_downloads += 1;
 
                                             let client = state.app_context.client.clone();
+                                            let cancel_token = cancel_token.clone(); 
           
                                             tokio::spawn(async move {
-                                                // Do worker stuff
-                                                match download_range(client, &url, range, file_map.clone(), expected_len).await {
-                                                    Ok(_) => {
-                                                        let _ = sender.send(SupervisorMessage::RangeSuccess(permit.downgrade(), file_id, range));
+                                                tokio::select! {
+                                                    _ = cancel_token.cancelled() => {
+                                                        return;
                                                     }
-                                                    Err(download_error) => {
-                                                        let _ = sender.send(SupervisorMessage::RangeFailed(permit.downgrade(), file_id, range, url, file_map, expected_len, download_error));
+                                                    // Do worker stuff
+                                                    result = download_range(client, &url, range, file_map.clone(), expected_len) => {
+                                                        match result {
+                                                            Ok(_) => {
+                                                                let _ = sender.send(SupervisorMessage::RangeSuccess(permit.downgrade(), file_id, range));
+                                                            }
+                                                            Err(download_error) => {
+                                                                let _ = sender.send(SupervisorMessage::RangeFailed(permit.downgrade(), file_id, range, url, file_map, expected_len, download_error));
+                                                            }
+                                                        }
                                                     }
                                                 }
+                                                
                                             });
                                         },
                                         Job::DownloadStream(file_id, url, path) => {
                                             state.active_downloads += 1;
                                             let client = state.app_context.client.clone();
+                                            let cancel_token = cancel_token.clone();
                                             
                                             tokio::spawn(async move {
-                                                // Do worker stuff
-                                                match download_stream(client, &path, &url).await {
-                                                    Ok(size_downloaded) => {
-                                                        let _ = sender.send(SupervisorMessage::StreamSuccess(permit.downgrade(), file_id, size_downloaded));
-                                                    },
-                                                    Err(download_error) => {
-                                                        let _ = sender.send(SupervisorMessage::StreamFailed(permit.downgrade(), file_id, url, path, download_error));
-                                                    },
+                                                tokio::select! {
+                                                    _ = cancel_token.cancelled() => {
+                                                        return;
+                                                    }
+                                                    // Do worker stuff
+                                                    result = download_stream(client, &path, &url) => {
+                                                        match result {
+                                                            Ok(size_downloaded) => {
+                                                                let _ = sender.send(SupervisorMessage::StreamSuccess(permit.downgrade(), file_id, size_downloaded));
+                                                            },
+                                                            Err(download_error) => {
+                                                                let _ = sender.send(SupervisorMessage::StreamFailed(permit.downgrade(), file_id, url, path, download_error));
+                                                            },
+                                                        }
+                                                    }
                                                 }
                                             });
                                         }
@@ -843,12 +866,18 @@ impl DownloadSupervisor {
 
                                     drop(permit); 
                                     let sender = sender.clone();
+                                    let cancel_token = cancel_token.clone();
 
                                     state.retry_queue_count += 1;
                                     tokio::spawn(async move {
-                                        tokio::time::sleep(duration).await;
-
-                                        let _ = sender.send(SupervisorMessage::RetryReady(retry_kind)); 
+                                        tokio::select! {
+                                            _ = tokio::time::sleep(duration) => {
+                                                let _ = sender.send(SupervisorMessage::RetryReady(retry_kind)); 
+                                            }
+                                            _ = cancel_token.cancelled() => {
+                                                return;
+                                            }
+                                        }
                                     });
                                 },
                                 SupervisorMessage::RetryReady(retry_kind) => {
@@ -1007,6 +1036,19 @@ impl DownloadSupervisor {
 
                                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                 },
+                                SupervisorMessage::Pause => {
+                                    info!("Pausing download.");
+
+                                    // Set ui and db status to Paused
+                                    state.download.set_status(DownloadStatus::Paused);
+                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::Paused }));
+
+                                    // Save the download to db
+                                    state.app_context.db_manager.write_download(&state.download).await;
+
+                                    // Break the loop to close this thread
+                                    break; 
+                                },
                             }
                         }
                     _ = save_interval.tick() => {
@@ -1050,11 +1092,57 @@ impl DownloadSupervisor {
     pub fn demand(&self) -> Arc<AtomicUsize> {
         self.demand.clone()
     }
+
+    pub fn pause(&self) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(SupervisorMessage::Pause);
+        }
+    }
+
+    pub fn download_id(&self) -> DownloadId {
+        self.download_id
+    }
+
+    fn calculate_initial_demand(download: &Download) -> usize {
+        let mut demand = 0;
+
+        let chunk_size = 16384; // 16 KB
+        let target_range_size = 5242880 / chunk_size; // 320 chunks
+
+
+        for file_type in download.files().values() {
+            if let DownloadType::File(file) = file_type {
+                // Skip fully downloaded files
+                if file.status() == DownloadStatus::Completed {
+                    continue; 
+                }
+
+                let chunks = file.chunks(); 
+
+                if chunks.is_empty() {
+                    // Uninitialized file: needs 1 permit for metadata/stream request
+                    demand += 1;
+                } else {
+                    // Initialized file: count how many ranges have at least one chunk missing
+                    let incomplete_jobs = chunks
+                        .chunks(target_range_size)
+                        .filter(|chunk_range| !chunk_range.all())
+                        .count();
+                    
+                    demand += incomplete_jobs;
+                }
+            }
+        }
+
+        demand
+    }
 }
 
 impl Drop for DownloadSupervisor {
     fn drop(&mut self) {
-        let _ = self.app_context.download_manager.send(ManagerCommand::CleanUpDownload(self.download_id));
+        // Instantly kill every active network connection of this download
+        self.cancel_token.cancel();
+        info!("Dropping {}", self.download_id());
     }
 }
 
