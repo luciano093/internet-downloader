@@ -457,6 +457,11 @@ impl DownloadSupervisor {
                 panic!("Supervisor in inconsistent state: No local state and no recovery channel!");
             };
 
+            if state.download.is_completed() {
+                let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
+                return;
+            }
+
             let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
             
@@ -499,17 +504,8 @@ impl DownloadSupervisor {
 
                                             // check if there is no more work to do
                                             if state.permit_count.load(Ordering::SeqCst) == 0 && state.active_downloads == 0 {
-                                                let mut download_complete = true;
-                                                for file in state.download.files().values() {
-                                                    if let DownloadType::File(f) = file 
-                                                        && f.status() != DownloadStatus::Completed
-                                                    {
-                                                        download_complete = false;
-                                                        break;
-                                                    }
-                                                }
-
-                                                if download_complete {                 
+                                                if Self::is_download_finished(&state.download) {
+                                                    debug!("All files completed for download {}. Exiting supervisor loop.", state.download.id());          
                                                     state.app_context.db_manager.write_download(&state.download).await;
                                                     state.download.set_status(DownloadStatus::Completed);
                                                     let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
@@ -517,7 +513,6 @@ impl DownloadSupervisor {
                                                 } else {
                                                     // the download might be in a stalled state so we reset all cursors to find the missing chunks
                                                     // this should hopefully never happen if the worker reports correctly when it failed
-
                                                 }
                                             }
 
@@ -651,6 +646,14 @@ impl DownloadSupervisor {
                                         },
                                         DownloadType::Folder(_) => todo!(),
                                     }
+
+                                    if Self::is_download_finished(&state.download) {
+                                        debug!("All files completed for download {}. Exiting supervisor loop.", download_id);
+                                        state.app_context.db_manager.write_download(&state.download).await;
+                                        state.download.set_status(DownloadStatus::Completed);
+                                        let _ = state.host_sender.send(HostMessage::DownloadFinished(download_id));
+                                        break;
+                                    }
                                 },
                                 SupervisorMessage::RangeSuccess(permit, file_id, range) => {
                                     state.active_downloads -= 1;
@@ -704,6 +707,14 @@ impl DownloadSupervisor {
                                             }
                                         },
                                         crate::download::DownloadType::Folder(_) => todo!(),
+                                    }
+
+                                    if Self::is_download_finished(&state.download) {
+                                        debug!("All files completed for download {}. Exiting supervisor loop.", download_id);
+                                        state.app_context.db_manager.write_download(&state.download).await;
+                                        state.download.set_status(DownloadStatus::Completed);
+                                        let _ = state.host_sender.send(HostMessage::DownloadFinished(download_id));
+                                        break;
                                     }
                                 },
                                 SupervisorMessage::RangeFailed(permit, file_id, range, url, file_map, expected_len, download_error) => {
@@ -1135,6 +1146,13 @@ impl DownloadSupervisor {
         }
 
         demand
+    }
+
+    fn is_download_finished(download: &Download) -> bool {
+        download.files().values().all(|f| match f {
+            DownloadType::File(file) => file.status() == DownloadStatus::Completed,
+            _ => true,
+        })
     }
 }
 
