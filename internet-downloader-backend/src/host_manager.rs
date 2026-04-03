@@ -139,7 +139,7 @@ impl HostManager {
                             trace!("queueing download: {}", download.name());
 
                             self.permit_queue.push_back(download.id());
-                            self.active_downloads.insert(download.id(), DownloadSupervisor::new(self.app_context.clone(), download.clone(), self.sender.clone()));
+                            self.active_downloads.insert(download.id(), DownloadSupervisor::new(self.app_context.clone(), download.clone(), self.sender.clone()).await);
                             let _ = self.app_context.ui_sender.send(UiStateEvent::AddDownload(download));
 
                             self.distribute_permits().await;
@@ -241,7 +241,7 @@ impl HostManager {
                             download.set_status(DownloadStatus::InProgress);
 
                             self.permit_queue.push_back(id);
-                            self.active_downloads.insert(id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone()));
+                            self.active_downloads.insert(id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone()).await);
                             
                             let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                                 DownloadUpdate::StatusChanged { 

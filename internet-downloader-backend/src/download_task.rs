@@ -417,8 +417,9 @@ pub struct DownloadSupervisor {
 }
 
 impl DownloadSupervisor {
-    pub fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>) -> Self {
+    pub async fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>) -> Self {
         debug!("Supervisor created for: {}", download.name());
+        app_context.db_manager.write_download(&download).await;
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
         let download_id = download.id();
 
