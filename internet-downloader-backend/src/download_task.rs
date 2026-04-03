@@ -21,6 +21,9 @@ use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem,
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
 
+const CHUNK_SIZE: usize = 16384; // 16 KB
+const TARGET_RANGE_SIZE: usize = 5242880 / CHUNK_SIZE; // 320 ranges of chunks
+
 #[derive(Debug, Error)]
 pub enum DownloadError {
     #[error("File system error: {0}")]
@@ -303,8 +306,7 @@ impl SupervisorState {
             if let Some(relative_start) = chunks[cursor..].first_zero() {
                 let start_index = relative_start + cursor;
                 
-                let target_chunk_size = 5242880 / 16384; // 5 MB / 16 KB
-                let max_end = (start_index + target_chunk_size).min(chunks.len());
+                let max_end = (start_index + TARGET_RANGE_SIZE).min(chunks.len());
 
                 let end_index = chunks[start_index..max_end]
                     .first_one()
@@ -320,7 +322,7 @@ impl SupervisorState {
                     FileSize::Known(file_size) => file_size,
                 };
 
-                let expected_len = self.calculate_chunk_expected_len(16384, range, file_size);
+                let expected_len = self.calculate_chunk_expected_len(CHUNK_SIZE as u64, range, file_size);
 
                 let path = file_download.relative_path();
 
@@ -622,7 +624,6 @@ impl DownloadSupervisor {
                                     drop(permit);
 
                                     let download_id = state.download.id();
-                                    let chunk_size = 16384;
 
                                     match state.download.files_mut().get_mut(&file_id).unwrap() {
                                         DownloadType::File(file) => {
@@ -631,7 +632,7 @@ impl DownloadSupervisor {
                                             file.set_bytes_downloaded(size as u64);
 
                                             if size > 0 {
-                                                let chunk_count = size.div_ceil(chunk_size);
+                                                let chunk_count = size.div_ceil(CHUNK_SIZE);
                                                 file.chunks_mut().resize(chunk_count, true);
                                                 trace!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
                                                 file.set_status(DownloadStatus::Completed); 
@@ -661,8 +662,6 @@ impl DownloadSupervisor {
                                     drop(permit); 
 
                                     let download_id = state.download.id();
-
-                                    let chunk_size = 16384;
                                     
                                     match state.download.files_mut().get_mut(&file_id).unwrap() {
                                         crate::download::DownloadType::File(file_download) => {
@@ -680,8 +679,8 @@ impl DownloadSupervisor {
                                                 },
                                             };
 
-                                            let start_byte = range.0 as u64 * chunk_size;
-                                            let theoretical_end = range.1 as u64 * chunk_size;
+                                            let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
+                                            let theoretical_end = range.1 as u64 * (CHUNK_SIZE as u64);
 
                                             let actual_end = std::cmp::min(theoretical_end, total_size);
                                             let bytes_in_range = actual_end.saturating_sub(start_byte);
@@ -808,20 +807,16 @@ impl DownloadSupervisor {
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Known(size));
                                                 let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size } }));
-                                                
-                                                // todo, make this a global or store it somewhere
-                                                let chunk_size = 16384; // 16 KB
-                                                let target_range_size = 5242880 / 16384; // 320 chunks (5 MB)
 
                                                 // Initialize chunks
                                                 if size > 0 {
                                                     // Calculate how many 16KB chunks exist
-                                                    let chunk_count = size.div_ceil(chunk_size);
+                                                    let chunk_count = size.div_ceil(CHUNK_SIZE as u64);
                                                     file.chunks_mut().resize(chunk_count as usize, false);
                                                     file.set_status(DownloadStatus::InProgress); 
 
                                                     // Calculate how many ranges (jobs) are needed for this file
-                                                    let job_count = chunk_count.div_ceil(target_range_size);
+                                                    let job_count = chunk_count.div_ceil(TARGET_RANGE_SIZE as u64);
                                                     
                                                     // Add the required jobs to our demand
                                                     demand.fetch_add(job_count as usize, Ordering::SeqCst);
@@ -1118,10 +1113,6 @@ impl DownloadSupervisor {
     fn calculate_initial_demand(download: &Download) -> usize {
         let mut demand = 0;
 
-        let chunk_size = 16384; // 16 KB
-        let target_range_size = 5242880 / chunk_size; // 320 chunks
-
-
         for file_type in download.files().values() {
             if let DownloadType::File(file) = file_type {
                 // Skip fully downloaded files
@@ -1137,7 +1128,7 @@ impl DownloadSupervisor {
                 } else {
                     // Initialized file: count how many ranges have at least one chunk missing
                     let incomplete_jobs = chunks
-                        .chunks(target_range_size)
+                        .chunks(TARGET_RANGE_SIZE)
                         .filter(|chunk_range| !chunk_range.all())
                         .count();
                     
@@ -1224,9 +1215,7 @@ fn parse_content_range(range_header: &str) -> Option<u64> {
 }
 
 async fn download_range(client: Client, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>, expected_len: u64) -> Result<(), RangeDownloadError> {
-    let chunk_size = 16384;
-
-    let start_byte = range.0 as u64 * chunk_size;
+    let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
     let end_byte = start_byte + expected_len - 1; // -1 because http ranges are inclusive
 
     let range_header = format!("bytes={}-{}", start_byte, end_byte);
