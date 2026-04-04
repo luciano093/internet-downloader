@@ -1157,6 +1157,7 @@ dependencies = [
  "http",
  "indexmap 2.13.0",
  "memmap2",
+ "pin-project-lite",
  "regex",
  "reqwest",
  "rkyv",

@@ -15,6 +15,7 @@ futures-util = "0.3.31"
 http = "1.4.0"
 indexmap = { version = "2.13.0", features = ["serde"] }
 memmap2 = "0.9.9"
+pin-project-lite = "0.2.17"
 regex = { version = "1.12.2", features = ["use_std"] }
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset", "system-proxy"] }
 rkyv = { version = "0.8.12", features = ["arrayvec-0_7", "bytecheck", "bytes-1", "indexmap-2"] }
