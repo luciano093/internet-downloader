@@ -211,10 +211,25 @@ impl<S> ThrottledStream<S> {
             .map(|limiter| WatchStream::from_changes(limiter.subscribe()))
             .collect();
 
+        let mut initial_debt = Duration::ZERO;
+
+        for limiter in limiters.iter() {
+            if let Some(local_debt) = limiter.get_debt() {
+                initial_debt = initial_debt.max(local_debt);
+            }
+        }
+
+        // Set the initial sleep timer based on the current debt
+        let sleep = if initial_debt.is_zero() {
+            tokio::time::sleep(Duration::ZERO)
+        } else {
+            tokio::time::sleep_until(tokio::time::Instant::now() + initial_debt)
+        };
+
         Self {
             inner,
             limiters,
-            sleep: tokio::time::sleep(Duration::ZERO),
+            sleep,
             receivers,
         }
     }
