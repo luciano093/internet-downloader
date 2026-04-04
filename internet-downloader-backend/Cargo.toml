@@ -10,6 +10,7 @@ base64 = "0.22.1"
 bitvec = { version = "1.0.1", features = ["serde"] }
 blake3 = { version = "1.8.2", features = ["mmap", "rayon"] }
 bytecheck = "0.8.2"
+bytes = "1.11.1"
 chrono = "0.4.42"
 futures-util = "0.3.31"
 http = "1.4.0"
@@ -17,7 +18,7 @@ indexmap = { version = "2.13.0", features = ["serde"] }
 memmap2 = "0.9.9"
 pin-project-lite = "0.2.17"
 regex = { version = "1.12.2", features = ["use_std"] }
-reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset", "system-proxy"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset", "system-proxy", "stream"] }
 rkyv = { version = "0.8.12", features = ["arrayvec-0_7", "bytecheck", "bytes-1", "indexmap-2"] }
 rquickjs = { version = "0.11.0", features = ["full-async", "parallel"] }
 rustls = { version = "0.23.35", default-features = false, features = ["ring", "std", "tls12"] } # replaces aws-lc-rs in reqwest which at the moment depends on having cmake installed in windows

@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
+use bytes::Bytes;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::watch;
 use tokio::time::{Instant, Sleep};
@@ -297,6 +298,80 @@ impl<S: AsyncRead> AsyncRead for ThrottledStream<S> {
                         Poll::Ready(Ok(()))
                     }
                     // buffer didn't change, just return
+                    other => other,
+                }
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S, E> Stream for ThrottledStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>>, 
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
+        let mut settings_changed = false;
+
+        for receiver in this.receivers.iter_mut() {
+            while let Poll::Ready(Some(())) = receiver.poll_next_unpin(cx) {
+                settings_changed = true;
+            }
+        }
+
+        // If the settings of any of our limiters changed, it might mean we exited a 0 bytes/sec state (eternal sleep)
+        // We check this before we poll sleep as otherwise it might incorrectly send back a Poll::Pending
+        // even if we are not supposed to be sleeping anymore
+        if settings_changed {
+            let mut debt = Duration::ZERO;
+
+            for limiter in this.limiters.iter() {
+                if let Some(local_debt) = limiter.get_debt() {
+                    debt = debt.max(local_debt);
+                }
+            }
+
+            if debt.is_zero() {
+                // we have no debt, meaning we should not be sleeping
+                this.sleep.as_mut().reset(tokio::time::Instant::now());
+            } else {
+                // we still have debt, let's add it to our sleep
+                // this might mean that either we are still in eternal sleep and 
+                // what changed was a limiter not in eternal sleep, or that our
+                // new debt is not eternal and we should wake up soon
+                this.sleep.as_mut().reset(tokio::time::Instant::now() + debt);
+            }
+        }
+
+        match this.sleep.as_mut().poll(cx) {
+            Poll::Ready(()) => {
+                match this.inner.as_mut().poll_next(cx) {
+                    Poll::Ready(Some(Ok(chunk))) => {
+                        let bytes_read = chunk.len();
+
+                        if bytes_read > 0 {
+                            let mut debt = Duration::ZERO;
+
+                            for limiter in this.limiters.iter() {
+                                limiter.register_bytes(bytes_read as u64);
+
+                                if let Some(local_debt) = limiter.get_debt() {
+                                    debt = debt.max(local_debt);
+                                }
+                            }
+
+                            if !debt.is_zero() {
+                                let deadline = tokio::time::Instant::now() + debt;
+                                this.sleep.as_mut().reset(deadline);
+                            }
+                        }
+
+                        Poll::Ready(Some(Ok(chunk)))
+                    }
                     other => other,
                 }
             }
