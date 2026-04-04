@@ -1,14 +1,16 @@
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use tokio::io::{AsyncRead, ReadBuf};
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::time::{Instant, Sleep};
 
 use pin_project_lite::pin_project;
+use tokio_stream::wrappers::WatchStream;
 
 #[derive(Debug)]
 pub struct DebtClock {
@@ -80,7 +82,7 @@ pub struct BandwidthLimiter {
     leftover_bytes: AtomicU64, 
     clock: DebtClock,
     unlimited: AtomicBool,
-    notifier: Mutex<Vec<mpsc::UnboundedSender<()>>>
+    notifier: watch::Sender<()>, 
 }
 
 impl BandwidthLimiter {
@@ -90,7 +92,7 @@ impl BandwidthLimiter {
             leftover_bytes: AtomicU64::new(0),
             clock: DebtClock::new(),
             unlimited: AtomicBool::new(false),
-            notifier: Mutex::new(Vec::new()),
+            notifier: watch::channel(()).0,
         }
     }
 
@@ -178,20 +180,16 @@ impl BandwidthLimiter {
     }
 
     pub fn wake_all(&self) {
-        // We only want to retain senders that are active
-        // As otherwise it means their receivers were dropped
-        self.notifier.lock().unwrap().retain(|sender| sender.send(()).is_ok());
+        let _ = self.notifier.send(()); 
     }
 
-    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<()> {
-        let (sender, receiver) = mpsc::unbounded_channel();
-
-        self.notifier.lock().unwrap().push(sender);
-
-        receiver
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.notifier.subscribe()
     }
 }
 
+// We use pin_project! here to allow our Pin<&self> to become Pin<&S> (needed to satisfy AsyncRead)
+// otherwise there is no way to pin S without unsafe code
 pin_project! {
     pub struct ThrottledStream<S> {
         #[pin]
@@ -199,7 +197,7 @@ pin_project! {
         limiters: Vec<Arc<BandwidthLimiter>>,
         #[pin]
         sleep: Sleep, 
-        receivers: Vec<tokio::sync::mpsc::UnboundedReceiver<()>>
+        receivers: Vec<WatchStream<()>>
     }
 }
 
@@ -207,7 +205,10 @@ impl<S> ThrottledStream<S> {
     pub fn new(inner: S, limiters: Vec<Arc<BandwidthLimiter>>) -> Self {
         // We get one receiver per limiter, so they can alert us
         // if there has been a change in config (helps prevent eternal sleeps)
-        let receivers = limiters.iter().map(|limiter| limiter.subscribe()).collect();
+        let receivers = limiters
+            .iter()
+            .map(|limiter| WatchStream::from_changes(limiter.subscribe()))
+            .collect();
 
         Self {
             inner,
@@ -229,7 +230,7 @@ impl<S: AsyncRead> AsyncRead for ThrottledStream<S> {
         let mut settings_changed = false;
 
         for receiver in this.receivers.iter_mut() {
-            while let Poll::Ready(Some(())) = receiver.poll_recv(cx) {
+            while let Poll::Ready(Some(())) = receiver.poll_next_unpin(cx) {
                 settings_changed = true;
             }
         }
