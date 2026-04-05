@@ -147,8 +147,14 @@ export const DownloadRow = memo(({ id }: { id: number }) => {
         setIsDeleting(true);
 
         try {
-            await fetch(`http://localhost:3211/delete-download?id=${id}&from_disk=${deleteFromDisk}`, {
+            await fetch(`http://localhost:3211/downloads/${id}`, {
                 method: "DELETE",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    from_disk: deleteFromDisk
+                }),
             });
         } catch (error) {
             console.error("Failed to delete", error);

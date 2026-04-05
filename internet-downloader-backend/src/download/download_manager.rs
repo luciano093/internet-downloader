@@ -319,6 +319,30 @@ impl DownloadManager {
         }
     }
 
+    pub fn set_global_limit(&self, limit: Option<u64>) {
+        if let Some(sender) = &self.command_sender {
+            let _ = sender.send(ManagerCommand::SetGlobalSpeedLimit(limit));
+        }
+    }
+
+    pub fn set_host_limit(&self, host: String, limit: Option<u64>) {
+        if let Some(sender) = &self.command_sender {
+            let _ = sender.send(ManagerCommand::SetHostSpeedLimit(host, limit));
+        }
+    }
+
+    pub fn set_download_limit(&self, download_id: DownloadId, limit: Option<u64>) {
+        if let Some(sender) = &self.command_sender {
+            let _ = sender.send(ManagerCommand::SetDownloadSpeedLimit(download_id, limit));
+        }
+    }
+
+    pub fn set_file_limit(&self, download_id: DownloadId, file_id: usize, limit: Option<u64>) {
+        if let Some(sender) = &self.command_sender {
+            let _ = sender.send(ManagerCommand::SetFileSpeedLimit(download_id, file_id, limit));
+        }
+    }
+
     pub async fn start_processing(&mut self) {
         let (command_sender, mut command_receiver) = mpsc::unbounded_channel::<ManagerCommand>();
 

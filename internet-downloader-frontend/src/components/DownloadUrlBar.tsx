@@ -8,9 +8,15 @@ export default function DownloadUrlBar() {
         const url = (new FormData(event.currentTarget)).get("url") ?? "";
         console.log("test: ", url);
 
-        fetch(`http://localhost:3211/add-download?url=${url}`, {
+        fetch(`http://localhost:3211/downloads`, {
             method: "POST",
-            })
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                url: url
+            }),
+        });
     };
 
     return <>

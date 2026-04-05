@@ -96,9 +96,15 @@ export default function Page() {
 
     event.currentTarget.reset(); 
 
-    fetch(`http://localhost:3211/add-download?url=${downloads}`, {
+    fetch(`http://localhost:3211/downloads`, {
       method: "POST",
-    })
+      headers: {
+          "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+          url: downloads
+      }),
+    });
   };
 
   const items = rowVirtualizer.getVirtualItems();
