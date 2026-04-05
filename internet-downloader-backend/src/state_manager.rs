@@ -1,8 +1,9 @@
 use indexmap::IndexMap;
+use rkyv::rend::u32_le;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use thiserror::Error;
 
-use crate::download::{Download, DownloadId};
+use crate::download::{AppSettings, ArchivedDownload, Download, DownloadId};
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
@@ -42,11 +43,31 @@ impl StateManager {
                 state_blob BLOB NOT NULL,
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                settings_blob BLOB NOT NULL,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             "#
         )
         .execute(&self.pool)
         .await
         .map_err(StateManagerError::TableCreationError)?;
+
+        let default_settings = AppSettings::default();
+        let default_blob = rkyv::to_bytes::<rkyv::rancor::Error>(&default_settings).unwrap().into_vec();
+
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO app_settings (id, settings_blob) 
+            VALUES (1, ?)
+            "#
+        )
+        .bind(default_blob)
+        .execute(&self.pool)
+        .await
+        .unwrap();
 
         Ok(())
     }
@@ -116,5 +137,34 @@ impl StateManager {
             .into_iter()
             .map(|(id, url)| (id as usize, url))
             .collect()
+    }
+
+    pub async fn file_exists(&self, download_id: DownloadId, file_id: usize) -> bool {
+        let result: Result<Option<Vec<u8>>, _> = sqlx::query_scalar(
+            "SELECT state_blob FROM download_states WHERE id = ?"
+        )
+        .bind(download_id.0 as i64)
+        .fetch_optional(&self.pool)
+        .await;
+
+        if let Ok(Some(blob)) = result {
+            if let Ok(archived_download) = rkyv::access::<ArchivedDownload, rkyv::rancor::Error>(&blob) {
+                
+                return archived_download.files.get(&(u32_le::from_native(file_id as u32))).is_some();
+            }
+        }
+
+        false
+    }
+
+    pub async fn write_app_settings(&self, app_settings: &AppSettings) {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(app_settings).unwrap();
+
+        sqlx::query("INSERT OR REPLACE INTO app_settings (id, settings_blob) VALUES (?, ?)")
+            .bind(1i64) 
+            .bind(bytes.as_slice())
+            .execute(&self.pool)
+            .await
+            .unwrap();
     }
 }

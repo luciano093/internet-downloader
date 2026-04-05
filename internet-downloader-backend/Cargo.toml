@@ -12,6 +12,7 @@ blake3 = { version = "1.8.2", features = ["mmap", "rayon"] }
 bytecheck = "0.8.2"
 bytes = "1.11.1"
 chrono = "0.4.42"
+dashmap = "6.1.0"
 futures-util = "0.3.31"
 http = "1.4.0"
 indexmap = { version = "2.13.0", features = ["serde"] }
@@ -34,7 +35,7 @@ tower-http = { version = "0.6.8", features = ["cors"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.4"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-url = "2.5.7"
+url = { version = "2.5.7", features = ["serde"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

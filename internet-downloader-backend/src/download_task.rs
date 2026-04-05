@@ -1,28 +1,32 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode, header};
 use thiserror::Error;
+
 use tokio::fs::create_dir_all;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::oneshot;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
-use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
+use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
+use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
 const CHUNK_SIZE: usize = 16384; // 16 KB
 const TARGET_RANGE_SIZE: usize = 5242880 / CHUNK_SIZE; // 320 ranges of chunks
+const CHANNEL_UPDATE_THRESHOLD: u64 = 128 * 1024; // 128 KB
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
@@ -79,6 +83,45 @@ impl FileDownloadRetry for RetryKind {
             RetryKind::Metadata(metadata_retry) => metadata_retry.url(),
             RetryKind::StreamDownload(stream_retry) => stream_retry.url(),
             RetryKind::RangeDownload(range_download) => range_download.url(),
+        }
+    }
+}
+
+// RAII guard in case a worker unexpectedly fails or dies
+// Will automatically subtract the bytes it was downloading but never registerd
+// from the total number of bytes downloaded for the file
+struct RangeProgress {
+    file_progress: Arc<AtomicU64>,
+    local_bytes_downloaded: u64,
+    completed: bool,
+}
+
+impl RangeProgress {
+    fn new(file_progress: Arc<AtomicU64>) -> Self {
+        Self { 
+            file_progress,
+            local_bytes_downloaded: 0,
+            completed: false
+        }
+    }
+
+    // Returns new value
+    fn add(&mut self, bytes: u64) -> u64 {
+        self.local_bytes_downloaded += bytes;
+        let prev = self.file_progress.fetch_add(bytes, Ordering::Relaxed);
+
+        prev + bytes 
+    }
+
+    fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for RangeProgress {
+    fn drop(&mut self) {
+        if !self.completed && self.local_bytes_downloaded > 0 {
+            self.file_progress.fetch_sub(self.local_bytes_downloaded, Ordering::Relaxed);
         }
     }
 }
@@ -196,10 +239,20 @@ struct SupervisorState {
     file_maps: HashMap<usize, Arc<SharedFileMap>>, // Tracks file maps to get memory mapped files
     app_context: AppContext,
     retry_queue_count: usize, // tracks how many downloads we are trying. Useful for when there are no jobs and nothing in the retry queue due to retry timeout or delay
+    file_progress: HashMap<usize, Arc<AtomicU64>> // tracker for how many bytes we have downloaded for each file
 }
 
 impl SupervisorState {
     fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>, permit_count: Arc<AtomicUsize>) -> Self {
+        let mut file_progress = HashMap::new();
+        for (id, item) in download.files() {
+            if let DownloadType::File(file) = item {
+                let initial_bytes = file.calculate_initial_bytes(CHUNK_SIZE as u64);
+                
+                file_progress.insert(*id, Arc::new(AtomicU64::new(initial_bytes)));
+            }
+        }
+
         Self { 
             download,
             chunk_cursors: HashMap::new(),
@@ -215,6 +268,7 @@ impl SupervisorState {
             file_maps: HashMap::new(),
             app_context,
             retry_queue_count: 0,
+            file_progress,
         }
     }
 
@@ -404,9 +458,6 @@ impl SupervisorState {
     }
 }
 
-pub struct Active;
-pub struct Inactive;
-
 pub struct DownloadSupervisor {
     state: Option<SupervisorState>,
     sender: Option<UnboundedSender<SupervisorMessage>>,
@@ -416,10 +467,13 @@ pub struct DownloadSupervisor {
     handle: Option<JoinHandle<()>>,
     download_id: DownloadId,
     cancel_token: CancellationToken, // Used for killing workers forcefully if needed
+    global_limit: Arc<BandwidthLimiter>,
+    host_limit: Arc<BandwidthLimiter>,
+    download_limits: Arc<DownloadLimiterGroup>,
 }
 
 impl DownloadSupervisor {
-    pub async fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>) -> Self {
+    pub async fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>, global_limit: Arc<BandwidthLimiter>, host_limit: Arc<BandwidthLimiter>, download_limits: Arc<DownloadLimiterGroup>) -> Self {
         debug!("Supervisor created for: {}", download.name());
         app_context.db_manager.write_download(&download).await;
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
@@ -436,6 +490,9 @@ impl DownloadSupervisor {
             handle: None,
             download_id,
             cancel_token: CancellationToken::new(),
+            global_limit,
+            host_limit,
+            download_limits,
         }
     }
 
@@ -447,6 +504,11 @@ impl DownloadSupervisor {
         self.shutdown_receiver = Some(shutdown_receiver);
         let demand = self.demand.clone();
         let cancel_token = self.cancel_token.clone();
+
+        let global_limit = self.global_limit.clone();
+        let host_limit = self.host_limit.clone();
+        let download_limit = self.download_limits.download_limiter();
+        let download_group = self.download_limits.clone();
 
         let handle = tokio::spawn(async move {
             let mut state = if let Some(state) = state.take() {
@@ -549,6 +611,22 @@ impl DownloadSupervisor {
 
                                             let client = state.app_context.client.clone();
                                             let cancel_token = cancel_token.clone(); 
+
+                                            let file_limit = download_group.file_limiters()
+                                                .get(&file_id)
+                                                .map(|limiter| limiter.clone())
+                                                .unwrap_or_else(|| {
+                                                    let limiter = BandwidthLimiter::new(0);
+                                                    limiter.set_unlimited(true);
+
+                                                    Arc::new(limiter)
+                                                });
+
+                                            let limiters = vec![global_limit.clone(), host_limit.clone(), download_limit.clone(), file_limit];
+                                            let ui_sender = state.app_context.ui_sender.clone();
+                                            let download_id = state.download.id();
+
+                                            let file_progress = state.file_progress.get(&file_id).unwrap().clone();
           
                                             tokio::spawn(async move {
                                                 tokio::select! {
@@ -556,7 +634,7 @@ impl DownloadSupervisor {
                                                         return;
                                                     }
                                                     // Do worker stuff
-                                                    result = download_range(client, &url, range, file_map.clone(), expected_len) => {
+                                                    result = download_range(client, &url, range, file_map.clone(), expected_len, limiters, ui_sender, download_id, file_id, file_progress) => {
                                                         match result {
                                                             Ok(_) => {
                                                                 let _ = sender.send(SupervisorMessage::RangeSuccess(permit.downgrade(), file_id, range));
@@ -574,6 +652,18 @@ impl DownloadSupervisor {
                                             state.active_downloads += 1;
                                             let client = state.app_context.client.clone();
                                             let cancel_token = cancel_token.clone();
+
+                                            let file_limit = download_group.file_limiters()
+                                                .get(&file_id)
+                                                .map(|limiter| limiter.clone())
+                                                .unwrap_or_else(|| {
+                                                    let limiter = BandwidthLimiter::new(0);
+                                                    limiter.set_unlimited(true);
+
+                                                    Arc::new(limiter)
+                                                });
+
+                                            let limiters = vec![global_limit.clone(), host_limit.clone(), download_limit.clone(), file_limit];
                                             
                                             tokio::spawn(async move {
                                                 tokio::select! {
@@ -581,7 +671,7 @@ impl DownloadSupervisor {
                                                         return;
                                                     }
                                                     // Do worker stuff
-                                                    result = download_stream(client, &path, &url) => {
+                                                    result = download_stream(client, &path, &url, limiters) => {
                                                         match result {
                                                             Ok(size_downloaded) => {
                                                                 let _ = sender.send(SupervisorMessage::StreamSuccess(permit.downgrade(), file_id, size_downloaded));
@@ -629,7 +719,11 @@ impl DownloadSupervisor {
                                         DownloadType::File(file) => {
                                             file.reset_retries();
                                             file.set_size(FileSize::Known(size as u64));
-                                            file.set_bytes_downloaded(size as u64);
+
+                                            // The file is complete, so we can just store the size in progress
+                                            if let Some(progress) = state.file_progress.get(&file_id) {
+                                                progress.store(size as u64, Ordering::Relaxed);
+                                            }
 
                                             if size > 0 {
                                                 let chunk_count = size.div_ceil(CHUNK_SIZE);
@@ -643,7 +737,6 @@ impl DownloadSupervisor {
                                             }
 
                                             let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size as u64 } }));
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: size as u64 } }));
                                             let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
                                         },
                                         DownloadType::Folder(_) => todo!(),
@@ -667,40 +760,17 @@ impl DownloadSupervisor {
                                         crate::download::DownloadType::File(file_download) => {
                                             file_download.reset_retries();
 
-                                            let total_size = match file_download.size() {
-                                                Some(FileSize::Known(size)) => size,
-                                                Some(FileSize::Unknown) => {
-                                                    error!("A file with not yet unknown size has had a piece downloaded!");
-                                                    continue;
-                                                }
-                                                None => {
-                                                    error!("A file with not yet resolved size has had a piece downloaded!");
-                                                    continue;
-                                                },
-                                            };
-
-                                            let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
-                                            let theoretical_end = range.1 as u64 * (CHUNK_SIZE as u64);
-
-                                            let actual_end = std::cmp::min(theoretical_end, total_size);
-                                            let bytes_in_range = actual_end.saturating_sub(start_byte);
-                                    
-
-                                            let bytes_downloaded = file_download.bytes_downloaded() + bytes_in_range;
-                                            file_download.set_bytes_downloaded(bytes_downloaded);
-
-                                            let name = file_download.name().to_string();
-                                            let bytes_downloaded = file_download.bytes_downloaded();
-
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded } }));
-
-
                                             file_download.chunks_mut()[range.0..range.1].fill(true);
+
+                                            let bytes_downloaded = state.file_progress
+                                                .get(&file_id)
+                                                .map(|p| p.load(Ordering::Relaxed))
+                                                .unwrap_or(0);
 
                                             let all_chunks_done = file_download.chunks().all();
 
                                             if all_chunks_done {
-                                                trace!("file {} finished! got {} bytes", name, bytes_downloaded);
+                                                trace!("file {} finished! got {} bytes", file_download.name(), bytes_downloaded);
                                                 let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
                                                 file_download.set_status(DownloadStatus::Completed);
                                                 state.file_maps.remove(&file_id);
@@ -1214,7 +1284,15 @@ fn parse_content_range(range_header: &str) -> Option<u64> {
     range_header.rsplit('/').next()?.parse::<u64>().ok()
 }
 
-async fn download_range(client: Client, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>, expected_len: u64) -> Result<(), RangeDownloadError> {
+async fn download_range(
+    client: Client, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>,
+    expected_len: u64,
+    limiters: Vec<Arc<BandwidthLimiter>>,
+    ui_sender: UnboundedSender<UiStateEvent>,
+    download_id: DownloadId,
+    file_id: usize,
+    file_progress: Arc<AtomicU64>, 
+)-> Result<(), RangeDownloadError> {
     let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
     let end_byte = start_byte + expected_len - 1; // -1 because http ranges are inclusive
 
@@ -1223,7 +1301,7 @@ async fn download_range(client: Client, url: &str, range: (usize, usize), file_m
     let request = client.get(url)
         .header("Range", range_header);
 
-    let mut response = match request.send().await {
+    let response = match request.send().await {
         Ok(response) => match response.status() {
             StatusCode::TOO_MANY_REQUESTS => {
                 let retry_after = response.headers().get(header::RETRY_AFTER).and_then(|header| {
@@ -1267,20 +1345,75 @@ async fn download_range(client: Client, url: &str, range: (usize, usize), file_m
         Err(err) => return Err(DownloadError::Network(err).into()),
     }?;
 
+    let raw_stream = response.bytes_stream();
+    let throttled_stream = ThrottledStream::new(raw_stream, limiters);
+    tokio::pin!(throttled_stream);
+
     let mut current_offset = start_byte;
     let mut bytes_received = 0; 
 
-    while let Some(chunk) = response.chunk().await.map_err(DownloadError::from)? {
+    let mut range_progress = RangeProgress::new(file_progress);
+    let mut unnotified_bytes = 0; 
+
+    let buffer_capacity: usize = 1024 * 1024; // 1 MB
+    let mut buffer = Vec::with_capacity(buffer_capacity); 
+    let mut buffer_start_offset = current_offset;
+
+    while let Some(chunk) = throttled_stream.next().await {
+        let chunk = chunk.map_err(DownloadError::from)?; 
         let chunk_len = chunk.len() as u64;
-        file_map.write_chunk(current_offset as usize, &chunk);
+
+        buffer.extend_from_slice(&chunk);
+
+        let current_progress = range_progress.add(chunk_len);
+        unnotified_bytes += chunk_len;
+
+        if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
+            let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                DownloadUpdate::FileUpdated { 
+                    id: download_id,
+                    file_update: FileUpdate::BytesDownloaded { 
+                        id: file_id,
+                        len: current_progress, 
+                    } 
+                }
+            ));
+
+            unnotified_bytes = 0; 
+        }
 
         current_offset += chunk_len;
         bytes_received += chunk_len;
+
+        if buffer.len() >= buffer_capacity {
+            // Swap full buffer for an empty one
+            let buffer_to_write = std::mem::replace(&mut buffer, Vec::with_capacity(buffer_capacity));
+
+            let offset = buffer_start_offset as usize;
+            let file_map_clone = file_map.clone();
+
+            tokio::task::spawn_blocking(move || {
+                file_map_clone.write_chunk(offset, &buffer_to_write);
+            }).await.unwrap();
+
+            buffer_start_offset = current_offset;
+        }
+    }
+
+    if !buffer.is_empty() {
+        let write_offset = buffer_start_offset as usize;
+        let file_map_clone = file_map.clone();
+
+        tokio::task::spawn_blocking(move || {
+            file_map_clone.write_chunk(write_offset, &buffer);
+        }).await.unwrap();
     }
 
     if bytes_received != expected_len {
         return Err(RangeDownloadError::UnexpectedLength(bytes_received, expected_len));
     }
+
+    range_progress.complete();
 
     Ok(())
 }
@@ -1288,8 +1421,8 @@ async fn download_range(client: Client, url: &str, range: (usize, usize), file_m
 /// Downloads a file from a server that requested `Transfer-Encoding: chunked`. 
 /// The server doesn't provide a `Content-Length` header for these files and thus they can't be downloaded using a multi-part strategy.
 /// These downloads are non-resumable.
-async fn download_stream(client: Client, path: &Path, url: &str) -> Result<usize, DownloadError> {
-    let mut response = match client.get(url).send().await {
+async fn download_stream(client: Client, path: &Path, url: &str, limiters: Vec<Arc<BandwidthLimiter>>) -> Result<usize, DownloadError> {
+    let response = match client.get(url).send().await {
         Ok(response) => match response.status() {
             StatusCode::TOO_MANY_REQUESTS => {
                 let retry_after = response.headers().get(header::RETRY_AFTER).and_then(|header| {
@@ -1328,7 +1461,13 @@ async fn download_stream(client: Client, path: &Path, url: &str) -> Result<usize
     let mut writer = BufWriter::new(file);
     let mut size = 0;
 
-    while let Some(chunk) = response.chunk().await? {
+    let raw_stream = response.bytes_stream();
+    let throttled_stream = ThrottledStream::new(raw_stream, limiters);
+    tokio::pin!(throttled_stream);
+
+    while let Some(chunk) = throttled_stream.next().await {
+        let chunk = chunk?;
+
         size += chunk.len();
         writer.write_all(&chunk).await?;
     }

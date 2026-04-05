@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{Download, DownloadId, DownloadStatus, DownloadUpdate, ManagerCommand}, download_task::DownloadSupervisor};
+use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{Download, DownloadId, DownloadLimiterGroup, DownloadStatus, DownloadUpdate, ManagerCommand}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -80,11 +80,11 @@ impl Drop for ValidDownloadPermit {
 }
 
 pub enum HostMessage {
-    ProcessDownload(String, DownloadId),
-    QueueDownload(Download),
+    ProcessDownload(String, DownloadId, Arc<DownloadLimiterGroup>),
+    QueueDownload(Download, Arc<DownloadLimiterGroup>),
     CancelDownload(DownloadId),
     PauseDownload(DownloadId),
-    ResumeDownload(Download),
+    ResumeDownload(Download, Arc<DownloadLimiterGroup>),
     DownloadFinished(DownloadId),
     PermitReleased(OwnedSemaphorePermit),
     RequestPermits(DownloadId),
@@ -102,10 +102,12 @@ pub struct HostManager {
     download_supervisors_debt: Arc<AtomicUsize>, // How many permits the supervisors still have to return
     authority: Arc<()>,
     rate_limited: bool,
+    global_limit: Arc<BandwidthLimiter>,
+    host_limit: Arc<BandwidthLimiter>,
 }
 
 impl HostManager {
-    pub fn new(app_context: AppContext, host: Host, sender: UnboundedSender<HostMessage>, receiver: UnboundedReceiver<HostMessage>) -> Self {
+    pub fn new(app_context: AppContext, host: Host, sender: UnboundedSender<HostMessage>, receiver: UnboundedReceiver<HostMessage>, global_limit: Arc<BandwidthLimiter>, host_limit: Arc<BandwidthLimiter>) -> Self {
         Self {
             host,
             sender,
@@ -117,6 +119,8 @@ impl HostManager {
             download_supervisors_debt: Arc::new(0.into()),
             authority: Arc::new(()),
             rate_limited: false,
+            global_limit,
+            host_limit,
         }
     }
 
@@ -132,14 +136,14 @@ impl HostManager {
                 }
                 Some(message) = self.receiver.recv() => {
                     match message {
-                        HostMessage::ProcessDownload(url, download_id) => {
-                            self.process_download(url, download_id);
+                        HostMessage::ProcessDownload(url, download_id, download_limiter) => {
+                            self.process_download(url, download_id, download_limiter);
                         },
-                        HostMessage::QueueDownload(download) => {
+                        HostMessage::QueueDownload(download, download_limiter) => {
                             trace!("queueing download: {}", download.name());
 
                             self.permit_queue.push_back(download.id());
-                            self.active_downloads.insert(download.id(), DownloadSupervisor::new(self.app_context.clone(), download.clone(), self.sender.clone()).await);
+                            self.active_downloads.insert(download.id(), DownloadSupervisor::new(self.app_context.clone(), download.clone(), self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
                             let _ = self.app_context.ui_sender.send(UiStateEvent::AddDownload(download));
 
                             self.distribute_permits().await;
@@ -223,7 +227,7 @@ impl HostManager {
                                 drop(supervisor);
                             }
                         },
-                        HostMessage::ResumeDownload(mut download) => {
+                        HostMessage::ResumeDownload(mut download, download_limiter) => {
                             if download.status() == DownloadStatus::Completed {
                                 debug!("Download {} is already completed! Ignoring resume command.", download.name());
                                 return;
@@ -241,7 +245,7 @@ impl HostManager {
                             download.set_status(DownloadStatus::InProgress);
 
                             self.permit_queue.push_back(id);
-                            self.active_downloads.insert(id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone()).await);
+                            self.active_downloads.insert(id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
                             
                             let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                                 DownloadUpdate::StatusChanged { 
@@ -311,7 +315,7 @@ impl HostManager {
         }
     }
 
-    fn process_download(&self, url: String, id: DownloadId) -> JoinHandle<()> {
+    fn process_download(&self, url: String, id: DownloadId, download_limiter: Arc<DownloadLimiterGroup>) -> JoinHandle<()> {
         let self_sender = self.sender.clone();
         let plugin_registry = self.app_context.plugin_registry.clone();
 
@@ -324,7 +328,16 @@ impl HostManager {
             if let Ok(message) = receiver.await {
                 if let Some(download_task) = message {
                     let download = Download::new(*id, download_task);
-                    let _ = self_sender.send(HostMessage::QueueDownload(download));
+
+                    for file in &download.files {
+                        let limiter = BandwidthLimiter::new(0);
+                        limiter.set_unlimited(true);
+
+                        let file_limiter = Arc::new(limiter);
+                        download_limiter.file_limiters().insert(*file.0, file_limiter);
+                    }
+
+                    let _ = self_sender.send(HostMessage::QueueDownload(download, download_limiter));
                 }
 
                 else {
@@ -340,10 +353,10 @@ pub struct HostHandle {
 }
 
 impl HostHandle {
-    pub fn spawn(app_context: AppContext, host: Host) -> (Self, JoinHandle<()>) {
+    pub fn spawn(app_context: AppContext, host: Host, global_limit: Arc<BandwidthLimiter>, host_limit: Arc<BandwidthLimiter>) -> (Self, JoinHandle<()>) {
         let (host_sender, host_receiver) = unbounded_channel();
 
-        let host_manager = HostManager::new(app_context, host, host_sender.clone(), host_receiver);
+        let host_manager = HostManager::new(app_context, host, host_sender.clone(), host_receiver, global_limit, host_limit);
 
         let handle = tokio::spawn(async move {
             host_manager.run().await;
@@ -356,9 +369,9 @@ impl HostHandle {
         (host_handle, handle)
     }
 
-    pub fn process_download(&self, url: String, download_id: DownloadId) {
+    pub fn process_download(&self, url: String, download_id: DownloadId, download_limiter: Arc<DownloadLimiterGroup>) {
         trace!("sending through handle");
-        let _ = self.sender.send(HostMessage::ProcessDownload(url, download_id));
+        let _ = self.sender.send(HostMessage::ProcessDownload(url, download_id, download_limiter));
     }
 
     pub fn cancel_download(&self, download_id: DownloadId) {
@@ -369,7 +382,7 @@ impl HostHandle {
         let _ = self.sender.send(HostMessage::PauseDownload(download_id));
     }
 
-    pub fn queue_download(&self, download: Download) {
-        let _ = self.sender.send(HostMessage::ResumeDownload(download));
+    pub fn queue_download(&self, download: Download, download_limiter: Arc<DownloadLimiterGroup>) {
+        let _ = self.sender.send(HostMessage::ResumeDownload(download, download_limiter));
     }
 }

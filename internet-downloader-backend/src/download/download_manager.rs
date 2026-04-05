@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bitvec::order::Msb0;
@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
+use dashmap::DashMap;
+use url::Host;
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
@@ -26,6 +28,7 @@ use crate::network_manager;
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::state_manager::StateManager;
+use crate::utils::network_utils::BandwidthLimiter;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
@@ -53,6 +56,7 @@ impl FileUpdate {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[rkyv(derive(Hash, PartialEq, Eq))]
 #[serde(transparent)]
 pub struct DownloadId(pub usize);
 
@@ -84,6 +88,13 @@ pub enum DownloadCommand {
     Cancel,
 }
 
+// To maybe add in the future:
+// Skip a file in a download
+// Set download priority
+// Force start a download? (move it to top of queue)
+// Force retry a failed download
+// Reload a plugin (manually)
+// Set host max connections
 pub enum ManagerCommand {
     QueueDownload(String),
     RemoveDownload(DownloadId, bool), // true if we want to remove from disk too
@@ -91,6 +102,132 @@ pub enum ManagerCommand {
     PauseDownload(DownloadId),
     ResumeDownload(DownloadId),
     Shutdown,
+    SetGlobalSpeedLimit(Option<u64>),
+    SetHostSpeedLimit(String, Option<u64>), // String can be a hostname or url
+    SetDownloadSpeedLimit(DownloadId, Option<u64>),
+    SetFileSpeedLimit(DownloadId, usize, Option<u64>),
+}
+
+pub struct DownloadLimiterGroup {
+    download_limiter: Arc<BandwidthLimiter>,
+    file_limiters: DashMap<usize, Arc<BandwidthLimiter>>,
+}
+
+impl DownloadLimiterGroup {
+    pub fn new() -> Self {
+        let download_limiter = BandwidthLimiter::new(0);
+        download_limiter.set_unlimited(true);
+
+        Self { 
+            download_limiter: Arc::new(download_limiter),
+            file_limiters: DashMap::new()
+        }
+    }
+
+    pub fn from_settings(settings: Option<&DownloadSettings>) -> Self {
+        let group = Self::new();
+
+        if let Some(settings) = settings {
+            if let Some(limit) = settings.speed_limit {
+                group.download_limiter.set_unlimited(false);
+                group.download_limiter.set_limit(limit);
+            }
+
+            for (&file_id, file_setting) in &settings.file_settings {
+                if let Some(limit) = file_setting.speed_limit {
+                    let f_limit = BandwidthLimiter::new(limit);
+                    f_limit.set_unlimited(false);
+                    group.file_limiters.insert(file_id, Arc::new(f_limit));
+                }
+            }
+        }
+
+        group
+    }
+
+    pub fn download_limiter(&self) -> Arc<BandwidthLimiter> {
+        self.download_limiter.clone()
+    }
+
+    pub fn file_limiters(&self) -> &DashMap<usize, Arc<BandwidthLimiter>> {
+        &self.file_limiters
+    }
+}
+
+pub struct LimiterRegistry {
+    global_limit: Arc<BandwidthLimiter>,
+    host_limits: DashMap<Host, Weak<BandwidthLimiter>>,
+    downloads: DashMap<DownloadId, Weak<DownloadLimiterGroup>>,
+}
+
+impl LimiterRegistry {
+    pub fn new() -> Self {
+        let global_limit = BandwidthLimiter::new(0);
+        global_limit.set_unlimited(true);
+
+        Self {
+            global_limit: Arc::new(global_limit),
+            host_limits: DashMap::new(),
+            downloads: DashMap::new(),
+        }
+    }
+
+    pub fn global_limit(&self) -> Arc<BandwidthLimiter> {
+        self.global_limit.clone()
+    }
+
+    pub fn host_limits(&self) -> &DashMap<Host, Weak<BandwidthLimiter>> {
+        &self.host_limits
+    }
+
+    pub fn downloads(&self) -> &DashMap<DownloadId, Weak<DownloadLimiterGroup>> {
+        &self.downloads
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct FileSettings {
+    pub speed_limit: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct DownloadSettings {
+    pub speed_limit: Option<u64>,
+    pub file_settings: HashMap<usize, FileSettings>, 
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct HostSettings {
+    pub speed_limit: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+pub struct AppSettings {
+    pub global_speed_limit: Option<u64>,
+    pub download_settings: HashMap<DownloadId, DownloadSettings>,
+    pub host_settings: HashMap<String, HostSettings>
+}
+
+impl AppSettings {
+    pub fn new() -> Self {
+        Self {
+            global_speed_limit: None,
+            download_settings: HashMap::new(),
+            host_settings: HashMap::new(),
+        }
+    }
+
+    pub fn global_speed_limit(&self) -> Option<u64> {
+        self.global_speed_limit
+    }
+
+    pub fn set_global_speed_limit(&mut self, new_speed_limit: Option<u64>) {
+        self.global_speed_limit = new_speed_limit;
+    }
+
+    pub fn get_download_settings(&self, download_id: DownloadId) -> Option<DownloadSettings> {
+        self.download_settings.get(&download_id).cloned()
+    }
 }
 
 #[derive(Debug)]
@@ -214,7 +351,9 @@ impl DownloadManager {
             plugin_registry
         };
 
-        let (network_manager, _) = NetworkHandle::spawn(app_context).await;
+        let (network_manager, _) = NetworkHandle::spawn(app_context.clone()).await;
+
+        let mut app_settings = AppSettings::new();
 
         // Download registry for deduplication purposes
         let mut url_registry: HashMap<String, DownloadId> = HashMap::new();
@@ -318,10 +457,50 @@ impl DownloadManager {
                                 }
                             },
                             ManagerCommand::ResumeDownload(download_id) => if let Ok(download) = db_manager.load_download(download_id).await {
-                                network_manager.resume_download(download);
+                                let download_settings = app_settings.get_download_settings(download_id);
+
+                                network_manager.resume_download(download, download_settings);
                             },
                             ManagerCommand::Shutdown => {
                                 break;
+                            },
+                            ManagerCommand::SetGlobalSpeedLimit(limit) => {
+                                app_settings.set_global_speed_limit(limit);
+
+                                app_context.db_manager.write_app_settings(&app_settings).await;
+
+                                network_manager.set_global_limit(limit);
+                            },
+                            ManagerCommand::SetHostSpeedLimit(host, limit) => {
+                                app_settings.host_settings
+                                    .entry(host.clone())
+                                    .or_default()
+                                    .speed_limit = limit;
+
+                                app_context.db_manager.write_app_settings(&app_settings).await;
+
+                                network_manager.set_host_limit(host, limit);
+                            },
+                            ManagerCommand::SetDownloadSpeedLimit(download_id, limit) => {
+                                if let Some(download_settings) = app_settings.download_settings.get_mut(&download_id) {
+                                    download_settings.speed_limit = limit;
+                                }
+
+                                app_context.db_manager.write_app_settings(&app_settings).await;
+
+                                network_manager.set_download_limit(download_id, limit);
+                            },
+                            ManagerCommand::SetFileSpeedLimit(download_id, file_id, limit) => {
+                                if let Some(download_settings) = app_settings.download_settings.get_mut(&download_id)
+                                    && app_context.db_manager.file_exists(download_id, file_id).await {
+                                        let file_settings = download_settings.file_settings.entry(file_id).or_default();
+                                        file_settings.speed_limit = limit;
+
+                                        app_context.db_manager.write_app_settings(&app_settings).await;
+                                        network_manager.set_file_limit(download_id, file_id, limit);
+                                } else {
+                                    warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
+                                }
                             },
                         }
                     }
@@ -572,7 +751,6 @@ pub struct FileDownload {
     #[rkyv(with = AsBitVec)]
     chunks: BitVec<u8, Msb0>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
-    bytes_downloaded: u64,
     #[serde(skip)]
     /// tracks consecutive retries
     retries: usize, 
@@ -711,7 +889,6 @@ impl FileDownload {
             hash: None,
             chunks: BitVec::new(),
             size: None,
-            bytes_downloaded: 0,
             retries: 0,
         }
     }
@@ -740,14 +917,6 @@ impl FileDownload {
         self.size = Some(size);
     }
 
-    pub fn bytes_downloaded(&self) -> u64 {
-        self.bytes_downloaded
-    }
-
-    pub fn set_bytes_downloaded(&mut self, bytes_downloaded: u64) {
-        self.bytes_downloaded = bytes_downloaded
-    }
-
     pub fn retries(&self) -> usize {
         self.retries
     }
@@ -758,6 +927,57 @@ impl FileDownload {
 
     pub fn reset_retries(&mut self) {
         self.retries = 0;
+    }
+
+    pub fn calculate_initial_bytes(&self, chunk_size: u64) -> u64 {
+        let chunks = self.chunks();
+
+        if chunks.is_empty() {
+            return 0;
+        }
+
+        let file_size = match self.size() {
+            Some(FileSize::Known(size)) => size,
+            _ => return 0,
+        };
+
+        if self.status == DownloadStatus::Completed {
+            return file_size;
+        }
+
+        let last_chunk_index = chunks.len() - 1;
+
+        // Did we download the very last chunk?
+        let has_last_chunk = chunks.get(last_chunk_index).as_deref() == Some(&true);
+
+        let downloaded_chunks = chunks.count_ones() as u64;
+
+        if has_last_chunk {
+            // All chunks except the last one are full size
+            let standard_bytes = (downloaded_chunks - 1) * chunk_size;
+            
+            // We calculate the size of the last chunk
+            let last_chunk_bytes = self.calculate_chunk_expected_len(
+                chunk_size, 
+                (last_chunk_index, last_chunk_index + 1), 
+                file_size
+            );
+
+            standard_bytes + last_chunk_bytes
+        } else {
+            // If we don't have the last chunk, every chunk we have is standard size
+            downloaded_chunks * chunk_size
+        }
+    }
+
+    fn calculate_chunk_expected_len(&self, chunk_size: u64, range: (usize, usize), file_size: u64) -> u64 {
+        let start_byte = range.0 as u64 * chunk_size;
+        let theoretical_end = range.1 as u64 * chunk_size;
+
+        let actual_end = std::cmp::min(theoretical_end, file_size);
+        let expected_len = actual_end.saturating_sub(start_byte);
+        
+        expected_len.min(file_size)
     }
 }
 

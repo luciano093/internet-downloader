@@ -267,10 +267,10 @@ pub struct DownloadDiff {
     files: HashMap<usize, ItemDiff>,
 }
 
-impl From<&Download> for DownloadDiff {
-    fn from(download: &Download) -> Self {
+impl DownloadDiff {
+    fn from(download: &Download, bytes_downloaded: u64) -> Self {
         let file_diffs = download.files().into_iter().map(|(&id, download_type)| {
-            (id, ItemDiff::from(download_type))
+            (id, ItemDiff::from_download_type(download_type, bytes_downloaded))
         }).collect();
 
         DownloadDiff { url: Some(download.url().clone()),
@@ -288,11 +288,11 @@ pub enum ItemDiff {
     Folder(FolderDiff),
 }
 
-impl From<&DownloadType> for ItemDiff {
-    fn from(download_type: &DownloadType) -> Self {
+impl ItemDiff {
+    fn from_download_type(download_type: &DownloadType, bytes_downloaded: u64) -> Self {
         match download_type {
             DownloadType::File(file_download) => {
-                ItemDiff::File(FileDiff::from(file_download))
+                ItemDiff::File(FileDiff::from_file_download(file_download, bytes_downloaded))
             },
             DownloadType::Folder(folder_download) => {
                 ItemDiff::Folder(FolderDiff::from(folder_download))
@@ -334,10 +334,8 @@ impl FileDiff {
             },
         }
     }
-}
 
-impl From<&FileDownload> for FileDiff {
-    fn from(file: &FileDownload) -> Self {
+    fn from_file_download(file: &FileDownload, bytes_downloaded: u64) -> Self {
         FileDiff { 
             status: Some(file.status()),
             url: Some(file.url().to_string()),
@@ -345,7 +343,7 @@ impl From<&FileDownload> for FileDiff {
             relative_path: Some(file.relative_path().clone()),
             hash: file.hash(),
             size: file.size(),
-            bytes_downloaded: Some(file.bytes_downloaded()),
+            bytes_downloaded: Some(bytes_downloaded),
         }
     }
 }
@@ -401,9 +399,22 @@ pub fn download_to_json(download: &Download) -> serde_json::Value {
     let mut files_json = serde_json::to_value(download.files()).unwrap();
 
     if let Some(files_map) = files_json.as_object_mut() {
-        for (_id, file_value) in files_map.iter_mut() {
+        for (id, file_value) in files_map.iter_mut() {
             if let Some(file_obj) = file_value.as_object_mut() {
                 file_obj.remove("chunks"); 
+
+                if let Ok(id) = id.parse::<usize>() {
+                    // Assuming you have a way to access the FileDownload here
+                    if let Some(crate::download::DownloadType::File(file)) = download.files().get(&id) {
+                        // Calculate safe, committed bytes from the BitVec
+                        let committed_bytes = file.calculate_initial_bytes(16384 as u64);
+                        
+                        file_obj.insert(
+                            "bytes_downloaded".to_string(), 
+                            serde_json::json!(committed_bytes)
+                        );
+                    }
+                }
             }
         }
     }
