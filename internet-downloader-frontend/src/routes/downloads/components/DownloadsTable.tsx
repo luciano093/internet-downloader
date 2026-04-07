@@ -221,13 +221,14 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
     // Keyboard logic (Moving through table with up and down arrows)
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
-            if (!isTableFocused) return;
+            if (!selectedId) return;
 
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                 event.preventDefault(); 
 
                 // If nothing is selected yet, select the first item and stop
                 if (!selectedId && downloadIds.length > 0) {
+                    setTableFocused(true);
                     setSelectedId(downloadIds[0]);
                     return;
                 }
@@ -249,6 +250,8 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
                         setSelectedId(downloadIds[currentIndex - 1]);
                     }
                 }
+
+                setTableFocused(true);
             }
         };
 
