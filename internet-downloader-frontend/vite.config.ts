@@ -39,7 +39,7 @@ export default defineConfig(({ mode }) => {
       tanstackRouter({
         target: 'react',
         autoCodeSplitting: true,
-        routeFileIgnorePattern: 'components', 
+        routeFileIgnorePattern: 'components|hooks', 
       }),
       react(),
       tailwindcss(),
