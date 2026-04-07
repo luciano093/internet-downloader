@@ -5,15 +5,18 @@ import type { DeltaEvent, DownloadItem, DownloadNode } from './downloadTypes';
 export type DownloadState = {
     downloads: Record<number, DownloadItem>;
     downloadIds: number[];
+    selectedId: number | null;
 
     setSnapshot: (items: DownloadItem[]) => void;
     applyDelta: (delta: DeltaEvent) => void;
+    setSelectedId: (id: number | null) => void;
 };
 
 export const useDownloadStore = create<DownloadState>()(
     immer((set) => ({
         downloads: {},
         downloadIds: [],
+        selectedId: null,
 
         setSnapshot: (items) => set((state) => {
             state.downloadIds = items.map(i => i.id);
@@ -69,6 +72,11 @@ export const useDownloadStore = create<DownloadState>()(
                     }
                 });
             }
+        }),
+
+        setSelectedId: (id) => set((state) => {
+            console.log("id: ", id);
+            state.selectedId = id;
         }),
     }))
 );

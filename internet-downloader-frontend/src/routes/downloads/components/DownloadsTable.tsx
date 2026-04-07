@@ -2,7 +2,7 @@
 
 import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from "@tanstack/react-table";
 import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@/components/ui/table";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useDownloadStore } from "@/store";
 import type { DownloadItem, DownloadNode, FileItem } from "@/downloadTypes";
@@ -180,10 +180,84 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
     columns,
     getCoreRowModel: getCoreRowModel(),
     columnResizeMode: "onChange",
+    getRowId: (originalRow) => String(originalRow)
   });
+  const [isTableFocused, setTableFocused] = useState(false);
+  const { selectedId, setSelectedId } = useDownloadStore();
 
   const { rows } = table.getRowModel();
   const tableContainerRef = useRef<HTMLDivElement>(null);
+
+    // Table focus logic
+    useEffect(() => {
+        const handleClick = (event: MouseEvent) => {
+            if (!tableContainerRef.current) return;
+
+            const target = event.target as HTMLElement;
+
+            // We ignore the click if the header was clicked
+            if (target.closest("thead") || target.closest("th")) {
+                return; 
+            }
+
+            if (tableContainerRef.current.contains(event.target as Node)) {
+                console.log("table focused");
+                setTableFocused(true);
+            } else {
+                setTableFocused(false);
+                console.log("table not focused");
+            }
+        };
+
+        // We add a global listener
+        document.addEventListener("mousedown", handleClick);
+
+        // When this component is unmounted, we remove the event listener
+        return () => {
+            document.removeEventListener("mousedown", handleClick);
+        };
+    }, []); // Only runs once when component is mounted
+
+    // Keyboard logic (Moving through table with up and down arrows)
+    useEffect(() => {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (!isTableFocused) return;
+
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault(); 
+
+                // If nothing is selected yet, select the first item and stop
+                if (!selectedId && downloadIds.length > 0) {
+                    setSelectedId(downloadIds[0]);
+                    return;
+                }
+
+                const currentIndex = downloadIds.indexOf(selectedId!);
+
+                if (currentIndex === -1) return; 
+
+                if (event.key === "ArrowDown") {
+                    // Check if we are already at the bottom
+                    if (currentIndex < downloadIds.length - 1) {
+                        setSelectedId(downloadIds[currentIndex + 1]);
+                    }
+                } 
+                
+                else if (event.key === "ArrowUp") {
+                    // Check if we are already at the top
+                    if (currentIndex > 0) {
+                        setSelectedId(downloadIds[currentIndex - 1]);
+                    }
+                }
+            }
+        };
+
+        document.addEventListener("keydown", handleKeyDown);
+
+        return () => {
+            document.removeEventListener("keydown", handleKeyDown);
+        };
+    }, [isTableFocused, selectedId, downloadIds]); 
 
     const rowVirtualizer = useVirtualizer({
     count: rows.length,
@@ -210,7 +284,7 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
   const columnSizingState = table.getState().columnSizing;
   
   return (
-    <div ref={tableContainerRef} className="w-full h-full overflow-auto">
+    <div ref={tableContainerRef} className="w-full overflow-auto">
       <Table 
         className="table-fixed w-full" 
         style={{ 
@@ -222,7 +296,10 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
         {/* --- HEADERS --- */}
         <TableHeader>
           {table.getHeaderGroups().map((headerGroup) => (
-            <TableRow key={headerGroup.id} className="border-border hover:bg-transparent">
+            <TableRow 
+                key={headerGroup.id}
+                className="border-border hover:bg-transparent"
+            >
               {headerGroup.headers.map((header, index, array) => {
                 const isFirstColumn = index === 0;
                 const isLastColumn = index === array.length - 1;
@@ -310,10 +387,15 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
 
             return (
                 <TableRow
-                    key={row.id}
+                    key={row.original}
                     ref={rowVirtualizer.measureElement} 
                     data-index={virtualRow.index}       
-                    className={`border-border text-xs`}
+                    onClick={() => setSelectedId(row.original)}
+                    className={cn(
+                        `text-xs hover:bg-[#2a2d2e] transition-none`,
+                        selectedId == row.original && "outline text-foreground -outline-offset-1 outline-dotted outline-[#919191] bg-background",
+                        selectedId == row.original && isTableFocused && "bg-[#37373d] hover:bg-[#37373d]",
+                    )}
                 >
                     {row.getVisibleCells().map((cell, index, array) => {
                         const isFirstColumn = index === 0;
@@ -331,10 +413,7 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
                             <TableCell 
                                 key={cell.id} 
                                 style={{ width: colWidth }}
-                                className={cn(
-                                    "truncate max-w-0", 
-                                    index === 0 && "flex-1 w-[calc(100cqw_-_40px)]"
-                                )} 
+                                className="truncate max-w-0"
                             >
                                 {flexRender(cell.column.columnDef.cell, cell.getContext())}
                             </TableCell>
