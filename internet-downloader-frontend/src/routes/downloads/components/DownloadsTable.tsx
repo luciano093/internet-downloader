@@ -4,7 +4,7 @@ import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from "
 import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@/components/ui/table";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { useDownloadStore } from "@/store";
+import { useDownloadStore } from "@/stores/downloadStore";
 import type { DownloadItem, DownloadNode, FileItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import useDownloadSpeed from "../hooks/useDownloadSpeed";

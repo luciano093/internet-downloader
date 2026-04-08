@@ -3,8 +3,10 @@ import { useUiStore } from "@/stores/uiStore";
 import { useState } from "react";
 
 export function AddDownloadModal() {
-    const isAddModalOpen = useUiStore((state) => state.isAddModalOpen);
-    const setAddModalOpen = useUiStore((state) => state.setAddModalOpen);
+    const activeModal = useUiStore((state) => state.activeModal);
+    const closeModal = useUiStore((state) => state.closeModal);
+
+    const isAddModalOpen = activeModal === 'add';
 
     const [urls, setUrls] = useState("");
     const[savePath, setSavePath] = useState("/downloads/completed/");
@@ -28,11 +30,16 @@ export function AddDownloadModal() {
             });
         }
         
-        setAddModalOpen(false);
+        closeModal();
     };
 
     return (
-        <Dialog open={isAddModalOpen} onOpenChange={setAddModalOpen}>
+        <Dialog 
+            open={isAddModalOpen} 
+            onOpenChange={(open) => {
+                if (!open) closeModal();
+            }}
+        >
             <DialogContent className="bg-background text-foreground rounded-sm border-border w-fit sm:max-w-[90vw] min-w-[500px]">
                 <DialogHeader>
                     <DialogTitle className="text-foreground">Add download links</DialogTitle>
@@ -92,7 +99,7 @@ export function AddDownloadModal() {
                             Download
                         </button>
                         <button 
-                            onClick={() => setAddModalOpen(false)}
+                            onClick={() => closeModal()}
                             className="h-8 px-4 rounded-sm bg-accent text-[13px] text-foreground hover:bg-accent-foreground/15 transition-colors cursor-pointer"
                         >
                             Cancel

@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import AppLayout from '../components/AppLayout'
 import { DownloadsTable } from './downloads/components/DownloadsTable'
-import { useDownloadStore } from '@/store'
+import { useDownloadStore } from '@/stores/downloadStore'
 import { useCallback, useEffect, useRef } from 'react'
 import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'

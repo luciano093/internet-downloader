@@ -2,11 +2,11 @@ import { Plus, Play, Pause, X, ArrowDown, Globe } from "lucide-react";
 import { TopBarButton } from "@/components/TopBarButton";
 import TopBarSearch from "@/components/TopBarSearch";
 import { useUiStore } from "@/stores/uiStore";
-import { useDownloadStore } from "@/store";
+import { useDownloadStore } from "@/stores/downloadStore";
 import { useMutation } from "@tanstack/react-query";
 
 export default function DownloadsTopBar() {
-    const setAddModalOpen = useUiStore((state) => state.setAddModalOpen);
+    const openModal = useUiStore((state) => state.openModal);
     const selectedId = useDownloadStore((state) => state.selectedId);
 
     const pauseMutation = useMutation({
@@ -33,7 +33,7 @@ export default function DownloadsTopBar() {
             <TopBarButton 
             icon={<Plus className="h-4 w-4"/>} 
             label="Add" 
-            onClick={() => setAddModalOpen(true)}
+            onClick={() => openModal('add')}
             />
             <div className="h-5 w-px bg-gray-700 mx-1" /> 
             <TopBarButton 

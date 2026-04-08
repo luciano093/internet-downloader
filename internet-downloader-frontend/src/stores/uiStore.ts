@@ -1,11 +1,15 @@
 import { create } from 'zustand'
 
+export type ModalType = 'add' | 'remove' | null;
+
 interface UiState {
-  isAddModalOpen: boolean
-  setAddModalOpen: (isOpen: boolean) => void
+  activeModal: ModalType;
+  openModal: (modal: ModalType) => void;
+  closeModal: () => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
-  isAddModalOpen: false,
-  setAddModalOpen: (isOpen) => set({ isAddModalOpen: isOpen }),
-}))
+  activeModal: null,
+  openModal: (modal) => set({ activeModal: modal }),
+  closeModal: () => set({ activeModal: null }),
+}));
