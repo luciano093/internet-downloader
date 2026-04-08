@@ -19,7 +19,7 @@ export default function AppLayout({ topBar, sidebarTop, children }: AppLayoutPro
             
             requestAnimationFrame(() => {
                 if (sidebarRef.current) {
-                    const newWidth = Math.min(Math.max(e.clientX, 100), 600);
+                    const newWidth = Math.min(Math.max(e.clientX, 100), window.innerWidth * 0.9);
                     sidebarRef.current.style.width = `${newWidth}px`;
                 }
             });
