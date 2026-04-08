@@ -5,6 +5,8 @@ import { useDownloadStore } from '@/stores/downloadStore'
 import { useCallback, useEffect, useRef } from 'react'
 import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
+import BottomDetailsPane from './downloads/components/BottomDetailsPane'
 
 export const Route = createFileRoute('/')({
   component: Index,
@@ -14,6 +16,7 @@ function Index() {
   const setSnapshot = useDownloadStore((store) => store.setSnapshot);
   const applyDelta = useDownloadStore((store) => store.applyDelta);
   const downloadIds = useDownloadStore((store) => store.downloadIds);
+  const { selectedId } = useDownloadStore();
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -56,7 +59,20 @@ function Index() {
         topBar={<DownloadsTopBar />} 
         sidebarTop={<DownloadsSidebar />}
       >
-       <DownloadsTable downloadIds={downloadIds} />
+        <ResizablePanelGroup orientation='vertical'>
+          <ResizablePanel>
+            <DownloadsTable downloadIds={downloadIds} />
+          </ResizablePanel>
+          { selectedId &&
+            <>
+              <ResizableHandle className="bg-border" />
+
+              <ResizablePanel>
+                <BottomDetailsPane />
+              </ResizablePanel>
+            </>
+          }
+       </ResizablePanelGroup>
       </AppLayout>
     </>
 }
