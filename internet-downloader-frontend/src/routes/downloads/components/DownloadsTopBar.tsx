@@ -2,11 +2,28 @@ import { Plus, Play, Pause, X, ArrowDown, Globe } from "lucide-react";
 import { TopBarButton } from "@/components/TopBarButton";
 import TopBarSearch from "@/components/TopBarSearch";
 import { useUiStore } from "@/stores/uiStore";
+import { useDownloadStore } from "@/store";
+import { useMutation } from "@tanstack/react-query";
 
 export default function DownloadsTopBar() {
     const setAddModalOpen = useUiStore((state) => state.setAddModalOpen);
+    const selectedId = useDownloadStore((state) => state.selectedId);
 
+    const pauseMutation = useMutation({
+        mutationFn: async (id: number) => {
+            return fetch(`http://localhost:3211/downloads/${id}/pause`, {
+                method: "POST",
+            });
+        },
+    });
 
+    const resumeMutation = useMutation({
+        mutationFn: async (id: number) => {
+            return fetch(`http://localhost:3211/downloads/${id}/resume`, {
+                method: "POST",
+            });
+        },
+    });
 
     return (
         <div className="flex w-full items-center h-full">
@@ -21,12 +38,24 @@ export default function DownloadsTopBar() {
             <div className="h-5 w-px bg-gray-700 mx-1" /> 
             <TopBarButton 
             icon={<Play className="h-4 w-4"/>} 
-            label="Start" 
+            label="Start"
+            disabled={selectedId === null || (resumeMutation.isPending && resumeMutation.variables === selectedId)}
+            onClick={() => {
+                    if (selectedId !== null) {
+                        resumeMutation.mutate(selectedId);
+                    }
+                }}
             />
 
             <TopBarButton 
             icon={<Pause className="h-4 w-4"/>} 
-            label="Pause" 
+            label="Pause"
+            disabled={selectedId === null || (pauseMutation.isPending && pauseMutation.variables === selectedId)}
+            onClick={() => {
+                    if (selectedId !== null) {
+                        pauseMutation.mutate(selectedId);
+                    }
+                }}
             />
 
             <div className="h-5 w-px bg-gray-700 mx-1" /> 
