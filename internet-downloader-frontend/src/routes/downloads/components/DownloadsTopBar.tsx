@@ -62,7 +62,9 @@ export default function DownloadsTopBar() {
             
             <TopBarButton 
             icon={<X className="h-4 w-4"/>} 
-            label="Remove" 
+            label="Remove"
+            disabled={selectedId === null}
+            onClick={() => openModal('remove')}
             />
         </div>
 
