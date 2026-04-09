@@ -1294,7 +1294,7 @@ async fn download_range(
     file_progress: Arc<AtomicU64>, 
 )-> Result<(), RangeDownloadError> {
     let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
-    let end_byte = start_byte + expected_len - 1; // -1 because http ranges are inclusive
+    let end_byte = start_byte + expected_len.saturating_sub(1); // -1 because http ranges are inclusive
 
     let range_header = format!("bytes={}-{}", start_byte, end_byte);
 
@@ -1304,23 +1304,7 @@ async fn download_range(
     let response = match request.send().await {
         Ok(response) => match response.status() {
             StatusCode::TOO_MANY_REQUESTS => {
-                let retry_after = response.headers().get(header::RETRY_AFTER).and_then(|header| {
-                    let retry_after_str = header.to_str().ok()?;
-                    
-                    // Try parsing as seconds
-                    if let Ok(seconds) = retry_after_str.parse::<u64>() {
-                        return Some(seconds);
-                    }
-
-                        // Try parsing as HTTP-Date
-                    if let Ok(date) = DateTime::parse_from_rfc2822(retry_after_str) {
-                        let now = Utc::now();
-                        let diff = date.with_timezone(&Utc).signed_duration_since(now);
-                        return Some(diff.num_seconds().max(0) as u64);
-                    }
-
-                    None
-                });
+                let retry_after = parse_retry_after(response.headers());
 
                 Err(DownloadError::RateLimited(retry_after))
             },
@@ -1345,6 +1329,16 @@ async fn download_range(
         Err(err) => return Err(DownloadError::Network(err).into()),
     }?;
 
+    let (io_sender, mut io_receiver) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(2);
+
+    let file_map_clone = file_map.clone();
+
+    let writer_handle = tokio::task::spawn_blocking(move || {
+        while let Some((offset, data)) = io_receiver.blocking_recv() {
+            file_map_clone.write_chunk(offset, &data);
+        }
+    });
+
     let raw_stream = response.bytes_stream();
     let throttled_stream = ThrottledStream::new(raw_stream, limiters);
     tokio::pin!(throttled_stream);
@@ -1354,6 +1348,7 @@ async fn download_range(
 
     let mut range_progress = RangeProgress::new(file_progress);
     let mut unnotified_bytes = 0; 
+    let mut current_progress = 0;
 
     let buffer_capacity: usize = 1024 * 1024; // 1 MB
     let mut buffer = Vec::with_capacity(buffer_capacity); 
@@ -1365,7 +1360,7 @@ async fn download_range(
 
         buffer.extend_from_slice(&chunk);
 
-        let current_progress = range_progress.add(chunk_len);
+        current_progress = range_progress.add(chunk_len);
         unnotified_bytes += chunk_len;
 
         if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
@@ -1389,24 +1384,33 @@ async fn download_range(
             // Swap full buffer for an empty one
             let buffer_to_write = std::mem::replace(&mut buffer, Vec::with_capacity(buffer_capacity));
 
-            let offset = buffer_start_offset as usize;
-            let file_map_clone = file_map.clone();
-
-            tokio::task::spawn_blocking(move || {
-                file_map_clone.write_chunk(offset, &buffer_to_write);
-            }).await.unwrap();
+            if io_sender.send((buffer_start_offset as usize, buffer_to_write)).await.is_err() {
+                break; // Writer task panicked/died
+            }
 
             buffer_start_offset = current_offset;
         }
     }
 
     if !buffer.is_empty() {
-        let write_offset = buffer_start_offset as usize;
-        let file_map_clone = file_map.clone();
+        let _ = io_sender.send((buffer_start_offset as usize, buffer)).await;
+    }
 
-        tokio::task::spawn_blocking(move || {
-            file_map_clone.write_chunk(write_offset, &buffer);
-        }).await.unwrap();
+    // Important to drop so handle can finish
+    drop(io_sender);
+    writer_handle.await.unwrap();
+
+    // Update UI if any unnotified bytes remain
+    if unnotified_bytes > 0 {
+        let _ = ui_sender.send(UiStateEvent::AddUpdate(
+            DownloadUpdate::FileUpdated { 
+                id: download_id,
+                file_update: FileUpdate::BytesDownloaded { 
+                    id: file_id,
+                    len: current_progress,
+                } 
+            }
+        ));
     }
 
     if bytes_received != expected_len {
@@ -1425,23 +1429,7 @@ async fn download_stream(client: Client, path: &Path, url: &str, limiters: Vec<A
     let response = match client.get(url).send().await {
         Ok(response) => match response.status() {
             StatusCode::TOO_MANY_REQUESTS => {
-                let retry_after = response.headers().get(header::RETRY_AFTER).and_then(|header| {
-                    let retry_after_str = header.to_str().ok()?;
-                    
-                    // Try parsing as seconds
-                    if let Ok(seconds) = retry_after_str.parse::<u64>() {
-                        return Some(seconds);
-                    }
-
-                        // Try parsing as HTTP-Date
-                    if let Ok(date) = DateTime::parse_from_rfc2822(retry_after_str) {
-                        let now = Utc::now();
-                        let diff = date.with_timezone(&Utc).signed_duration_since(now);
-                        return Some(diff.num_seconds().max(0) as u64);
-                    }
-
-                    None
-                });
+                let retry_after = parse_retry_after(response.headers());
 
                 Err(DownloadError::RateLimited(retry_after))
             },
@@ -1475,4 +1463,24 @@ async fn download_stream(client: Client, path: &Path, url: &str, limiters: Vec<A
     writer.flush().await?;
 
     Ok(size)
+}
+
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers.get(header::RETRY_AFTER).and_then(|header| {
+        let retry_after_str = header.to_str().ok()?;
+        
+        // Try parsing as seconds
+        if let Ok(seconds) = retry_after_str.parse::<u64>() {
+            return Some(seconds);
+        }
+
+            // Try parsing as HTTP-Date
+        if let Ok(date) = DateTime::parse_from_rfc2822(retry_after_str) {
+            let now = Utc::now();
+            let diff = date.with_timezone(&Utc).signed_duration_since(now);
+            return Some(diff.num_seconds().max(0) as u64);
+        }
+
+        None
+    })
 }
