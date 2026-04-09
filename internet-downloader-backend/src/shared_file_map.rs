@@ -1,4 +1,7 @@
 use std::{fs::File, path::PathBuf};
+use fs4::fs_std::FileExt;
+
+use tracing::warn;
 
 #[derive(Debug)]
 pub struct SharedFileMap {
@@ -35,6 +38,10 @@ impl SharedFileMap {
         let file = file_options.open(&path).unwrap();
 
         file.set_len(size).unwrap();
+
+        if let Err(error) = file.allocate(size) {
+            warn!("Could not physically pre-allocate space. OS will fallback to sparse. Error: {}", error);
+        }
         
         Self { file, size }
     }
@@ -50,13 +57,24 @@ impl SharedFileMap {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::fs::FileExt;
-            self.file.seek_write(data, offset as u64).unwrap();
+            
+            let mut written = 0;
+
+            // Manual loop to simulate write_all
+            while written < data.len() {
+                match self.file.seek_write(&data[written..], (offset + written) as u64) {
+                    Ok(0) => panic!("Failed to write: 0 bytes written (Disk full?)"),
+                    Ok(size_written) => written += size_written,
+                    Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("Windows Write error: {}", error),
+                }
+            }
         }
 
         #[cfg(not(target_os = "windows"))]
         {
             use std::os::unix::fs::FileExt;
-            self.file.write_at(data, offset as u64).unwrap();
+            self.file.write_all_at(data, offset as u64).unwrap();
         }
     }
 }

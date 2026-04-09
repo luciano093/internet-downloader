@@ -1329,7 +1329,7 @@ async fn download_range(
         Err(err) => return Err(DownloadError::Network(err).into()),
     }?;
 
-    let (io_sender, mut io_receiver) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(2);
+    let (io_sender, mut io_receiver) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(32);
 
     let file_map_clone = file_map.clone();
 
