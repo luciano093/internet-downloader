@@ -3,6 +3,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::client_state_manager::UiStateEvent;
 use crate::download::ManagerCommand;
+use crate::download_writer_manager::DownloadWriterManager;
 use crate::network_manager::NetworkConfig;
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::state_manager::StateManager;
@@ -15,4 +16,5 @@ pub struct AppContext {
     pub ui_sender: UnboundedSender<UiStateEvent>,
     pub db_manager: StateManager,
     pub plugin_registry: PluginRegistryHandler,
+    pub writer_handle: DownloadWriterManager,
 }

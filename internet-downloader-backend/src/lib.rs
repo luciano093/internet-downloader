@@ -8,3 +8,4 @@ pub mod shared_file_map;
 pub mod plugin_registry;
 pub mod context;
 pub mod utils;
+pub mod download_writer_manager;
