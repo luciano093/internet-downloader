@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use bytes::BytesMut;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode, header};
 use thiserror::Error;
@@ -19,7 +20,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
-use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate};
+use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate, ManagerCommand};
+use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
@@ -56,6 +58,10 @@ pub enum RangeDownloadError {
     UnexpectedLength(u64, u64),
     #[error("Download does not support range downloads")]
     RangeNotSupported,
+    #[error("There was an error writing to disk.")]
+    DiskWriteError(#[from] std::io::Error),
+    #[error("The disk pool was unexpectedly dropped.")]
+    DiskPoolDropped,
 }
 
 trait FileDownloadRetry {
@@ -236,10 +242,11 @@ struct SupervisorState {
     permit_count: Arc<AtomicUsize>, 
     active_downloads: usize, // tracks how many permits we are using to download files
     active_metadata_requests: usize, // tracks how many permits we are using to gather metadata
-    file_maps: HashMap<usize, Arc<SharedFileMap>>, // Tracks file maps to get memory mapped files
     app_context: AppContext,
     retry_queue_count: usize, // tracks how many downloads we are trying. Useful for when there are no jobs and nothing in the retry queue due to retry timeout or delay
-    file_progress: HashMap<usize, Arc<AtomicU64>> // tracker for how many bytes we have downloaded for each file
+    file_progress: HashMap<usize, Arc<AtomicU64>>, // tracker for how many bytes we have downloaded for each file
+    writer_sender: flume::Sender<FileChunk>, // direct channels to the tasks that manage file writing io
+    shared_file_maps: HashMap<usize, Arc<SharedFileMap>>,
 }
 
 impl SupervisorState {
@@ -253,6 +260,8 @@ impl SupervisorState {
             }
         }
 
+        let writer_sender = app_context.writer_handle.sender();
+
         Self { 
             download,
             chunk_cursors: HashMap::new(),
@@ -265,10 +274,11 @@ impl SupervisorState {
             permit_count,
             active_downloads: 0,
             active_metadata_requests: 0,
-            file_maps: HashMap::new(),
             app_context,
             retry_queue_count: 0,
             file_progress,
+            writer_sender,
+            shared_file_maps: HashMap::new(),
         }
     }
 
@@ -380,28 +390,17 @@ impl SupervisorState {
 
                 let path = file_download.relative_path();
 
-                if !file_download.relative_path().exists() {
+                if !self.shared_file_maps.contains_key(&file_id) {
                     if let Some(parent_path) = path.parent() {
                         create_dir_all(parent_path).await.unwrap();
                     }
 
-                    let file = tokio::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&path)
-                        .await;
-
-                    if let Ok(f) = file {
-                        f.set_len(file_size).await.unwrap();
-                    }
+                    let file_map = self.app_context.writer_handle.create_file(path.clone(), file_size).await.unwrap();
+                    
+                    self.shared_file_maps.insert(file_id, file_map);
                 }
 
-                let file_map = self.file_maps
-                    .entry(file_id)
-                    .or_insert_with(|| {
-                        Arc::new(SharedFileMap::new(path.to_path_buf(), file_size))
-                    })
-                    .clone();
+                let file_map = self.shared_file_maps.get(&file_id).unwrap().clone();
 
                 return Some(Job::DownloadChunk { 
                     file_id, 
@@ -627,6 +626,7 @@ impl DownloadSupervisor {
                                             let download_id = state.download.id();
 
                                             let file_progress = state.file_progress.get(&file_id).unwrap().clone();
+                                            let io_sender = state.writer_sender.clone();
           
                                             tokio::spawn(async move {
                                                 tokio::select! {
@@ -634,7 +634,7 @@ impl DownloadSupervisor {
                                                         return;
                                                     }
                                                     // Do worker stuff
-                                                    result = download_range(client, &url, range, file_map.clone(), expected_len, limiters, ui_sender, download_id, file_id, file_progress) => {
+                                                    result = download_range(client, &url, range, io_sender, file_map.clone(), expected_len, limiters, ui_sender, download_id, file_id, file_progress) => {
                                                         match result {
                                                             Ok(_) => {
                                                                 let _ = sender.send(SupervisorMessage::RangeSuccess(permit.downgrade(), file_id, range));
@@ -773,7 +773,7 @@ impl DownloadSupervisor {
                                                 trace!("file {} finished! got {} bytes", file_download.name(), bytes_downloaded);
                                                 let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
                                                 file_download.set_status(DownloadStatus::Completed);
-                                                state.file_maps.remove(&file_id);
+                                                state.shared_file_maps.remove(&file_id);
                                             }
                                         },
                                         crate::download::DownloadType::Folder(_) => todo!(),
@@ -824,7 +824,7 @@ impl DownloadSupervisor {
                                                 // Try to download this as chunked as fallback
                                                 file.set_size(FileSize::Unknown);
                                                 file.reset_retries();
-                                                state.file_maps.remove(&file.id());
+                                                state.shared_file_maps.remove(&file.id());
                                                 state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
                                                 demand.fetch_add(1, Ordering::SeqCst); 
                                             } else {
@@ -839,7 +839,7 @@ impl DownloadSupervisor {
                                                 // Try to download this as chunked as fallback
                                                 file.set_size(FileSize::Unknown);
                                                 file.reset_retries();
-                                                state.file_maps.remove(&file.id());
+                                                state.shared_file_maps.remove(&file.id());
                                                 state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
                                                 demand.fetch_add(1, Ordering::SeqCst); 
                                             } else {
@@ -853,9 +853,19 @@ impl DownloadSupervisor {
                                             // Set this file as having an unknown length so it can be downloaded as chunked
                                             file.set_size(FileSize::Unknown);
                                             file.reset_retries();
-                                            state.file_maps.remove(&file.id());
+                                            state.shared_file_maps.remove(&file.id());
                                             state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
                                             demand.fetch_add(1, Ordering::SeqCst); 
+                                        },
+                                        RangeDownloadError::DiskWriteError(error) => {
+                                            let _ = sender.send(SupervisorMessage::IoError(permit, error, retry_kind));
+                                        },
+                                        RangeDownloadError::DiskPoolDropped => {
+                                            error!("App-wide disk pool dropped. App entered an invalid state and should restart. This probably happened due to an OS error or logic bug.");
+
+                                            let _ = state.app_context.download_manager.send(ManagerCommand::Shutdown);
+
+                                            break;
                                         },
                                     }
                                 }
@@ -1285,7 +1295,11 @@ fn parse_content_range(range_header: &str) -> Option<u64> {
 }
 
 async fn download_range(
-    client: Client, url: &str, range: (usize, usize), file_map: Arc<SharedFileMap>,
+    client: Client, 
+    url: &str,
+    range: (usize, usize),
+    io_sender: flume::Sender<FileChunk>,
+    file_map: Arc<SharedFileMap>,
     expected_len: u64,
     limiters: Vec<Arc<BandwidthLimiter>>,
     ui_sender: UnboundedSender<UiStateEvent>,
@@ -1329,16 +1343,6 @@ async fn download_range(
         Err(err) => return Err(DownloadError::Network(err).into()),
     }?;
 
-    let (io_sender, mut io_receiver) = tokio::sync::mpsc::channel::<(usize, Vec<u8>)>(32);
-
-    let file_map_clone = file_map.clone();
-
-    let writer_handle = tokio::task::spawn_blocking(move || {
-        while let Some((offset, data)) = io_receiver.blocking_recv() {
-            file_map_clone.write_chunk(offset, &data);
-        }
-    });
-
     let raw_stream = response.bytes_stream();
     let throttled_stream = ThrottledStream::new(raw_stream, limiters);
     tokio::pin!(throttled_stream);
@@ -1351,8 +1355,11 @@ async fn download_range(
     let mut current_progress = 0;
 
     let buffer_capacity: usize = 1024 * 1024; // 1 MB
-    let mut buffer = Vec::with_capacity(buffer_capacity); 
+    let mut buffer = BytesMut::with_capacity(buffer_capacity);
     let mut buffer_start_offset = current_offset;
+
+    let mut in_flight_acks: VecDeque<(u64, oneshot::Receiver<std::io::Result<()>>)> = VecDeque::new();
+    const MAX_IN_FLIGHT: usize = 4; // Max 4MB in RAM per worker before we apply backpressure
 
     while let Some(chunk) = throttled_stream.next().await {
         let chunk = chunk.map_err(DownloadError::from)?; 
@@ -1360,21 +1367,30 @@ async fn download_range(
 
         buffer.extend_from_slice(&chunk);
 
-        current_progress = range_progress.add(chunk_len);
-        unnotified_bytes += chunk_len;
+        while let Some((_, receiver)) = in_flight_acks.front_mut() {
+            match receiver.try_recv() {
+                Ok(Ok(_)) => {
+                    let (bytes_written, _) = in_flight_acks.pop_front().unwrap();
+                    current_progress = range_progress.add(bytes_written);
+                    unnotified_bytes += bytes_written;
 
-        if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
-            let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                DownloadUpdate::FileUpdated { 
-                    id: download_id,
-                    file_update: FileUpdate::BytesDownloaded { 
-                        id: file_id,
-                        len: current_progress, 
-                    } 
+                    if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
+                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                            DownloadUpdate::FileUpdated { 
+                                id: download_id,
+                                file_update: FileUpdate::BytesDownloaded { 
+                                    id: file_id,
+                                    len: current_progress, 
+                                } 
+                            }
+                        ));
+                        unnotified_bytes = 0; 
+                    }
                 }
-            ));
-
-            unnotified_bytes = 0; 
+                Ok(Err(error)) => return Err(RangeDownloadError::DiskWriteError(error)), // Disk failed
+                Err(oneshot::error::TryRecvError::Empty) => break,
+                Err(oneshot::error::TryRecvError::Closed) => return Err(RangeDownloadError::DiskPoolDropped),
+            }
         }
 
         current_offset += chunk_len;
@@ -1382,23 +1398,78 @@ async fn download_range(
 
         if buffer.len() >= buffer_capacity {
             // Swap full buffer for an empty one
-            let buffer_to_write = std::mem::replace(&mut buffer, Vec::with_capacity(buffer_capacity));
+            let buffer_to_write = buffer.split().freeze();
+            let bytes_to_write = buffer_to_write.len() as u64;
 
-            if io_sender.send((buffer_start_offset as usize, buffer_to_write)).await.is_err() {
-                break; // Writer task panicked/died
+            buffer.reserve(buffer_capacity); 
+
+            let (ack_sender, ack_receiver) = oneshot::channel();
+
+            let file_chunk = FileChunk {
+                file_map: file_map.clone(),
+                offset: buffer_start_offset,
+                data: buffer_to_write,
+                ack: ack_sender, 
+            };
+
+            io_sender.send_async(file_chunk).await.map_err(|_| RangeDownloadError::DiskPoolDropped)?;
+
+            in_flight_acks.push_back((bytes_to_write, ack_receiver));
+            buffer_start_offset = current_offset; 
+
+
+            if in_flight_acks.len() >= MAX_IN_FLIGHT {
+                let (bytes_written, receiver) = in_flight_acks.pop_front().unwrap();
+
+                receiver.await
+                    .map_err(|_| RangeDownloadError::DiskPoolDropped)? 
+                    .map_err(RangeDownloadError::DiskWriteError)?; 
+
+                current_progress = range_progress.add(bytes_written);
+                unnotified_bytes += bytes_written;
+
+                if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
+                    let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                        DownloadUpdate::FileUpdated { 
+                            id: download_id,
+                            file_update: FileUpdate::BytesDownloaded { 
+                                id: file_id,
+                                len: current_progress, 
+                            } 
+                        }
+                    ));
+                    unnotified_bytes = 0; 
+                }
             }
-
-            buffer_start_offset = current_offset;
-        }
+                
+        }      
     }
 
     if !buffer.is_empty() {
-        let _ = io_sender.send((buffer_start_offset as usize, buffer)).await;
+        let final_bytes_len = buffer.len() as u64;
+        let (ack_sender, ack_receiver) = oneshot::channel();
+
+        let file_chunk = FileChunk {
+            file_map: file_map.clone(),
+            offset: buffer_start_offset,
+            data: buffer.split().freeze(),
+            ack: ack_sender,
+        };
+
+        io_sender.send_async(file_chunk).await
+            .map_err(|_| RangeDownloadError::DiskPoolDropped)?;
+
+        in_flight_acks.push_back((final_bytes_len, ack_receiver));
     }
 
-    // Important to drop so handle can finish
-    drop(io_sender);
-    writer_handle.await.unwrap();
+    while let Some((bytes_written, rx)) = in_flight_acks.pop_front() {
+        rx.await
+            .map_err(|_| RangeDownloadError::DiskPoolDropped)?
+            .map_err(RangeDownloadError::DiskWriteError)?;
+
+        current_progress = range_progress.add(bytes_written);
+        unnotified_bytes += bytes_written;
+    }
 
     // Update UI if any unnotified bytes remain
     if unnotified_bytes > 0 {

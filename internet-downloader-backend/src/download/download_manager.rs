@@ -22,6 +22,7 @@ use url::Host;
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
+use crate::download_writer_manager::DownloadWriterManager;
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::utils::file_utils::force_delete_file;
 use crate::network_manager;
@@ -372,7 +373,8 @@ impl DownloadManager {
             download_manager: command_sender.clone(),
             ui_sender: ui_event_sender.clone(),
             db_manager: db_manager.clone(),
-            plugin_registry
+            plugin_registry,
+            writer_handle: DownloadWriterManager::new(),
         };
 
         let (network_manager, _) = NetworkHandle::spawn(app_context.clone()).await;
