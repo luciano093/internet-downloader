@@ -395,7 +395,7 @@ impl SupervisorState {
                         create_dir_all(parent_path).await.unwrap();
                     }
 
-                    let file_map = self.app_context.writer_handle.create_file(path.clone(), file_size).await;
+                    let file_map = self.app_context.writer_handle.create_file(path.clone(), file_size).await.unwrap();
                     
                     self.shared_file_maps.insert(file_id, file_map);
                 }

@@ -10,7 +10,7 @@ pub struct SharedFileMap {
 }
 
 impl SharedFileMap {
-    pub fn new(path: PathBuf, size: u64) -> Self {
+    pub fn new(path: PathBuf, size: u64) -> std::io::Result<Self> {
         let mut file_options = std::fs::OpenOptions::new();
 
         file_options.read(true)
@@ -35,15 +35,15 @@ impl SharedFileMap {
             file_options.access_mode(GENERIC_READ | GENERIC_WRITE | ACCESS_DELETE);
         }
 
-        let file = file_options.open(&path).unwrap();
+        let file = file_options.open(&path)?;
 
-        file.set_len(size).unwrap();
+        file.set_len(size)?;
 
         if let Err(error) = file.allocate(size) {
             warn!("Could not physically pre-allocate space. OS will fallback to sparse. Error: {}", error);
         }
         
-        Self { file, size }
+        Ok(Self { file, size })
     }
 
     pub fn write_chunk(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {

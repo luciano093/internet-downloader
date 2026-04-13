@@ -1,11 +1,19 @@
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
+use tokio::task::JoinError;
 use tracing::info;
 
 use crate::shared_file_map::SharedFileMap;
+
+#[derive(Debug)]
+pub enum FileInitializationError {
+    IoError(io::Error),
+    TaskDropped(JoinError),
+}
 
 pub struct FileChunk {
     pub file_map: Arc<SharedFileMap>,
@@ -38,12 +46,24 @@ impl DownloadWriterManager {
         }
     }
 
-    pub async fn create_file(&self, path: PathBuf, size: u64) -> Arc<SharedFileMap> {
-        tokio::task::spawn_blocking(move || {
-            Arc::new(SharedFileMap::new(path, size))
+    pub async fn create_file(&self, path: PathBuf, size: u64) -> Result<Arc<SharedFileMap>, FileInitializationError> {
+        let join_result = tokio::task::spawn_blocking(move || {
+            let file = SharedFileMap::new(path, size)?;
+
+            Ok(Arc::new(file))
         })
-        .await
-        .unwrap()
+        .await;
+
+        match join_result {
+            // Both the task and IO tasks finished successfully
+            Ok(Ok(shared_map)) => Ok(shared_map),
+            
+            // The task finished successfully, but the IO failed
+            Ok(Err(io_err)) => Err(FileInitializationError::IoError(io_err)),
+            
+            // The Tokio task itself panicked or was cancelled
+            Err(join_err) => Err(FileInitializationError::TaskDropped(join_err)),
+        }
     }
 
     pub fn sender(&self) -> flume::Sender<FileChunk> {
