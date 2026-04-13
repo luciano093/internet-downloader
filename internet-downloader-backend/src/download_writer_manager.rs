@@ -9,7 +9,7 @@ use crate::shared_file_map::SharedFileMap;
 
 pub struct FileChunk {
     pub file_map: Arc<SharedFileMap>,
-    pub offset: usize,
+    pub offset: u64,
     pub data: Bytes,
     pub ack: oneshot::Sender<std::io::Result<()>>, 
 }

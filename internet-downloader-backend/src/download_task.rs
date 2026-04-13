@@ -21,7 +21,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
 use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate, ManagerCommand};
-use crate::download_writer_manager::{DownloadWriterManager, FileChunk};
+use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
@@ -1406,7 +1406,7 @@ async fn download_range(
 
             let file_chunk = FileChunk {
                 file_map: file_map.clone(),
-                offset: buffer_start_offset as usize,
+                offset: buffer_start_offset,
                 data: buffer_to_write,
                 ack: ack_sender, 
             };
@@ -1450,7 +1450,7 @@ async fn download_range(
 
         let file_chunk = FileChunk {
             file_map: file_map.clone(),
-            offset: buffer_start_offset as usize,
+            offset: buffer_start_offset,
             data: buffer.split().freeze(),
             ack: ack_sender,
         };
