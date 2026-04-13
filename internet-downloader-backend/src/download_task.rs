@@ -1399,6 +1399,7 @@ async fn download_range(
         if buffer.len() >= buffer_capacity {
             // Swap full buffer for an empty one
             let buffer_to_write = buffer.split().freeze();
+            let bytes_to_write = buffer_to_write.len() as u64;
 
             buffer.reserve(buffer_capacity); 
 
@@ -1413,7 +1414,7 @@ async fn download_range(
 
             io_sender.send_async(file_chunk).await.map_err(|_| RangeDownloadError::DiskPoolDropped)?;
 
-            in_flight_acks.push_back((buffer_capacity as u64, ack_receiver));
+            in_flight_acks.push_back((bytes_to_write, ack_receiver));
             buffer_start_offset = current_offset; 
 
 
