@@ -528,10 +528,27 @@ impl DownloadSupervisor {
 
             let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
+            let has_ready_files = state.download.files.values().any(|item| {
+                match item {
+                    DownloadType::File(file) => {
+                        let is_active = !matches!(file.status(), DownloadStatus::Completed | DownloadStatus::Failed(_));
+                        
+                        is_active && file.size().is_some()
+                    },
+                    DownloadType::Folder(_) => false,
+                }
+            });
+
+            let new_status = if has_ready_files {
+                DownloadStatus::InProgress
+            } else {
+                DownloadStatus::FetchingMetadata
+            };
+
             let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::InProgress }
+                DownloadUpdate::StatusChanged { id: state.download.id(), status: new_status }
             ));
-            state.download.set_status(DownloadStatus::InProgress);
+            state.download.set_status(new_status);
             state.app_context.db_manager.write_download(&state.download).await;
             
                 loop {
@@ -876,6 +893,17 @@ impl DownloadSupervisor {
                                 }
                                 SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
                                     trace!("got metadata for: {} {}", state.download.name(), file_id);
+
+                                    // If the download status was previously in fetching metadata
+                                    // we can safely change it to in progress now that we have at least
+                                    // some metadata to start the download
+                                    if state.download.status() == DownloadStatus::FetchingMetadata {
+                                        let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                            DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::InProgress }
+                                        ));
+                                        state.download.set_status(DownloadStatus::InProgress);
+                                        state.app_context.db_manager.write_download(&state.download).await;
+                                    }
 
                                     let download_id = state.download.id();
                                     let file = match state.download.files_mut().get_mut(&file_id) {

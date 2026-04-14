@@ -568,6 +568,8 @@ async fn hash_file(path: PathBuf) -> u128 {
 pub enum DownloadStatus {
     Queued,
     Initializing,
+    #[serde(rename = "Fetching")] 
+    FetchingMetadata,
     InProgress,
     Completed,
     Paused,
