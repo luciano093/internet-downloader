@@ -20,7 +20,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
-use crate::download::{Download, DownloadFailureReason, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileSize, FileUpdate, ManagerCommand};
+use crate::download::{Download, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileFailureReason, FileSize, FileStatus, FileUpdate, ManagerCommand};
 use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
@@ -337,7 +337,7 @@ impl SupervisorState {
         for (&file_id, download_type) in self.download.files().iter() {
             // skip files that are already completed and folders
             let file_download = match download_type {
-                DownloadType::File(file) if file.status() != DownloadStatus::Completed => file,
+                DownloadType::File(file) if file.status() != FileStatus::Completed => file,
                 _ => continue, // we skip folders
             };
 
@@ -538,23 +538,21 @@ impl DownloadSupervisor {
                     let is_active = match file.status() {
                         // Inactive states
                         // These files are either done, permanently broken, or manually paused
-                        DownloadStatus::Completed |
-                        DownloadStatus::Failed(_) |
-                        DownloadStatus::NotFound |
-                        DownloadStatus::Paused => false,
+                        FileStatus::Completed |
+                        FileStatus::Failed(_) |
+                        FileStatus::NotFound |
+                        FileStatus::Paused => false,
 
                         // Active states
                         // These files are actively participating in the download process
                         // Meaning that they are ready to receive bytes after a metadata fetch
-                        DownloadStatus::Queued |
-                        DownloadStatus::Initializing |
-                        DownloadStatus::FetchingMetadata |
-                        DownloadStatus::InProgress |
-                        DownloadStatus::Retrying |
-                        DownloadStatus::Waiting(_) => true,
+                        FileStatus::Queued |
+                        FileStatus::Initializing |
+                        FileStatus::FetchingMetadata |
+                        FileStatus::InProgress |
+                        FileStatus::Retrying |
+                        FileStatus::Waiting(_) => true,
                     };
-
-
                         
                     if is_active {
                         has_active_files = true;
@@ -564,12 +562,30 @@ impl DownloadSupervisor {
                         if file.size().is_some() {
                             has_ready_files = true;
                             break; 
-                        }
+                        } 
                     }
                 }
             };
 
+            // If there are no active files, but we got to this point in the code
+            // it means the download is not in a correct state and we have to fix it
             if !has_active_files {
+                if let Some(new_status) = state.download.reconcile_status() {
+                    state.download.set_status(new_status); 
+                
+                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                        DownloadUpdate::StatusChanged { id: state.download.id(), status: new_status }
+                    ));
+                    
+                    state.app_context.db_manager.write_download(&state.download).await;
+
+                    if new_status == DownloadStatus::Completed {
+                        let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
+                    }
+                } else {
+                    warn!("The download status desynced and an automatic fix was tried, but the status didn't change. This might be due to a logic error in the code.");
+                }
+
                 return;
             }
 
@@ -785,15 +801,15 @@ impl DownloadSupervisor {
                                                 let chunk_count = size.div_ceil(CHUNK_SIZE);
                                                 file.chunks_mut().resize(chunk_count, true);
                                                 trace!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
-                                                file.set_status(DownloadStatus::Completed); 
+                                                file.set_status(FileStatus::Completed); 
                                             } else {
                                                 trace!("got 0 bytes: {}", file.name());
                                                 // 0 Byte file
-                                                file.set_status(DownloadStatus::Completed);
+                                                file.set_status(FileStatus::Completed);
                                             }
 
                                             let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size as u64 } }));
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: FileStatus::Completed } }));
                                         },
                                         DownloadType::Folder(_) => todo!(),
                                     }
@@ -827,8 +843,8 @@ impl DownloadSupervisor {
 
                                             if all_chunks_done {
                                                 trace!("file {} finished! got {} bytes", file_download.name(), bytes_downloaded);
-                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Completed } }));
-                                                file_download.set_status(DownloadStatus::Completed);
+                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: FileStatus::Completed } }));
+                                                file_download.set_status(FileStatus::Completed);
                                                 state.shared_file_maps.remove(&file_id);
                                             }
                                         },
@@ -949,7 +965,7 @@ impl DownloadSupervisor {
                                                     // Calculate how many 16KB chunks exist
                                                     let chunk_count = size.div_ceil(CHUNK_SIZE as u64);
                                                     file.chunks_mut().resize(chunk_count as usize, false);
-                                                    file.set_status(DownloadStatus::InProgress); 
+                                                    file.set_status(FileStatus::InProgress); 
 
                                                     // Calculate how many ranges (jobs) are needed for this file
                                                     let job_count = chunk_count.div_ceil(TARGET_RANGE_SIZE as u64);
@@ -960,7 +976,7 @@ impl DownloadSupervisor {
                                                 } else {
                                                     warn!("got 0 bytes: {}", file.name());
                                                     // 0 Byte file
-                                                    file.set_status(DownloadStatus::Completed);
+                                                    file.set_status(FileStatus::Completed);
                                                 }
 
                                                 // If the download status was previously in fetching metadata
@@ -980,7 +996,7 @@ impl DownloadSupervisor {
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Unknown);
-                                                file.set_status(DownloadStatus::InProgress); 
+                                                file.set_status(FileStatus::InProgress); 
 
                                                 demand.fetch_add(1, Ordering::SeqCst);
                                                 let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
@@ -1001,7 +1017,7 @@ impl DownloadSupervisor {
                                             file.increment_retries();
                                             if file.retries() > 5 { 
                                                 warn!("Failed to get metadata size for {} after retrying.", file_id);
-                                                file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
+                                                file.set_status(FileStatus::Failed(FileFailureReason::MetadataFetchError));
                                                 let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                             } else {
                                                 warn!("Failed to get metadata size for {}. Retrying.", file_id);
@@ -1011,7 +1027,7 @@ impl DownloadSupervisor {
                                         },
                                         SizeResult::PermanentFail => {
                                             warn!("Failed to get metadata size for {}.", file_id);
-                                            file.set_status(DownloadStatus::Failed(DownloadFailureReason::MetadataFetchError));
+                                            file.set_status(FileStatus::Failed(FileFailureReason::MetadataFetchError));
                                             let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                         },
                                     }
@@ -1025,9 +1041,9 @@ impl DownloadSupervisor {
                                         DownloadType::Folder(_) => continue,
                                     };
 
-                                    file.set_status(DownloadStatus::Retrying);
+                                    file.set_status(FileStatus::Retrying);
 
-                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: DownloadStatus::Retrying } }));
+                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: FileStatus::Retrying } }));
 
                                     drop(permit); 
                                     let sender = sender.clone();
@@ -1089,7 +1105,7 @@ impl DownloadSupervisor {
 
                                     file.increment_retries();
                                     if file.retries() > 5 { 
-                                        file.set_status(DownloadStatus::Failed(DownloadFailureReason::ServerError));
+                                        file.set_status(FileStatus::Failed(FileFailureReason::ServerError));
                                         let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                     } else {
                                         let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
@@ -1107,7 +1123,7 @@ impl DownloadSupervisor {
                                         DownloadType::Folder(_) => todo!(),
                                     };
 
-                                    file.set_status(DownloadStatus::Failed(DownloadFailureReason::ClientError));
+                                    file.set_status(FileStatus::Failed(FileFailureReason::ClientError));
 
                                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
                                 }
@@ -1118,7 +1134,7 @@ impl DownloadSupervisor {
                                     };
 
                                     warn!("Rate limited for {}.", retry_kind.file_id());
-                                    file.set_status(DownloadStatus::Waiting(retry_after));
+                                    file.set_status(FileStatus::Waiting(retry_after));
                                     
                                     state.retry_queue_count += 1;
                                     let _ = sender.send(SupervisorMessage::RetryReady(retry_kind));
@@ -1154,7 +1170,7 @@ impl DownloadSupervisor {
                                         std::io::ErrorKind::ArgumentListTooLong |
                                         std::io::ErrorKind::Unsupported =>  {
                                             error!("IO error: {error}");
-                                            file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
+                                            file.set_status(FileStatus::Failed(FileFailureReason::DiskError));
                                             // fail
                                         }
                                         
@@ -1165,7 +1181,7 @@ impl DownloadSupervisor {
                                         std::io::ErrorKind::FileTooLarge |
                                         std::io::ErrorKind::OutOfMemory => {
                                             error!("The system has ran out of storage: {error}");
-                                            file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
+                                            file.set_status(FileStatus::Failed(FileFailureReason::DiskError));
                                             // fail
                                         },
 
@@ -1192,7 +1208,7 @@ impl DownloadSupervisor {
                                             error!("OS error: {error}.");
                                             file.increment_retries();
                                             if file.retries() > 5 { 
-                                                file.set_status(DownloadStatus::Failed(DownloadFailureReason::DiskError));
+                                                file.set_status(FileStatus::Failed(FileFailureReason::DiskError));
                                             } else {
                                                 let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
                                             }
@@ -1274,7 +1290,7 @@ impl DownloadSupervisor {
         for file_type in download.files().values() {
             if let DownloadType::File(file) = file_type {
                 // Skip fully downloaded files
-                if file.status() == DownloadStatus::Completed {
+                if file.status() == FileStatus::Completed {
                     continue; 
                 }
 
@@ -1300,7 +1316,7 @@ impl DownloadSupervisor {
 
     fn is_download_finished(download: &Download) -> bool {
         download.files().values().all(|f| match f {
-            DownloadType::File(file) => file.status() == DownloadStatus::Completed,
+            DownloadType::File(file) => file.status() == FileStatus::Completed,
             _ => true,
         })
     }

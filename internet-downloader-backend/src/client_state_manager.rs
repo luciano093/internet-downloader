@@ -15,6 +15,7 @@ use crate::download::DownloadId;
 use crate::download::FileSize;
 use crate::download::DownloadUpdate;
 use crate::download::FileDownload;
+use crate::download::FileStatus;
 use crate::download::FolderDownload;
 use crate::download::{Download, DownloadItem, DownloadStatus, DownloadType, FileUpdate};
 use crate::state_manager::StateManager;
@@ -304,7 +305,7 @@ impl ItemDiff {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileDiff {
-    status: Option<DownloadStatus>,
+    status: Option<FileStatus>,
     url: Option<String>,
     file_name: Option<String>,
     relative_path: Option<PathBuf>,
