@@ -982,13 +982,7 @@ impl DownloadSupervisor {
                                                 // If the download status was previously in fetching metadata
                                                 // we can safely change it to in progress now that we have at least
                                                 // some metadata to start the download
-                                                if state.download.status() == DownloadStatus::FetchingMetadata {
-                                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                                                        DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::InProgress }
-                                                    ));
-                                                    state.download.set_status(DownloadStatus::InProgress);
-                                                    state.app_context.db_manager.write_download(&state.download).await;
-                                                }
+                                                Self::complete_metadata_fetch(&mut state).await;
                                             }
                                         },
                                         SizeResult::Stream => {
@@ -1005,13 +999,7 @@ impl DownloadSupervisor {
                                             // If the download status was previously in fetching metadata
                                             // we can safely change it to in progress now that we have at least
                                             // some metadata to start the download
-                                            if state.download.status() == DownloadStatus::FetchingMetadata {
-                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                                                    DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::InProgress }
-                                                ));
-                                                state.download.set_status(DownloadStatus::InProgress);
-                                                state.app_context.db_manager.write_download(&state.download).await;
-                                            }
+                                            Self::complete_metadata_fetch(&mut state).await;
                                         },
                                         SizeResult::Retryable(_) => {
                                             file.increment_retries();
@@ -1319,6 +1307,23 @@ impl DownloadSupervisor {
             DownloadType::File(file) => file.status() == FileStatus::Completed,
             _ => true,
         })
+    }
+
+    /// Called when metadata is successfully fetched. If the download was 
+    /// waiting on this metadata, it shifts the status to InProgress.
+    async fn complete_metadata_fetch(state: &mut SupervisorState) {
+        if state.download.status() == DownloadStatus::FetchingMetadata {
+            state.download.set_status(DownloadStatus::InProgress);
+            
+            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                DownloadUpdate::StatusChanged { 
+                    id: state.download.id(), 
+                    status: DownloadStatus::InProgress 
+                }
+            ));
+            
+            state.app_context.db_manager.write_download(&state.download).await;
+        }
     }
 }
 
