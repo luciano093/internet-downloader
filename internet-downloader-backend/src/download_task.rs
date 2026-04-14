@@ -528,6 +528,11 @@ impl DownloadSupervisor {
 
             let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
+            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::InProgress }
+            ));
+            state.download.set_status(DownloadStatus::InProgress);
+            state.app_context.db_manager.write_download(&state.download).await;
             
                 loop {
                     tokio::select! {
