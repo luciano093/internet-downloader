@@ -894,17 +894,6 @@ impl DownloadSupervisor {
                                 SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
                                     trace!("got metadata for: {} {}", state.download.name(), file_id);
 
-                                    // If the download status was previously in fetching metadata
-                                    // we can safely change it to in progress now that we have at least
-                                    // some metadata to start the download
-                                    if state.download.status() == DownloadStatus::FetchingMetadata {
-                                        let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                                            DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::InProgress }
-                                        ));
-                                        state.download.set_status(DownloadStatus::InProgress);
-                                        state.app_context.db_manager.write_download(&state.download).await;
-                                    }
-
                                     let download_id = state.download.id();
                                     let file = match state.download.files_mut().get_mut(&file_id) {
                                         Some(DownloadType::File(file)) => file,
@@ -939,6 +928,17 @@ impl DownloadSupervisor {
                                                     // 0 Byte file
                                                     file.set_status(DownloadStatus::Completed);
                                                 }
+
+                                                // If the download status was previously in fetching metadata
+                                                // we can safely change it to in progress now that we have at least
+                                                // some metadata to start the download
+                                                if state.download.status() == DownloadStatus::FetchingMetadata {
+                                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                                        DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::InProgress }
+                                                    ));
+                                                    state.download.set_status(DownloadStatus::InProgress);
+                                                    state.app_context.db_manager.write_download(&state.download).await;
+                                                }
                                             }
                                         },
                                         SizeResult::Stream => {
@@ -950,6 +950,17 @@ impl DownloadSupervisor {
 
                                                 demand.fetch_add(1, Ordering::SeqCst);
                                                 let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
+                                            }
+
+                                            // If the download status was previously in fetching metadata
+                                            // we can safely change it to in progress now that we have at least
+                                            // some metadata to start the download
+                                            if state.download.status() == DownloadStatus::FetchingMetadata {
+                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                                    DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::InProgress }
+                                                ));
+                                                state.download.set_status(DownloadStatus::InProgress);
+                                                state.app_context.db_manager.write_download(&state.download).await;
                                             }
                                         },
                                         SizeResult::Retryable(_) => {
