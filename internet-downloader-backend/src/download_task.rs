@@ -531,7 +531,26 @@ impl DownloadSupervisor {
             let has_ready_files = state.download.files.values().any(|item| {
                 match item {
                     DownloadType::File(file) => {
-                        let is_active = !matches!(file.status(), DownloadStatus::Completed | DownloadStatus::Failed(_));
+                        // If any of these is true, we know the download is not in an 
+                        // 'active' state, meaning that the only next possible step should be fetching metadata
+                        let is_active = match file.status() {
+                            // Inactive states
+                            // These files are either done, permanently broken, or manually paused
+                            DownloadStatus::Completed |
+                            DownloadStatus::Failed(_) |
+                            DownloadStatus::NotFound |
+                            DownloadStatus::Paused => false,
+
+                            // Active states
+                            // These files are actively participating in the download process
+                            // Meaning that they are ready to receive bytes after a metadata fetch
+                            DownloadStatus::Queued |
+                            DownloadStatus::Initializing |
+                            DownloadStatus::FetchingMetadata |
+                            DownloadStatus::InProgress |
+                            DownloadStatus::Retrying |
+                            DownloadStatus::Waiting(_) => true,
+                        };
                         
                         is_active && file.size().is_some()
                     },
