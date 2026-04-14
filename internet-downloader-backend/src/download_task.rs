@@ -533,8 +533,8 @@ impl DownloadSupervisor {
 
             for item in state.download.files.values() {
                 if let DownloadType::File(file) = item {
-                    // If any of these is true, we know the download is not in an 
-                    // 'active' state, meaning that the only next possible step should be fetching metadata
+                    // If any of these is true, we know the download is in an 
+                    // 'active' state, meaning that we can proceed with the download
                     let is_active = match file.status() {
                         // Inactive states
                         // These files are either done, permanently broken, or manually paused
@@ -558,6 +558,9 @@ impl DownloadSupervisor {
                         
                     if is_active {
                         has_active_files = true;
+
+                        // If all active files are missing their sizes, it means that the only next step
+                        // we can take is to fetch metadata for the download
                         if file.size().is_some() {
                             has_ready_files = true;
                             break; 
