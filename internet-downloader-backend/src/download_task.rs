@@ -528,35 +528,47 @@ impl DownloadSupervisor {
 
             let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
-            let has_ready_files = state.download.files.values().any(|item| {
-                match item {
-                    DownloadType::File(file) => {
-                        // If any of these is true, we know the download is not in an 
-                        // 'active' state, meaning that the only next possible step should be fetching metadata
-                        let is_active = match file.status() {
-                            // Inactive states
-                            // These files are either done, permanently broken, or manually paused
-                            DownloadStatus::Completed |
-                            DownloadStatus::Failed(_) |
-                            DownloadStatus::NotFound |
-                            DownloadStatus::Paused => false,
+            let mut has_active_files = false;
+            let mut has_ready_files = false;
 
-                            // Active states
-                            // These files are actively participating in the download process
-                            // Meaning that they are ready to receive bytes after a metadata fetch
-                            DownloadStatus::Queued |
-                            DownloadStatus::Initializing |
-                            DownloadStatus::FetchingMetadata |
-                            DownloadStatus::InProgress |
-                            DownloadStatus::Retrying |
-                            DownloadStatus::Waiting(_) => true,
-                        };
+            for item in state.download.files.values() {
+                if let DownloadType::File(file) = item {
+                    // If any of these is true, we know the download is not in an 
+                    // 'active' state, meaning that the only next possible step should be fetching metadata
+                    let is_active = match file.status() {
+                        // Inactive states
+                        // These files are either done, permanently broken, or manually paused
+                        DownloadStatus::Completed |
+                        DownloadStatus::Failed(_) |
+                        DownloadStatus::NotFound |
+                        DownloadStatus::Paused => false,
+
+                        // Active states
+                        // These files are actively participating in the download process
+                        // Meaning that they are ready to receive bytes after a metadata fetch
+                        DownloadStatus::Queued |
+                        DownloadStatus::Initializing |
+                        DownloadStatus::FetchingMetadata |
+                        DownloadStatus::InProgress |
+                        DownloadStatus::Retrying |
+                        DownloadStatus::Waiting(_) => true,
+                    };
+
+
                         
-                        is_active && file.size().is_some()
-                    },
-                    DownloadType::Folder(_) => false,
+                    if is_active {
+                        has_active_files = true;
+                        if file.size().is_some() {
+                            has_ready_files = true;
+                            break; 
+                        }
+                    }
                 }
-            });
+            };
+
+            if !has_active_files {
+                return;
+            }
 
             let new_status = if has_ready_files {
                 DownloadStatus::InProgress
