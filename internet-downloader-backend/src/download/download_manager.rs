@@ -767,6 +767,7 @@ impl Download {
         let mut failed_count = 0;
         let mut not_found_count = 0;
         let mut paused_count = 0;
+        let mut active_count = 0;
         let mut total_files = 0;
 
         let mut first_failure_reason = None;
@@ -794,9 +795,30 @@ impl Download {
                     FileStatus::FetchingMetadata |
                     FileStatus::InProgress |
                     FileStatus::Retrying |
-                    FileStatus::Waiting(_) => {}
+                    FileStatus::Waiting(_) => {
+                        active_count += 1; 
+                    } 
                 }
             }
+        }
+
+        if active_count > 0 {
+            return match self.status {
+                // If the download falsely claims to be finished, revive it!
+                DownloadStatus::Completed |
+                DownloadStatus::CompletedWithErrors |
+                DownloadStatus::Failed(_) |
+                DownloadStatus::NotFound |
+                DownloadStatus::Paused => DownloadStatus::InProgress,
+
+                // If it's already in an active state just return its current state.
+                DownloadStatus::Queued |
+                DownloadStatus::Initializing |
+                DownloadStatus::FetchingMetadata |
+                DownloadStatus::InProgress |
+                DownloadStatus::Retrying |
+                DownloadStatus::Waiting(_) => self.status,
+            };
         }
 
         if completed_count == total_files {
