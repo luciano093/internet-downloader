@@ -243,8 +243,8 @@ impl HostManager {
 
                             trace!("Resuming download: {}", download.name());
 
+                            // No need to manually save to db, as creating a new supervisor saves to db automatically
                             let changed_items = download.set_queued();
-                            self.app_context.db_manager.write_download(&download).await;
 
                             self.permit_queue.push_back(download_id);
                             self.active_downloads.insert(download_id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
