@@ -34,7 +34,13 @@ use crate::utils::network_utils::BandwidthLimiter;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
     StatusChanged { id: DownloadId, status: DownloadStatus },
-    FileUpdated { id: DownloadId, file_update: FileUpdate },
+    ItemUpdated { id: DownloadId, item_update: ItemUpdate }, 
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum ItemUpdate {
+    File(FileUpdate),
+    Folder(FolderUpdate),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -54,6 +60,11 @@ impl FileUpdate {
             FileUpdate::BytesDownloaded { id, .. } => *id,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum FolderUpdate {
+    Status { id: usize, status: DownloadStatus }, 
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
@@ -627,6 +638,50 @@ pub enum FileStatus {
     Waiting(Option<u64>)
 }
 
+impl FileStatus {
+    /// Returns true if the file is actively downloading or waiting to download.
+    pub fn is_active(&self) -> bool {
+        match self {
+            // Active states
+            Self::Queued | 
+            Self::Initializing | 
+            Self::FetchingMetadata | 
+            Self::InProgress | 
+            Self::Retrying | 
+            Self::Waiting(_) => true,
+
+            // Terminal/Inactive states
+            Self::Completed | 
+            Self::Failed(_) | 
+            Self::NotFound | 
+            Self::Paused => false,
+        }
+    }
+
+    /// Returns true if the file is in a final state and should not be modified.
+    pub fn is_terminal(&self) -> bool {
+        !self.is_active()
+    }
+
+        /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
+    pub fn can_set_to_queue(&self) -> bool {
+        match self {
+            Self::Completed | 
+            Self::NotFound | 
+            Self::Queued => false,
+
+            Self::Paused | 
+            Self::Failed(_) | 
+            Self::Initializing | 
+            Self::FetchingMetadata | 
+            Self::InProgress | 
+            Self::Retrying | 
+            Self::Waiting(_) => true,
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[repr(u8)]
 pub enum FileFailureReason {
@@ -650,6 +705,50 @@ pub enum DownloadStatus {
     NotFound,
     Retrying,
     Waiting(Option<u64>)
+}
+
+
+impl DownloadStatus {
+    /// Returns true if the file is actively downloading or waiting to download.
+    pub fn is_active(&self) -> bool {
+        match self {
+            Self::Queued | 
+            Self::Initializing | 
+            Self::FetchingMetadata | 
+            Self::InProgress | 
+            Self::Retrying | 
+            Self::Waiting(_) => true,
+
+            Self::Completed | 
+            Self::CompletedWithErrors | 
+            Self::Failed(_) | 
+            Self::NotFound | 
+            Self::Paused => false,
+        }
+    }
+
+    /// Returns true if the file is in a final state and should not be modified.
+    pub fn is_terminal(&self) -> bool {
+        !self.is_active()
+    }
+
+    /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
+    pub fn can_set_to_queue(&self) -> bool {
+        match self {
+            Self::Completed | 
+            Self::CompletedWithErrors |
+            Self::NotFound | 
+            Self::Queued => false,
+
+            Self::Paused | 
+            Self::Failed(_) | 
+            Self::Initializing | 
+            Self::FetchingMetadata | 
+            Self::InProgress | 
+            Self::Retrying | 
+            Self::Waiting(_) => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]

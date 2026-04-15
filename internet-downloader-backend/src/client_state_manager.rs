@@ -17,6 +17,8 @@ use crate::download::DownloadUpdate;
 use crate::download::FileDownload;
 use crate::download::FileStatus;
 use crate::download::FolderDownload;
+use crate::download::FolderUpdate;
+use crate::download::ItemUpdate;
 use crate::download::{Download, DownloadItem, DownloadStatus, DownloadType, FileUpdate};
 use crate::state_manager::StateManager;
 
@@ -137,7 +139,7 @@ impl UiStateManager {
                             UiStateEvent::AddUpdate(download_update) => {
                                 let update_id = match &download_update {
                                     DownloadUpdate::StatusChanged { id, .. } => *id,
-                                    DownloadUpdate::FileUpdated { id, .. } => *id,
+                                    DownloadUpdate::ItemUpdated { id, .. } => *id,
                                 };
 
                                 if removed_ids.contains(&update_id) {
@@ -230,24 +232,40 @@ impl DeltaManager {
             
                 download_diff.status = Some(status);
             },
-            DownloadUpdate::FileUpdated { id, file_update } => {
+            DownloadUpdate::ItemUpdated { id, item_update } => {
                 let download_diff = self.deltas.entry(*id).or_default();
 
-                let file_id = file_update.id();
+                    match item_update {
+                        ItemUpdate::File(file_update) => {
+                            let file_id = match &file_update {
+                                FileUpdate::Status { id, .. } => *id,
+                                FileUpdate::Hash { id, .. } => *id,
+                                FileUpdate::FileSize { id, .. } => *id,
+                                FileUpdate::BytesDownloaded { id, .. } => *id,
+                            };
 
-                if let hash_map::Entry::Vacant(entry) = download_diff.files.entry(file_id) {
-                    let mut file_diff = FileDiff::new();
+                            let item_diff = download_diff.files.entry(file_id).or_insert_with(|| {
+                                ItemDiff::File(FileDiff::new())
+                            });
 
-                    file_diff.update(file_update);
+                            if let ItemDiff::File(file_diff) = item_diff {
+                                file_diff.update(file_update);
+                            }
+                        },
+                        ItemUpdate::Folder(folder_update) => {
+                            let folder_id = match &folder_update {
+                                FolderUpdate::Status { id, .. } => *id,
+                            };
 
-                    entry.insert( ItemDiff::File(file_diff));
-                } else {
-                    let file_diff = download_diff.files.get_mut(&file_id).unwrap();
+                            let item_diff = download_diff.files.entry(folder_id).or_insert_with(|| {
+                                ItemDiff::Folder(FolderDiff::new())
+                            });
 
-                    if let ItemDiff::File(file_diff) = file_diff {
-                        file_diff.update(file_update);
+                            if let ItemDiff::Folder(folder_diff) = item_diff {
+                                folder_diff.update(folder_update);
+                            }
+                        }
                     }
-                }
             }
         }
     }
@@ -361,6 +379,14 @@ pub struct FolderDiff {
 impl FolderDiff {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn update(&mut self, update: FolderUpdate) {
+        match update {
+            FolderUpdate::Status { status, .. } => {
+                self.status = Some(status)
+            },
+        }
     }
 }
 
