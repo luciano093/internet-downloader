@@ -20,7 +20,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
-use crate::download::{Download, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileFailureReason, FileSize, FileStatus, FileUpdate, ManagerCommand};
+use crate::download::{ChangedItem, Download, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileFailureReason, FileSize, FileStatus, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
 use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
@@ -528,44 +528,7 @@ impl DownloadSupervisor {
 
             let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
-            let mut has_active_files = false;
-            let mut has_ready_files = false;
-
-            for item in state.download.files.values() {
-                if let DownloadType::File(file) = item {
-                    // If any of these is true, we know the download is in an 
-                    // 'active' state, meaning that we can proceed with the download
-                    let is_active = match file.status() {
-                        // Inactive states
-                        // These files are either done, permanently broken, or manually paused
-                        FileStatus::Completed |
-                        FileStatus::Failed(_) |
-                        FileStatus::NotFound |
-                        FileStatus::Paused => false,
-
-                        // Active states
-                        // These files are actively participating in the download process
-                        // Meaning that they are ready to receive bytes after a metadata fetch
-                        FileStatus::Queued |
-                        FileStatus::Initializing |
-                        FileStatus::FetchingMetadata |
-                        FileStatus::InProgress |
-                        FileStatus::Retrying |
-                        FileStatus::Waiting(_) => true,
-                    };
-                        
-                    if is_active {
-                        has_active_files = true;
-
-                        // If all active files are missing their sizes, it means that the only next step
-                        // we can take is to fetch metadata for the download
-                        if file.size().is_some() {
-                            has_ready_files = true;
-                            break; 
-                        } 
-                    }
-                }
-            };
+            let (has_active_files, has_ready_files) = state.download.evaluate_active_and_ready_status();
 
             // If there are no active files, but we got to this point in the code
             // it means the download is not in a correct state and we have to fix it
@@ -810,8 +773,8 @@ impl DownloadSupervisor {
                                                 file.set_status(FileStatus::Completed);
                                             }
 
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size as u64 } }));
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: FileStatus::Completed } }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::FileSize { id: file_id, len: size as u64 }) }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: FileStatus::Completed }) }));
                                         },
                                         DownloadType::Folder(_) => todo!(),
                                     }
@@ -845,7 +808,7 @@ impl DownloadSupervisor {
 
                                             if all_chunks_done {
                                                 trace!("file {} finished! got {} bytes", file_download.name(), bytes_downloaded);
-                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: FileStatus::Completed } }));
+                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: FileStatus::Completed }) }));
                                                 file_download.set_status(FileStatus::Completed);
                                                 state.shared_file_maps.remove(&file_id);
                                             }
@@ -960,7 +923,7 @@ impl DownloadSupervisor {
                                             if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Known(size));
-                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::FileSize { id: file_id, len: size } }));
+                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::FileSize { id: file_id, len: size }) }));
 
                                                 // Initialize chunks
                                                 if size > 0 {
@@ -1008,7 +971,7 @@ impl DownloadSupervisor {
                                             if file.retries() > 5 { 
                                                 warn!("Failed to get metadata size for {} after retrying.", file_id);
                                                 file.set_status(FileStatus::Failed(FileFailureReason::MetadataFetchError));
-                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
                                             } else {
                                                 warn!("Failed to get metadata size for {}. Retrying.", file_id);
                                                 let retry_kind = RetryKind::Metadata(MetadataRetry { file_id, url });
@@ -1018,7 +981,7 @@ impl DownloadSupervisor {
                                         SizeResult::PermanentFail => {
                                             warn!("Failed to get metadata size for {}.", file_id);
                                             file.set_status(FileStatus::Failed(FileFailureReason::MetadataFetchError));
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
                                         },
                                     }
                                 },
@@ -1033,7 +996,7 @@ impl DownloadSupervisor {
 
                                     file.set_status(FileStatus::Retrying);
 
-                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: FileStatus::Retrying } }));
+                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: FileStatus::Retrying }) }));
 
                                     drop(permit); 
                                     let sender = sender.clone();
@@ -1096,7 +1059,7 @@ impl DownloadSupervisor {
                                     file.increment_retries();
                                     if file.retries() > 5 { 
                                         file.set_status(FileStatus::Failed(FileFailureReason::ServerError));
-                                        let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                        let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
                                     } else {
                                         let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
                                     }
@@ -1115,7 +1078,7 @@ impl DownloadSupervisor {
 
                                     file.set_status(FileStatus::Failed(FileFailureReason::ClientError));
 
-                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
                                 }
                                 SupervisorMessage::RateLimited(_permit, retry_after, retry_kind) => {
                                     let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
@@ -1205,14 +1168,44 @@ impl DownloadSupervisor {
                                         },
                                     }
 
-                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::FileUpdated { id: download_id, file_update: FileUpdate::Status { id: file_id, status: file.status() } }));
+                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
                                 },
                                 SupervisorMessage::Pause => {
                                     info!("Pausing download.");
 
-                                    // Set ui and db status to Paused
-                                    state.download.set_status(DownloadStatus::Paused);
+                                    let download_id = state.download.id();
+                                    let changed_items = state.download.set_paused();
+
+                                    // Set ui status to Paused
                                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::Paused }));
+                                    
+                                    for item in changed_items {
+                                        let item_update = match item {
+                                            ChangedItem::File(file_id) => {
+                                                ItemUpdate::File(
+                                                    FileUpdate::Status { 
+                                                        id: file_id, 
+                                                        status: FileStatus::Paused 
+                                                    }
+                                                )
+                                            },
+                                            ChangedItem::Folder(folder_id) => {
+                                                ItemUpdate::Folder(
+                                                    FolderUpdate::Status { 
+                                                        id: folder_id, 
+                                                        status: DownloadStatus::Paused 
+                                                    }
+                                                )
+                                            },
+                                        };
+
+                                        let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                            DownloadUpdate::ItemUpdated { 
+                                                id: download_id, 
+                                                item_update 
+                                            }
+                                        ));
+                                    }
 
                                     // Save the download to db
                                     state.app_context.db_manager.write_download(&state.download).await;
@@ -1477,12 +1470,14 @@ async fn download_range(
 
                     if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
                         let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                            DownloadUpdate::FileUpdated { 
+                            DownloadUpdate::ItemUpdated { 
                                 id: download_id,
-                                file_update: FileUpdate::BytesDownloaded { 
-                                    id: file_id,
-                                    len: current_progress, 
-                                } 
+                                item_update: ItemUpdate::File(
+                                    FileUpdate::BytesDownloaded { 
+                                        id: file_id,
+                                        len: current_progress, 
+                                    }
+                                ) 
                             }
                         ));
                         unnotified_bytes = 0; 
@@ -1531,12 +1526,14 @@ async fn download_range(
 
                 if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
                     let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                        DownloadUpdate::FileUpdated { 
+                        DownloadUpdate::ItemUpdated { 
                             id: download_id,
-                            file_update: FileUpdate::BytesDownloaded { 
-                                id: file_id,
-                                len: current_progress, 
-                            } 
+                            item_update: ItemUpdate::File(
+                                FileUpdate::BytesDownloaded { 
+                                    id: file_id,
+                                    len: current_progress, 
+                                }
+                            ) 
                         }
                     ));
                     unnotified_bytes = 0; 
@@ -1575,12 +1572,13 @@ async fn download_range(
     // Update UI if any unnotified bytes remain
     if unnotified_bytes > 0 {
         let _ = ui_sender.send(UiStateEvent::AddUpdate(
-            DownloadUpdate::FileUpdated { 
+            DownloadUpdate::ItemUpdated { 
                 id: download_id,
-                file_update: FileUpdate::BytesDownloaded { 
+                item_update: ItemUpdate::File(
+                    FileUpdate::BytesDownloaded { 
                     id: file_id,
                     len: current_progress,
-                } 
+                })
             }
         ));
     }

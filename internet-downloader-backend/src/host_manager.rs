@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{Download, DownloadId, DownloadLimiterGroup, DownloadStatus, DownloadUpdate, ManagerCommand}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
+use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{ChangedItem, Download, DownloadId, DownloadLimiterGroup, DownloadStatus, DownloadUpdate, FileStatus, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -234,26 +234,55 @@ impl HostManager {
                                 return;
                             }
 
-                            let id = download.id();
+                            let download_id = download.id();
                             
-                            if self.active_downloads.contains_key(&id) || self.permit_queue.contains(&id) {
-                                warn!("Download {} is already active! Ignoring resume command.", id);
+                            if self.active_downloads.contains_key(&download_id) || self.permit_queue.contains(&download_id) {
+                                warn!("Download {} is already active! Ignoring resume command.", download_id);
                                 return;
                             }
 
                             trace!("Resuming download: {}", download.name());
 
-                            download.set_status(DownloadStatus::InProgress);
+                            let changed_items = download.set_queued();
+                            self.app_context.db_manager.write_download(&download).await;
 
-                            self.permit_queue.push_back(id);
-                            self.active_downloads.insert(id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
+                            self.permit_queue.push_back(download_id);
+                            self.active_downloads.insert(download_id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
                             
                             let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                                 DownloadUpdate::StatusChanged { 
-                                    id, 
-                                    status: DownloadStatus::InProgress 
+                                    id: download_id, 
+                                    status: DownloadStatus::Queued 
                                 }
                             ));
+
+                            for item in changed_items {
+                                let item_update = match item {
+                                    ChangedItem::File(file_id) => {
+                                        ItemUpdate::File(
+                                            FileUpdate::Status { 
+                                                id: file_id, 
+                                                status: FileStatus::Queued 
+                                            }
+                                        )
+                                    },
+                                    ChangedItem::Folder(folder_id) => {
+                                        ItemUpdate::Folder(
+                                            FolderUpdate::Status { 
+                                                id: folder_id, 
+                                                status: DownloadStatus::Queued 
+                                            }
+                                        )
+                                    },
+                                };
+
+                                let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                    DownloadUpdate::ItemUpdated { 
+                                        id: download_id, 
+                                        item_update 
+                                    }
+                                ));
+                            }
 
                             self.distribute_permits().await;
                         },

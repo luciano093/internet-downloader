@@ -31,6 +31,12 @@ use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::state_manager::StateManager;
 use crate::utils::network_utils::BandwidthLimiter;
 
+#[derive(Debug, Clone)]
+pub enum ChangedItem {
+    File(usize),
+    Folder(usize),
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
     StatusChanged { id: DownloadId, status: DownloadStatus },
@@ -663,7 +669,7 @@ impl FileStatus {
         !self.is_active()
     }
 
-        /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
+    /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
     pub fn can_set_to_queue(&self) -> bool {
         match self {
             Self::Completed | 
@@ -818,6 +824,54 @@ impl Download {
     pub fn set_status(&mut self, status: DownloadStatus) {
         self.status = status;
     }
+
+    pub fn set_paused(&mut self) -> Vec<ChangedItem> {
+        self.status = DownloadStatus::Paused;
+        let mut changed_items = Vec::new();
+
+        for (_, item) in &mut self.files {
+            match item {
+                DownloadType::File(file) => {
+                    if file.status().is_active() {
+                        file.set_status(FileStatus::Paused);
+                        changed_items.push(ChangedItem::File(file.id()));
+                    }
+                },
+                DownloadType::Folder(folder) => {
+                    if folder.status().is_active() {
+                        folder.set_status(DownloadStatus::Paused);
+                        changed_items.push(ChangedItem::Folder(folder.id()));
+                    }
+                },
+            }
+        }
+
+        changed_items
+    }
+
+    pub fn set_queued(&mut self) -> Vec<ChangedItem> {
+        self.status = DownloadStatus::Queued;
+        let mut changed_items = Vec::new();
+
+        for (_, item) in &mut self.files {
+            match item {
+                DownloadType::File(file) => {
+                    if file.status().can_set_to_queue() {
+                        file.set_status(FileStatus::Queued);
+                        changed_items.push(ChangedItem::File(file.id()));
+                    }
+                },
+                DownloadType::Folder(folder) => {
+                    if folder.status().can_set_to_queue() {
+                        folder.set_status(DownloadStatus::Queued);
+                        changed_items.push(ChangedItem::Folder(folder.id()));
+                    }
+                },
+            }
+        }
+
+        changed_items
+    }
 }
 
 impl Download {
@@ -968,6 +1022,65 @@ impl Download {
         }
 
         files.insert(folder_id, DownloadType::Folder(FolderDownload::new(folder_task, parent_relative_path, folder_id, children, parent_id)));
+    }
+
+    /// Evaluates the files to determine if there are any active and ready files.
+    /// Active files are those that still need to be downloaded. 
+    /// (No active files means download can't advance anymore, be it because all files are finished, failed, etc.)
+    /// Ready files are those that are ready to be downloaded because they have all their metadata.
+    /// (No ready files means that we have to fetch metadata before being able to start downloading anything)
+    pub fn evaluate_active_and_ready_status(&self) -> (bool, bool) {
+        let mut has_active_files = false;
+        let mut has_ready_files = false;
+
+        for item in self.files.values() {
+            if let DownloadType::File(file) = item {
+                // If any of these is true, we know the download is in an 
+                // 'active' state, meaning that we can proceed with the download
+                let is_active = match file.status() {
+                    // Inactive states
+                    // These files are either done, permanently broken, or manually paused
+                    FileStatus::Completed |
+                    FileStatus::Failed(_) |
+                    FileStatus::NotFound |
+                    FileStatus::Paused => false,
+
+                    // Active states
+                    // These files are actively participating in the download process
+                    // Meaning that they are ready to receive bytes after a metadata fetch
+                    FileStatus::Queued |
+                    FileStatus::Initializing |
+                    FileStatus::FetchingMetadata |
+                    FileStatus::InProgress |
+                    FileStatus::Retrying |
+                    FileStatus::Waiting(_) => true,
+                };
+                    
+                if is_active {
+                    has_active_files = true;
+
+                    // If all active files are missing their sizes, it means that the only next step
+                    // we can take is to fetch metadata for the download
+                    if file.size().is_some() {
+                        has_ready_files = true;
+                        break; 
+                    } 
+                }
+            }
+        }
+
+         (has_active_files, has_ready_files)
+    }
+
+    /// Determines what the active status should be based on file readiness.
+    pub fn calculate_active_status(&self) -> DownloadStatus {
+        let (_, has_ready_files) = self.evaluate_active_and_ready_status();
+        
+        if has_ready_files {
+            DownloadStatus::InProgress
+        } else {
+            DownloadStatus::FetchingMetadata
+        }
     }
 }
 
