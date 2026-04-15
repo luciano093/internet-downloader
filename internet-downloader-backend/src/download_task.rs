@@ -544,7 +544,7 @@ impl DownloadSupervisor {
                         let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
                     }
                 } else {
-                    warn!("The download status desynced and an automatic fix was tried, but the status didn't change. This might be due to a logic error in the code.");
+                    warn!("A supervisor for download '{}' was spawned, but it has no active files and its status is already correctly marked as {:?}. This might be due to a logic error in the code.", state.download.name(), state.download.status());
                 }
 
                 // we set demand to 0 just in case to prevent host manager sending us any more permits
