@@ -263,10 +263,15 @@ impl HostManager {
                                 self.permit_queue.remove(pos);
                             }
 
-                            if let Some(supervisor) = self.active_downloads.remove(&download_id) {
-                                supervisor.pause();
-                                
-                                drop(supervisor);
+                            if let Some(mut supervisor) = self.active_downloads.remove(&download_id) {
+                                tokio::spawn(async move {
+                                    if let Some(handle) = supervisor.handle_mut() { 
+                                        handle.abort();
+                                        let _ = handle.await; 
+                                    }
+
+                                    drop(supervisor);
+                                });
                             }
 
                             self.distribute_permits().await;
