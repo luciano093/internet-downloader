@@ -631,6 +631,7 @@ async fn hash_file(path: PathBuf) -> u128 {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[serde(rename_all = "snake_case")]
 pub enum FileStatus {
     Queued,
     Initializing,
@@ -699,6 +700,7 @@ pub enum FileFailureReason {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[serde(rename_all = "snake_case")]
 pub enum DownloadStatus {
     Queued,
     Initializing,
