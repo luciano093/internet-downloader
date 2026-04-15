@@ -586,6 +586,8 @@ impl DownloadSupervisor {
                     warn!("The download status desynced and an automatic fix was tried, but the status didn't change. This might be due to a logic error in the code.");
                 }
 
+                let _ = state.host_sender.send(HostMessage::DownloadHalted(state.download.id()));
+
                 return;
             }
 

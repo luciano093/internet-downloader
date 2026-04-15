@@ -85,6 +85,7 @@ pub enum HostMessage {
     CancelDownload(DownloadId),
     PauseDownload(DownloadId),
     ResumeDownload(Download, Arc<DownloadLimiterGroup>),
+    DownloadHalted(DownloadId),
     DownloadFinished(DownloadId),
     PermitReleased(OwnedSemaphorePermit),
     RequestPermits(DownloadId),
@@ -253,6 +254,20 @@ impl HostManager {
                                     status: DownloadStatus::InProgress 
                                 }
                             ));
+
+                            self.distribute_permits().await;
+                        },
+                        HostMessage::DownloadHalted(download_id) => {
+                            // Remove it from the permit queue so manager doesn't give permits to a halted download
+                            if let Some(pos) = self.permit_queue.iter().position(|x| *x == download_id) {
+                                self.permit_queue.remove(pos);
+                            }
+
+                            if let Some(supervisor) = self.active_downloads.remove(&download_id) {
+                                supervisor.pause();
+                                
+                                drop(supervisor);
+                            }
 
                             self.distribute_permits().await;
                         },
