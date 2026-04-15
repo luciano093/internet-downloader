@@ -656,7 +656,7 @@ impl FileStatus {
             Self::Retrying | 
             Self::Waiting(_) => true,
 
-            // Terminal/Inactive states
+            // Inactive states
             Self::Completed | 
             Self::Failed(_) | 
             Self::NotFound | 
@@ -665,7 +665,7 @@ impl FileStatus {
     }
 
     /// Returns true if the file is in a final state and should not be modified.
-    pub fn is_terminal(&self) -> bool {
+    pub fn is_inactive(&self) -> bool {
         !self.is_active()
     }
 
@@ -734,7 +734,7 @@ impl DownloadStatus {
     }
 
     /// Returns true if the download is in a final state and should not be modified.
-    pub fn is_terminal(&self) -> bool {
+    pub fn is_inactive(&self) -> bool {
         !self.is_active()
     }
 
