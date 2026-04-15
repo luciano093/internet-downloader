@@ -715,7 +715,7 @@ pub enum DownloadStatus {
 
 
 impl DownloadStatus {
-    /// Returns true if the file is actively downloading or waiting to download.
+    /// Returns true if download is actively downloading or waiting to be downloaded.
     pub fn is_active(&self) -> bool {
         match self {
             Self::Queued | 
@@ -733,7 +733,7 @@ impl DownloadStatus {
         }
     }
 
-    /// Returns true if the file is in a final state and should not be modified.
+    /// Returns true if the download is in a final state and should not be modified.
     pub fn is_terminal(&self) -> bool {
         !self.is_active()
     }
