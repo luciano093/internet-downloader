@@ -280,7 +280,7 @@ impl DownloadManager {
                         let should_exist  = match file.status() {
                             FileStatus::Completed => true,
 
-                            // Is only in a predownloaded if we haven't even gotten the metadata
+                            // A file should only exist on disk once metadata has been fetched (file size is not None).
                             FileStatus::Paused | FileStatus::InProgress | FileStatus::Waiting(_) | FileStatus::Retrying => {
                                 file.size().is_some() 
                             },
