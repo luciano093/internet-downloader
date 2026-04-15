@@ -571,8 +571,6 @@ impl DownloadSupervisor {
             // it means the download is not in a correct state and we have to fix it
             if !has_active_files {
                 if let Some(new_status) = state.download.reconcile_status() {
-                    state.download.set_status(new_status); 
-                
                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                         DownloadUpdate::StatusChanged { id: state.download.id(), status: new_status }
                     ));

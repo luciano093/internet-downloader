@@ -756,13 +756,13 @@ impl Download {
         
         if self.status != final_status {
             self.status = final_status;
-            return Some(self.status.clone());
+            return Some(self.status);
         }
         
         None
     }
 
-    pub fn calculate_final_status(&mut self) -> DownloadStatus {
+    pub fn calculate_final_status(&self) -> DownloadStatus {
         let mut completed_count = 0;
         let mut failed_count = 0;
         let mut not_found_count = 0;
