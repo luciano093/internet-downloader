@@ -335,9 +335,10 @@ impl DownloadManager {
             }
 
             if state_changed {
-                if let Some(_) = download.reconcile_status() {
-                    self.db_state_manager.write_download(download).await;
-                }
+                download.reconcile_status();
+
+                // should always write the change to db when the state has changed
+                self.db_state_manager.write_download(download).await;
             }
         }
     }
