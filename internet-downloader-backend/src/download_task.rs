@@ -584,6 +584,8 @@ impl DownloadSupervisor {
                     warn!("The download status desynced and an automatic fix was tried, but the status didn't change. This might be due to a logic error in the code.");
                 }
 
+                // we set demand to 0 just in case to prevent host manager sending us any more permits
+                demand.store(0, Ordering::SeqCst);
                 let _ = state.host_sender.send(HostMessage::DownloadHalted(state.download.id()));
 
                 return;
