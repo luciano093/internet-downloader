@@ -522,7 +522,7 @@ impl DownloadSupervisor {
             };
 
             if state.download.is_completed() {
-                let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
+                Self::finish_download(&mut state).await;
                 return;
             }
 
@@ -541,7 +541,7 @@ impl DownloadSupervisor {
                     state.app_context.db_manager.write_download(&state.download).await;
 
                     if new_status == DownloadStatus::Completed {
-                        let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
+                        Self::finish_download(&mut state).await;
                     }
                 } else {
                     warn!("A supervisor for download '{}' was spawned, but it has no active files and its status is already correctly marked as {:?}. This might be due to a logic error in the code.", state.download.name(), state.download.status());
@@ -607,9 +607,7 @@ impl DownloadSupervisor {
                                             if state.permit_count.load(Ordering::SeqCst) == 0 && state.active_downloads == 0 {
                                                 if Self::is_download_finished(&state.download) {
                                                     debug!("All files completed for download {}. Exiting supervisor loop.", state.download.id());          
-                                                    state.app_context.db_manager.write_download(&state.download).await;
-                                                    state.download.set_status(DownloadStatus::Completed);
-                                                    let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
+                                                    Self::finish_download(&mut state).await;
                                                     break;
                                                 } else {
                                                     // the download might be in a stalled state so we reset all cursors to find the missing chunks
@@ -781,9 +779,7 @@ impl DownloadSupervisor {
 
                                     if Self::is_download_finished(&state.download) {
                                         debug!("All files completed for download {}. Exiting supervisor loop.", download_id);
-                                        state.app_context.db_manager.write_download(&state.download).await;
-                                        state.download.set_status(DownloadStatus::Completed);
-                                        let _ = state.host_sender.send(HostMessage::DownloadFinished(download_id));
+                                        Self::finish_download(&mut state).await;
                                         break;
                                     }
                                 },
@@ -818,9 +814,7 @@ impl DownloadSupervisor {
 
                                     if Self::is_download_finished(&state.download) {
                                         debug!("All files completed for download {}. Exiting supervisor loop.", download_id);
-                                        state.app_context.db_manager.write_download(&state.download).await;
-                                        state.download.set_status(DownloadStatus::Completed);
-                                        let _ = state.host_sender.send(HostMessage::DownloadFinished(download_id));
+                                        Self::finish_download(&mut state).await;
                                         break;
                                     }
                                 },
@@ -1302,6 +1296,27 @@ impl DownloadSupervisor {
             DownloadType::File(file) => file.status() == FileStatus::Completed,
             _ => true,
         })
+    }
+
+    async fn finish_download(state: &mut SupervisorState) {
+        let download = &mut state.download;
+        let final_status = download.calculate_final_status();
+
+        info!("Supervisor finishing download '{}' with final status: {:?}", download.name(), final_status);
+
+        download.set_status(final_status);
+        state.app_context.db_manager.write_download(download).await;
+
+        let _ = state.app_context.ui_sender.send(
+            UiStateEvent::AddUpdate(
+                crate::download::DownloadUpdate::StatusChanged { 
+                    id: download.id(), 
+                    status: final_status, 
+                }
+            )
+        );
+
+        let _ = state.host_sender.send(HostMessage::DownloadFinished(download.id()));
     }
 
     /// Called when metadata is successfully fetched. If the download was 
