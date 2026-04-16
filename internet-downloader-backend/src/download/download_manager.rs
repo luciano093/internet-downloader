@@ -632,6 +632,7 @@ async fn hash_file(path: PathBuf) -> u128 {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[serde(rename_all = "snake_case")]
+#[serde(tag = "state", content = "value")]
 pub enum FileStatus {
     Queued,
     Initializing,
@@ -691,6 +692,8 @@ impl FileStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[repr(u8)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "state", content = "value")]
 pub enum FileFailureReason {
     HashMismatch,
     DiskError,
@@ -701,6 +704,7 @@ pub enum FileFailureReason {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[serde(rename_all = "snake_case")]
+#[serde(tag = "state", content = "value")]
 pub enum DownloadStatus {
     Queued,
     Initializing,
@@ -761,6 +765,8 @@ impl DownloadStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[repr(u8)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "state", content = "value")]
 pub enum DownloadFailureReason {
     HashMismatch,
     DiskError,
