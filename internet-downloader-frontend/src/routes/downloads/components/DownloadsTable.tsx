@@ -8,6 +8,7 @@ import { useDownloadStore } from "@/stores/downloadStore";
 import type { DownloadItem, DownloadNode, FileItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import useDownloadSpeed from "../hooks/useDownloadSpeed";
+import { formatDownloadStatus } from "@/lib/status_utils";
 
 const SpeedCellContent = ({ download }: { download: DownloadItem }) => {
     const stats = getFolderStats(download.files);
@@ -131,10 +132,17 @@ function createColumn({
 const columns = [
     createColumn({ id: "name", header: "Name", cell: (download) =>
     {
-        const isDownloading = download.status === "Downloading";
+        const isDownloading = download.status.state === "in_progress";
         return <span className={`font-medium truncate ${isDownloading ? "text-foreground" : ""}`}>{download.name}</span>;
     }}),
-    createColumn({ id: "status", header: "Status", size: 120 }),
+    createColumn({ 
+        id: "status",
+        header: "Status",
+        size: 120,
+        cell: (download) => {
+            return <>{formatDownloadStatus(download.status)}</>;
+        }
+    }),
     createColumn({ 
         id: "size", 
         header: "Size",

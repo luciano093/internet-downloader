@@ -3,7 +3,7 @@ use rkyv::rend::u32_le;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use thiserror::Error;
 
-use crate::download::{AppSettings, ArchivedDownload, Download, DownloadId};
+use crate::download::{AppSettings, DownloadId, items::{ArchivedDownload, Download}};
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {

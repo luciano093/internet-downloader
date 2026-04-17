@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::hash_map;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -14,9 +13,15 @@ use tracing::info;
 use crate::download::DownloadId;
 use crate::download::FileSize;
 use crate::download::DownloadUpdate;
-use crate::download::FileDownload;
-use crate::download::FolderDownload;
-use crate::download::{Download, DownloadItem, DownloadStatus, DownloadType, FileUpdate};
+use crate::download::FolderUpdate;
+use crate::download::ItemUpdate;
+use crate::download::items::DownloadItem;
+use crate::download::items::FileDownload;
+use crate::download::items::FolderDownload;
+use crate::download::items::{DownloadType, Download};
+use crate::download::FileUpdate;
+use crate::download::status::DownloadStatus;
+use crate::download::status::FileStatus;
 use crate::state_manager::StateManager;
 
 pub enum UiStateEvent {
@@ -136,7 +141,7 @@ impl UiStateManager {
                             UiStateEvent::AddUpdate(download_update) => {
                                 let update_id = match &download_update {
                                     DownloadUpdate::StatusChanged { id, .. } => *id,
-                                    DownloadUpdate::FileUpdated { id, .. } => *id,
+                                    DownloadUpdate::ItemUpdated { id, .. } => *id,
                                 };
 
                                 if removed_ids.contains(&update_id) {
@@ -229,24 +234,40 @@ impl DeltaManager {
             
                 download_diff.status = Some(status);
             },
-            DownloadUpdate::FileUpdated { id, file_update } => {
+            DownloadUpdate::ItemUpdated { id, item_update } => {
                 let download_diff = self.deltas.entry(*id).or_default();
 
-                let file_id = file_update.id();
+                    match item_update {
+                        ItemUpdate::File(file_update) => {
+                            let file_id = match &file_update {
+                                FileUpdate::Status { id, .. } => *id,
+                                FileUpdate::Hash { id, .. } => *id,
+                                FileUpdate::FileSize { id, .. } => *id,
+                                FileUpdate::BytesDownloaded { id, .. } => *id,
+                            };
 
-                if let hash_map::Entry::Vacant(entry) = download_diff.files.entry(file_id) {
-                    let mut file_diff = FileDiff::new();
+                            let item_diff = download_diff.files.entry(file_id).or_insert_with(|| {
+                                ItemDiff::File(FileDiff::new())
+                            });
 
-                    file_diff.update(file_update);
+                            if let ItemDiff::File(file_diff) = item_diff {
+                                file_diff.update(file_update);
+                            }
+                        },
+                        ItemUpdate::Folder(folder_update) => {
+                            let folder_id = match &folder_update {
+                                FolderUpdate::Status { id, .. } => *id,
+                            };
 
-                    entry.insert( ItemDiff::File(file_diff));
-                } else {
-                    let file_diff = download_diff.files.get_mut(&file_id).unwrap();
+                            let item_diff = download_diff.files.entry(folder_id).or_insert_with(|| {
+                                ItemDiff::Folder(FolderDiff::new())
+                            });
 
-                    if let ItemDiff::File(file_diff) = file_diff {
-                        file_diff.update(file_update);
+                            if let ItemDiff::Folder(folder_diff) = item_diff {
+                                folder_diff.update(folder_update);
+                            }
+                        }
                     }
-                }
             }
         }
     }
@@ -304,7 +325,7 @@ impl ItemDiff {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileDiff {
-    status: Option<DownloadStatus>,
+    status: Option<FileStatus>,
     url: Option<String>,
     file_name: Option<String>,
     relative_path: Option<PathBuf>,
@@ -361,6 +382,14 @@ impl FolderDiff {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn update(&mut self, update: FolderUpdate) {
+        match update {
+            FolderUpdate::Status { status, .. } => {
+                self.status = Some(status)
+            },
+        }
+    }
 }
 
 impl From<&FolderDownload> for FolderDiff {
@@ -405,7 +434,7 @@ pub fn download_to_json(download: &Download) -> serde_json::Value {
 
                 if let Ok(id) = id.parse::<usize>() {
                     // Assuming you have a way to access the FileDownload here
-                    if let Some(crate::download::DownloadType::File(file)) = download.files().get(&id) {
+                    if let Some(DownloadType::File(file)) = download.files().get(&id) {
                         // Calculate safe, committed bytes from the BitVec
                         let committed_bytes = file.calculate_initial_bytes(16384 as u64);
                         

@@ -2,10 +2,10 @@ use std::{collections::{HashMap, VecDeque}, sync::{Arc, Weak, atomic::{AtomicUsi
 
 use tokio::{sync::{OwnedSemaphorePermit, Semaphore, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{Download, DownloadId, DownloadLimiterGroup, DownloadStatus, DownloadUpdate, ManagerCommand}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
+use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand, items::{ChangedItem, Download}, status::DownloadStatus}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -85,6 +85,7 @@ pub enum HostMessage {
     CancelDownload(DownloadId),
     PauseDownload(DownloadId),
     ResumeDownload(Download, Arc<DownloadLimiterGroup>),
+    DownloadHalted(DownloadId),
     DownloadFinished(DownloadId),
     PermitReleased(OwnedSemaphorePermit),
     RequestPermits(DownloadId),
@@ -233,26 +234,78 @@ impl HostManager {
                                 return;
                             }
 
-                            let id = download.id();
+                            let download_id = download.id();
                             
-                            if self.active_downloads.contains_key(&id) || self.permit_queue.contains(&id) {
-                                warn!("Download {} is already active! Ignoring resume command.", id);
+                            if self.active_downloads.contains_key(&download_id) || self.permit_queue.contains(&download_id) {
+                                warn!("Download {} is already active! Ignoring resume command.", download_id);
                                 return;
                             }
 
                             trace!("Resuming download: {}", download.name());
 
-                            download.set_status(DownloadStatus::InProgress);
+                            // No need to manually save to db, as creating a new supervisor saves to db automatically
+                            let changed_items = download.set_queued();
 
-                            self.permit_queue.push_back(id);
-                            self.active_downloads.insert(id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
-                            
-                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                                DownloadUpdate::StatusChanged { 
-                                    id, 
-                                    status: DownloadStatus::InProgress 
-                                }
-                            ));
+                            for item in changed_items {
+                                match item {
+                                    ChangedItem::File { id, status } => {
+                                        let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                            DownloadUpdate::ItemUpdated { 
+                                                id: download_id, 
+                                                item_update: ItemUpdate::File(
+                                                    FileUpdate::Status { 
+                                                        id: id, 
+                                                        status: status,
+                                                    }
+                                                )
+                                            }
+                                        ));
+                                    },
+                                    ChangedItem::Folder { id, status } => {
+                                        let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                            DownloadUpdate::ItemUpdated { 
+                                                id: download_id, 
+                                                item_update: ItemUpdate::Folder(
+                                                    FolderUpdate::Status { 
+                                                        id: id, 
+                                                        status: status,
+                                                    }
+                                                )
+                                            }
+                                        ));
+                                    },
+                                    ChangedItem::Download(status) => {
+                                    let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                            DownloadUpdate::StatusChanged { 
+                                                id: download_id, 
+                                                status: status,
+                                            }
+                                        ));
+                                    },
+                                };
+                            }
+
+                            self.permit_queue.push_back(download_id);
+                            self.active_downloads.insert(download_id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
+
+                            self.distribute_permits().await;
+                        },
+                        HostMessage::DownloadHalted(download_id) => {
+                            // Remove it from the permit queue so manager doesn't give permits to a halted download
+                            if let Some(pos) = self.permit_queue.iter().position(|x| *x == download_id) {
+                                self.permit_queue.remove(pos);
+                            }
+
+                            if let Some(mut supervisor) = self.active_downloads.remove(&download_id) {
+                                tokio::spawn(async move {
+                                    if let Some(handle) = supervisor.handle_mut() { 
+                                        handle.abort();
+                                        let _ = handle.await; 
+                                    }
+
+                                    drop(supervisor);
+                                });
+                            }
 
                             self.distribute_permits().await;
                         },
@@ -299,7 +352,7 @@ impl HostManager {
                     Err(_) => return,
                 };
 
-                info!("Giving permit to {}", supervisor.download_id());
+                trace!("Giving permit to {}", supervisor.download_id());
 
                 supervisor.demand().fetch_sub(1, Ordering::SeqCst);
 
