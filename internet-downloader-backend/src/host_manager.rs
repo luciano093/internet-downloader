@@ -2,7 +2,7 @@ use std::{collections::{HashMap, VecDeque}, sync::{Arc, Weak, atomic::{AtomicUsi
 
 use tokio::{sync::{OwnedSemaphorePermit, Semaphore, mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel}, oneshot}, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 use url::Host;
 
 use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand, items::{ChangedItem, Download}, status::DownloadStatus}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
@@ -352,7 +352,7 @@ impl HostManager {
                     Err(_) => return,
                 };
 
-                info!("Giving permit to {}", supervisor.download_id());
+                trace!("Giving permit to {}", supervisor.download_id());
 
                 supervisor.demand().fetch_sub(1, Ordering::SeqCst);
 
