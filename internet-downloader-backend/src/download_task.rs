@@ -626,6 +626,10 @@ impl DownloadSupervisor {
 
                                             let cancel_token = cancel_token.clone();
 
+                                            if let Some(changed_items) = state.download.set_file_status(file_id, FileStatus::FetchingMetadata) {
+                                                Self::process_status_changes(&mut state, changed_items).await;
+                                            }
+
                                             tokio::spawn(async move {  
                                                 tokio::select! {
                                                     _ = cancel_token.cancelled() => {
