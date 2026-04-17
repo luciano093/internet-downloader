@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{ChangedItem, Download, DownloadId, DownloadLimiterGroup, DownloadStatus, DownloadUpdate, FileStatus, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
+use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand, items::{ChangedItem, Download}, status::DownloadStatus}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -246,43 +246,47 @@ impl HostManager {
                             // No need to manually save to db, as creating a new supervisor saves to db automatically
                             let changed_items = download.set_queued();
 
-                            self.permit_queue.push_back(download_id);
-                            self.active_downloads.insert(download_id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
-                            
-                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                                DownloadUpdate::StatusChanged { 
-                                    id: download_id, 
-                                    status: DownloadStatus::Queued 
-                                }
-                            ));
-
                             for item in changed_items {
-                                let item_update = match item {
-                                    ChangedItem::File(file_id) => {
-                                        ItemUpdate::File(
-                                            FileUpdate::Status { 
-                                                id: file_id, 
-                                                status: FileStatus::Queued 
+                                match item {
+                                    ChangedItem::File { id, status } => {
+                                        let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                            DownloadUpdate::ItemUpdated { 
+                                                id: download_id, 
+                                                item_update: ItemUpdate::File(
+                                                    FileUpdate::Status { 
+                                                        id: id, 
+                                                        status: status,
+                                                    }
+                                                )
                                             }
-                                        )
+                                        ));
                                     },
-                                    ChangedItem::Folder(folder_id) => {
-                                        ItemUpdate::Folder(
-                                            FolderUpdate::Status { 
-                                                id: folder_id, 
-                                                status: DownloadStatus::Queued 
+                                    ChangedItem::Folder { id, status } => {
+                                        let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                            DownloadUpdate::ItemUpdated { 
+                                                id: download_id, 
+                                                item_update: ItemUpdate::Folder(
+                                                    FolderUpdate::Status { 
+                                                        id: id, 
+                                                        status: status,
+                                                    }
+                                                )
                                             }
-                                        )
+                                        ));
+                                    },
+                                    ChangedItem::Download(status) => {
+                                    let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                                            DownloadUpdate::StatusChanged { 
+                                                id: download_id, 
+                                                status: status,
+                                            }
+                                        ));
                                     },
                                 };
-
-                                let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                                    DownloadUpdate::ItemUpdated { 
-                                        id: download_id, 
-                                        item_update 
-                                    }
-                                ));
                             }
+
+                            self.permit_queue.push_back(download_id);
+                            self.active_downloads.insert(download_id, DownloadSupervisor::new(self.app_context.clone(), download, self.sender.clone(), self.global_limit.clone(), self.host_limit.clone(), download_limiter).await);
 
                             self.distribute_permits().await;
                         },

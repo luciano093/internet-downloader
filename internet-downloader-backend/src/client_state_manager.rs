@@ -13,12 +13,15 @@ use tracing::info;
 use crate::download::DownloadId;
 use crate::download::FileSize;
 use crate::download::DownloadUpdate;
-use crate::download::FileDownload;
-use crate::download::FileStatus;
-use crate::download::FolderDownload;
 use crate::download::FolderUpdate;
 use crate::download::ItemUpdate;
-use crate::download::{Download, DownloadItem, DownloadStatus, DownloadType, FileUpdate};
+use crate::download::items::DownloadItem;
+use crate::download::items::FileDownload;
+use crate::download::items::FolderDownload;
+use crate::download::items::{DownloadType, Download};
+use crate::download::FileUpdate;
+use crate::download::status::DownloadStatus;
+use crate::download::status::FileStatus;
 use crate::state_manager::StateManager;
 
 pub enum UiStateEvent {
@@ -431,7 +434,7 @@ pub fn download_to_json(download: &Download) -> serde_json::Value {
 
                 if let Ok(id) = id.parse::<usize>() {
                     // Assuming you have a way to access the FileDownload here
-                    if let Some(crate::download::DownloadType::File(file)) = download.files().get(&id) {
+                    if let Some(DownloadType::File(file)) = download.files().get(&id) {
                         // Calculate safe, committed bytes from the BitVec
                         let committed_bytes = file.calculate_initial_bytes(16384 as u64);
                         

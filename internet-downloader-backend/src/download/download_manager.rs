@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12,7 +12,7 @@ use rkyv::munge::munge;
 use rkyv::rancor::Fallible;
 use rkyv::vec::{ArchivedVec, VecResolver};
 use rkyv::Place;
-use rkyv::with::{ArchiveWith, AsString};
+use rkyv::with::ArchiveWith;
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Semaphore, broadcast, mpsc};
@@ -22,20 +22,15 @@ use url::Host;
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
+use crate::download::items::{Download, DownloadItem, DownloadType};
+use crate::download::status::{DownloadStatus, FileStatus};
 use crate::download_writer_manager::DownloadWriterManager;
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::utils::file_utils::force_delete_file;
 use crate::network_manager;
-use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::state_manager::StateManager;
 use crate::utils::network_utils::BandwidthLimiter;
-
-#[derive(Debug, Clone)]
-pub enum ChangedItem {
-    File(usize),
-    Folder(usize),
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
@@ -287,74 +282,58 @@ impl DownloadManager {
 
     pub async fn verify_downloads(&mut self) {
         for (_, download) in &mut self.unprocessed_downloads {
+            let mut pending_changes = Vec::new();
+
+            for (&id, download_item) in &mut download.files {
+
+                if let DownloadType::File(file) = download_item {
+                    let exists_physically = file.relative_path().exists();
+
+                    let should_exist  = match file.status() {
+                        FileStatus::Completed => true,
+
+                        // A file should only exist on disk once metadata has been fetched (file size is not None).
+                        FileStatus::Paused | FileStatus::InProgress | FileStatus::Waiting(_) | FileStatus::Retrying => {
+                            file.size().is_some() 
+                        },
+
+                        FileStatus::Failed(_) |
+                        FileStatus::Queued |
+                        FileStatus::Initializing |
+                        FileStatus::FetchingMetadata |
+                        FileStatus::NotFound  => false,
+                    };
+
+                    // Check if file is missing (not queued and doesn't exist)
+                    if should_exist && !exists_physically {
+                        pending_changes.push((id, FileStatus::NotFound));
+                    } 
+
+
+                    // We check the hash only if the download is completed
+                    else if file.status() == FileStatus::Completed  {
+                        let hash = hash_file(file.relative_path().to_path_buf()).await;
+
+                        if Some(hash) != file.hash() {
+                            pending_changes.push((id, FileStatus::Failed(FileFailureReason::HashMismatch)));
+                        }
+                    }
+                }
+            }
+
             let mut state_changed = false;
 
-            for (_, download_item) in &mut download.files {
-                let exists_physically = download_item.relative_path().exists();
-
-                match download_item {
-                    DownloadType::File(file) => {
-                        let should_exist  = match file.status() {
-                            FileStatus::Completed => true,
-
-                            // A file should only exist on disk once metadata has been fetched (file size is not None).
-                            FileStatus::Paused | FileStatus::InProgress | FileStatus::Waiting(_) | FileStatus::Retrying => {
-                                file.size().is_some() 
-                            },
-
-                            FileStatus::Failed(_) |
-                            FileStatus::Queued |
-                            FileStatus::Initializing |
-                            FileStatus::FetchingMetadata |
-                            FileStatus::NotFound  => false,
-                        };
-
-                        // Check if file is missing (not queued and doesn't exist)
-                        if should_exist && !exists_physically {
-                            file.set_status(FileStatus::NotFound);
-                            state_changed = true;
-                        } 
-                        // We check the hash only if the download is completed
-                        else if file.status() == FileStatus::Completed  {
-                            let hash = hash_file(file.relative_path().to_path_buf()).await;
-
-                            if Some(hash) != file.hash {
-                                file.set_status(FileStatus::Failed(FileFailureReason::HashMismatch));
-                                state_changed = true;
-                            }
-                        }
-                    },
-                    DownloadType::Folder(folder) => {
-                        let should_exist  = match folder.status() {
-                            // If the folder is fully completed, it absolutely MUST exist.
-                            DownloadStatus::Completed |
-                            DownloadStatus::CompletedWithErrors => true,
-
-                            // Because of Lazy Creation, the folder might not physically 
-                            // exist yet during any of these active or pending states.
-                            DownloadStatus::InProgress |
-                            DownloadStatus::Paused |
-                            DownloadStatus::Retrying |
-                            DownloadStatus::Waiting(_) |
-                            DownloadStatus::FetchingMetadata |
-                            DownloadStatus::Initializing |
-                            DownloadStatus::Failed(_) |
-                            DownloadStatus::Queued |
-                            DownloadStatus::NotFound => false,
-                        };
-
-                        if should_exist && !exists_physically {
-                            folder.set_status(DownloadStatus::NotFound);
-                            state_changed = true;
-                        }
-                    },
+            // Apply all file status changes
+            for (id, new_status) in pending_changes {
+                if let Some(changed_items) = download.set_file_status(id, new_status) {
+                    if !changed_items.is_empty() {
+                        state_changed = true;
+                    }
                 }
             }
 
             if state_changed {
-                download.reconcile_status();
-
-                // should always write the change to db when the state has changed
+                // We should always write the change to db when the state has changed
                 self.db_state_manager.write_download(download).await;
             }
         }
@@ -631,66 +610,6 @@ async fn hash_file(path: PathBuf) -> u128 {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "state", content = "value")]
-pub enum FileStatus {
-    Queued,
-    Initializing,
-    FetchingMetadata,
-    InProgress,
-    Completed,
-    Paused,
-    Failed(FileFailureReason),
-    NotFound,
-    Retrying,
-    Waiting(Option<u64>)
-}
-
-impl FileStatus {
-    /// Returns true if the file is actively downloading or waiting to download.
-    pub fn is_active(&self) -> bool {
-        match self {
-            // Active states
-            Self::Queued | 
-            Self::Initializing | 
-            Self::FetchingMetadata | 
-            Self::InProgress | 
-            Self::Retrying | 
-            Self::Waiting(_) => true,
-
-            // Inactive states
-            Self::Completed | 
-            Self::Failed(_) | 
-            Self::NotFound | 
-            Self::Paused => false,
-        }
-    }
-
-    /// Returns true if the file is in a final state and should not be modified.
-    pub fn is_inactive(&self) -> bool {
-        !self.is_active()
-    }
-
-    /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
-    pub fn can_set_to_queue(&self) -> bool {
-        match self {
-            Self::Completed | 
-            Self::NotFound | 
-            Self::Queued => false,
-
-            Self::Paused | 
-            Self::Failed(_) | 
-            Self::Initializing | 
-            Self::FetchingMetadata | 
-            Self::InProgress | 
-            Self::Retrying | 
-            Self::Waiting(_) => true,
-        }
-    }
-}
-
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
@@ -700,67 +619,6 @@ pub enum FileFailureReason {
     ClientError,
     ServerError,
     MetadataFetchError,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "state", content = "value")]
-pub enum DownloadStatus {
-    Queued,
-    Initializing,
-    FetchingMetadata,
-    InProgress,
-    Completed,
-    CompletedWithErrors,
-    Paused,
-    Failed(DownloadFailureReason),
-    NotFound,
-    Retrying,
-    Waiting(Option<u64>)
-}
-
-
-impl DownloadStatus {
-    /// Returns true if download is actively downloading or waiting to be downloaded.
-    pub fn is_active(&self) -> bool {
-        match self {
-            Self::Queued | 
-            Self::Initializing | 
-            Self::FetchingMetadata | 
-            Self::InProgress | 
-            Self::Retrying | 
-            Self::Waiting(_) => true,
-
-            Self::Completed | 
-            Self::CompletedWithErrors | 
-            Self::Failed(_) | 
-            Self::NotFound | 
-            Self::Paused => false,
-        }
-    }
-
-    /// Returns true if the download is in a final state and should not be modified.
-    pub fn is_inactive(&self) -> bool {
-        !self.is_active()
-    }
-
-    /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
-    pub fn can_set_to_queue(&self) -> bool {
-        match self {
-            Self::Completed | 
-            Self::CompletedWithErrors |
-            Self::NotFound | 
-            Self::Queued => false,
-
-            Self::Paused | 
-            Self::Failed(_) | 
-            Self::Initializing | 
-            Self::FetchingMetadata | 
-            Self::InProgress | 
-            Self::Retrying | 
-            Self::Waiting(_) => true,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
@@ -775,388 +633,8 @@ pub enum DownloadFailureReason {
     MetadataFetchError,
     MultipleErrors,
     AllFilesFailed(FileFailureReason),
-}
-
-/// Has either a file or folder as the only item in root
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
-pub struct Download {
-    id: DownloadId,
-    url: String,
-    #[rkyv(with = AsString)]
-    relative_path: PathBuf,
-    status: DownloadStatus,
-    pub(crate) files: IndexMap<usize, DownloadType>,
-    name: String,
-}
-
-impl Download {
-    pub const fn url(&self) -> &String {
-        &self.url
-    }
-
-    pub fn get_file_mut(&mut self, id: &usize) -> Option<&mut FileDownload> {
-        match self.files.get_mut(id) {
-            Some(DownloadType::File(file)) => Some(file),
-            _ => None,
-        }
-    }
-
-    pub const fn id(&self) -> DownloadId {
-        self.id
-    }
-
-    pub const fn files(&self) -> &IndexMap<usize, DownloadType> {
-        &self.files
-    }
-
-    pub const fn files_mut(&mut self) -> &mut IndexMap<usize, DownloadType> {
-        &mut self.files
-    }
-
-    pub const fn relative_path(&self) -> &PathBuf {
-        &self.relative_path
-    }
-
-    pub const fn status(&self) -> DownloadStatus {
-        self.status
-    }
-
-    pub const fn name(&self) -> &String {
-        &self.name
-    }
-
-    pub fn is_completed(&self) -> bool {
-        self.status == DownloadStatus::Completed
-    }
-
-    pub fn set_status(&mut self, status: DownloadStatus) {
-        self.status = status;
-    }
-
-    pub fn set_paused(&mut self) -> Vec<ChangedItem> {
-        self.status = DownloadStatus::Paused;
-        let mut changed_items = Vec::new();
-
-        for (_, item) in &mut self.files {
-            match item {
-                DownloadType::File(file) => {
-                    if file.status().is_active() {
-                        file.set_status(FileStatus::Paused);
-                        changed_items.push(ChangedItem::File(file.id()));
-                    }
-                },
-                DownloadType::Folder(folder) => {
-                    if folder.status().is_active() {
-                        folder.set_status(DownloadStatus::Paused);
-                        changed_items.push(ChangedItem::Folder(folder.id()));
-                    }
-                },
-            }
-        }
-
-        changed_items
-    }
-
-    pub fn set_queued(&mut self) -> Vec<ChangedItem> {
-        self.status = DownloadStatus::Queued;
-        let mut changed_items = Vec::new();
-
-        for (_, item) in &mut self.files {
-            match item {
-                DownloadType::File(file) => {
-                    if file.status().can_set_to_queue() {
-                        file.set_status(FileStatus::Queued);
-                        changed_items.push(ChangedItem::File(file.id()));
-                    }
-                },
-                DownloadType::Folder(folder) => {
-                    if folder.status().can_set_to_queue() {
-                        folder.set_status(DownloadStatus::Queued);
-                        changed_items.push(ChangedItem::Folder(folder.id()));
-                    }
-                },
-            }
-        }
-
-        changed_items
-    }
-}
-
-impl Download {
-    pub fn new(id: usize, value: DownloadTask) -> Self {
-        let relative_path = PathBuf::new();
-
-        let mut files = IndexMap::new();
-        let mut current_id = 0;
-        let name;
-
-        match value.task_type {
-            TaskType::File(file_task) => {
-                name = file_task.file_name().clone();
-                files.insert(current_id, DownloadType::File(FileDownload::new(&file_task, &relative_path, current_id, None)));
-            },
-            TaskType::Folder(folder_task) => {
-                name = folder_task.folder_name().clone();
-                Self::process_folder_creation(&folder_task, &relative_path, &mut current_id, &mut files, None);
-            },
-        }
-
-        Self { 
-            id: DownloadId(id),
-            url: value.url,
-            relative_path: PathBuf::from("./"),
-            status: DownloadStatus::Queued,
-            files,
-            name,
-        }
-    }
-
-    /// Recalculates the download status. 
-    /// Returns `Some(new_status)` if a change occurred, or `None` if it was already correct.
-    pub fn reconcile_status(&mut self) -> Option<DownloadStatus> {
-        let final_status: DownloadStatus = self.calculate_final_status();
-        
-        if self.status != final_status {
-            self.status = final_status;
-            return Some(self.status);
-        }
-        
-        None
-    }
-
-    pub fn calculate_final_status(&self) -> DownloadStatus {
-        let mut completed_count = 0;
-        let mut failed_count = 0;
-        let mut not_found_count = 0;
-        let mut paused_count = 0;
-        let mut active_count = 0;
-        let mut total_files = 0;
-
-        let mut first_failure_reason = None;
-        let mut multiple_failure_reasons = false;
-
-        for item in self.files.values() {
-            if let DownloadType::File(file) = item {
-                total_files += 1;
-
-                match file.status() {
-                    FileStatus::Completed => completed_count += 1,
-                    FileStatus::NotFound => not_found_count += 1,
-                    FileStatus::Paused => paused_count += 1,
-                    FileStatus::Failed(reason) => {
-                        failed_count += 1;
-                        if first_failure_reason.is_none() {
-                            first_failure_reason = Some(reason);
-                        } else if first_failure_reason.as_ref() != Some(&reason) {
-                            multiple_failure_reasons = true;
-                        }
-                    },
-
-                    FileStatus::Queued |
-                    FileStatus::Initializing |
-                    FileStatus::FetchingMetadata |
-                    FileStatus::InProgress |
-                    FileStatus::Retrying |
-                    FileStatus::Waiting(_) => {
-                        active_count += 1; 
-                    } 
-                }
-            }
-        }
-
-        if active_count > 0 {
-            return match self.status {
-                // If the download falsely claims to be finished, revive it!
-                DownloadStatus::Completed |
-                DownloadStatus::CompletedWithErrors |
-                DownloadStatus::Failed(_) |
-                DownloadStatus::NotFound |
-                DownloadStatus::Paused => DownloadStatus::InProgress,
-
-                // If it's already in an active state just return its current state.
-                DownloadStatus::Queued |
-                DownloadStatus::Initializing |
-                DownloadStatus::FetchingMetadata |
-                DownloadStatus::InProgress |
-                DownloadStatus::Retrying |
-                DownloadStatus::Waiting(_) => self.status,
-            };
-        }
-
-        if completed_count == total_files {
-            DownloadStatus::Completed
-        } else if paused_count > 0 {
-            // If any file is paused and no files are actively downloading, 
-            // the download is considered to be paused.
-            DownloadStatus::Paused
-        } else if failed_count == total_files {
-            // Every single file failed with different errors
-            if multiple_failure_reasons {
-                DownloadStatus::Failed(DownloadFailureReason::MultipleErrors)
-            } 
-            // Every single file failed with the same error
-            else {
-                let file_reason = first_failure_reason.unwrap();
-                DownloadStatus::Failed(DownloadFailureReason::AllFilesFailed(file_reason))
-            }
-        } else if not_found_count == total_files {
-            // Every single file was not found
-            DownloadStatus::NotFound
-        } else {
-            // We only reach here if there are no active files, no paused files,
-            // and the download is not 100% finished.
-            DownloadStatus::CompletedWithErrors 
-        }
-    }
-
-    fn process_folder_creation(folder_task: &FolderTask, parent_relative_path: &Path, current_id: &mut usize, files: &mut IndexMap<usize, DownloadType>, parent_id: Option<usize>) {
-        let mut children = Vec::new();
-        let relative_path = parent_relative_path.join(folder_task.folder_name());
-
-        let folder_id = *current_id;
-        *current_id += 1;
-
-        for file_type in &folder_task.files {
-            match file_type {
-                TaskType::File(file_task) => {
-                    files.insert(*current_id, DownloadType::File(FileDownload::new(file_task, &relative_path, *current_id, Some(folder_id))));
-                    children.push(*current_id);
-                    *current_id += 1;
-                },
-                TaskType::Folder(folder_task) => {
-                    Self::process_folder_creation(folder_task, &relative_path, current_id, files, Some(folder_id));
-                },
-            }
-        }
-
-        files.insert(folder_id, DownloadType::Folder(FolderDownload::new(folder_task, parent_relative_path, folder_id, children, parent_id)));
-    }
-
-    /// Evaluates the files to determine if there are any active and ready files.
-    /// Active files are those that still need to be downloaded. 
-    /// (No active files means download can't advance anymore, be it because all files are finished, failed, etc.)
-    /// Ready files are those that are ready to be downloaded because they have all their metadata.
-    /// (No ready files means that we have to fetch metadata before being able to start downloading anything)
-    pub fn evaluate_active_and_ready_status(&self) -> (bool, bool) {
-        let mut has_active_files = false;
-        let mut has_ready_files = false;
-
-        for item in self.files.values() {
-            if let DownloadType::File(file) = item {
-                // If any of these is true, we know the download is in an 
-                // 'active' state, meaning that we can proceed with the download
-                let is_active = match file.status() {
-                    // Inactive states
-                    // These files are either done, permanently broken, or manually paused
-                    FileStatus::Completed |
-                    FileStatus::Failed(_) |
-                    FileStatus::NotFound |
-                    FileStatus::Paused => false,
-
-                    // Active states
-                    // These files are actively participating in the download process
-                    // Meaning that they are ready to receive bytes after a metadata fetch
-                    FileStatus::Queued |
-                    FileStatus::Initializing |
-                    FileStatus::FetchingMetadata |
-                    FileStatus::InProgress |
-                    FileStatus::Retrying |
-                    FileStatus::Waiting(_) => true,
-                };
-                    
-                if is_active {
-                    has_active_files = true;
-
-                    // If all active files are missing their sizes, it means that the only next step
-                    // we can take is to fetch metadata for the download
-                    if file.size().is_some() {
-                        has_ready_files = true;
-                        break; 
-                    } 
-                }
-            }
-        }
-
-         (has_active_files, has_ready_files)
-    }
-
-    /// Determines what the active status should be based on file readiness.
-    pub fn calculate_active_status(&self) -> DownloadStatus {
-        let (_, has_ready_files) = self.evaluate_active_and_ready_status();
-        
-        if has_ready_files {
-            DownloadStatus::InProgress
-        } else {
-            DownloadStatus::FetchingMetadata
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum DownloadType {
-    File(FileDownload),
-    Folder(FolderDownload),
-}
-
-impl DownloadItem for DownloadType {
-    fn parent_id(&self) -> Option<usize> {
-        match self {
-            DownloadType::File(f) => f.parent_id(),
-            DownloadType::Folder(f) => f.parent_id(),
-        }
-    }
-
-    fn id(&self) -> usize {
-        match self {
-            DownloadType::File(f) => f.id(),
-            DownloadType::Folder(f) => f.id(),
-        }
-    }
-
-    fn relative_path(&self) -> &PathBuf {
-        match self {
-            DownloadType::File(f) => f.relative_path(),
-            DownloadType::Folder(f) => f.relative_path(),
-        }
-    }
-
-    fn name(&self) -> &str {
-        match self {
-            DownloadType::File(f) => f.name(),
-            DownloadType::Folder(f) => f.name(),
-        }
-    }
-}
-
-pub trait DownloadItem {
-    fn parent_id(&self) -> Option<usize>;
-
-    fn id(&self) -> usize;
-
-    fn relative_path(&self) -> &PathBuf;
-
-    fn name(&self) -> &str;
-}
-
-#[derive(Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
-pub struct FileDownload {
-    parent_id: Option<usize>,
-    id: usize,
-    url: Arc<String>,
-    file_name: String,
-    #[rkyv(with = AsString)]
-    relative_path: PathBuf,
-    status: FileStatus,
-    #[serde(serialize_with = "serialize_hash")] 
-    hash: Option<u128>,
-    #[serde(serialize_with = "serialize_chunks")]
-    #[rkyv(with = AsBitVec)]
-    chunks: BitVec<u8, Msb0>,
-    size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
-    #[serde(skip)]
-    /// tracks consecutive retries
-    retries: usize, 
+    FilesMissingFromDisk,
+    StateDesynchronized,
 }
 
 pub struct AsBitVec;
@@ -1212,7 +690,7 @@ impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::with::DeserializeWith<ArchivedBit
     }
 }
 
-fn serialize_hash<S>(hash: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize_hash<S>(hash: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -1226,7 +704,7 @@ where
     }
 }
 
-fn serialize_chunks<S>(chunks: &BitVec<u8, Msb0>, serializer: S) -> Result<S::Ok, S::Error>
+pub fn serialize_chunks<S>(chunks: &BitVec<u8, Msb0>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -1234,209 +712,6 @@ where
         serializer.serialize_none()
     } else {
         chunks.serialize(serializer)
-    }
-}
-
-
-impl DownloadItem for FileDownload {
-    fn parent_id(&self) -> Option<usize> {
-        self.parent_id
-    }
-
-    fn id(&self) -> usize {
-        self.id
-    }
-
-    fn relative_path(&self) -> &PathBuf {
-        &self.relative_path
-    }
-
-    fn name(&self) -> &str {
-        &self.file_name
-    }
-}
-
-impl Debug for FileDownload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FileDownload")
-            .field("id", &self.id)
-            .field("url", &self.url)
-            .field("file_name", &self.file_name)
-            .field("relative_path", &self.relative_path)
-            .field("status", &self.status)
-            .field("hash", &self.hash)
-            .field("chunks", &self.chunks.len())
-            .finish()
-    }
-}
-
-impl FileDownload {
-    pub(super) fn new(file_task: &FileTask, relative_path: &Path, id: usize, parent_id: Option<usize>) -> Self {
-        let relative_path = relative_path.join(file_task.file_name());
-
-        Self { 
-            parent_id,
-            id,
-            url: Arc::new(file_task.url.clone()),
-            file_name: file_task.file_name().to_owned(),
-            relative_path,
-            status: FileStatus::Queued,
-            hash: None,
-            chunks: BitVec::new(),
-            size: None,
-            retries: 0,
-        }
-    }
-
-    pub const fn chunks(&self) -> &BitVec<u8, Msb0> {
-        &self.chunks
-    }
-
-    pub fn chunks_mut(&mut self) -> &mut BitVec<u8, Msb0> {
-        &mut self.chunks
-    }
-
-    pub const fn hash(&self) -> Option<u128> {
-        self.hash
-    }
-
-    pub fn url(&self) -> Arc<String> {
-        self.url.clone()
-    }
-
-    pub fn status(&self) -> FileStatus {
-        self.status
-    }
-
-    pub fn set_status(&mut self, new_status: FileStatus) {
-        self.status = new_status
-    }
-
-    pub fn size(&self) -> Option<FileSize> {
-        self.size
-    }
-
-    pub fn set_size(&mut self, size: FileSize) {
-        self.size = Some(size);
-    }
-
-    pub fn retries(&self) -> usize {
-        self.retries
-    }
-
-    pub fn increment_retries(&mut self) {
-        self.retries += 1;
-    }
-
-    pub fn reset_retries(&mut self) {
-        self.retries = 0;
-    }
-
-    pub fn calculate_initial_bytes(&self, chunk_size: u64) -> u64 {
-        let chunks = self.chunks();
-
-        if chunks.is_empty() {
-            return 0;
-        }
-
-        let file_size = match self.size() {
-            Some(FileSize::Known(size)) => size,
-            _ => return 0,
-        };
-
-        if self.status == FileStatus::Completed {
-            return file_size;
-        }
-
-        let last_chunk_index = chunks.len() - 1;
-
-        // Did we download the very last chunk?
-        let has_last_chunk = chunks.get(last_chunk_index).as_deref() == Some(&true);
-
-        let downloaded_chunks = chunks.count_ones() as u64;
-
-        if has_last_chunk {
-            // All chunks except the last one are full size
-            let standard_bytes = (downloaded_chunks - 1) * chunk_size;
-            
-            // We calculate the size of the last chunk
-            let last_chunk_bytes = self.calculate_chunk_expected_len(
-                chunk_size, 
-                (last_chunk_index, last_chunk_index + 1), 
-                file_size
-            );
-
-            standard_bytes + last_chunk_bytes
-        } else {
-            // If we don't have the last chunk, every chunk we have is standard size
-            downloaded_chunks * chunk_size
-        }
-    }
-
-    fn calculate_chunk_expected_len(&self, chunk_size: u64, range: (usize, usize), file_size: u64) -> u64 {
-        let start_byte = range.0 as u64 * chunk_size;
-        let theoretical_end = range.1 as u64 * chunk_size;
-
-        let actual_end = std::cmp::min(theoretical_end, file_size);
-        let expected_len = actual_end.saturating_sub(start_byte);
-        
-        expected_len.min(file_size)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
-pub struct FolderDownload {
-    parent_id: Option<usize>,
-    id: usize,
-    folder_name: String,
-    #[rkyv(with = AsString)]
-    relative_path: PathBuf,
-    status: DownloadStatus,
-    children: Vec<usize>,
-}
-
-impl FolderDownload {
-    pub(super) fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<usize>, parent_id: Option<usize>) -> Self {
-        let relative_path = parent_relative_path.join(folder_task.folder_name());
-
-        Self { 
-            parent_id,
-            id,
-            folder_name: folder_task.folder_name().to_owned(),
-            relative_path,
-            status: DownloadStatus::Queued,
-            children
-        }
-    }
-
-    pub const fn children(&self) -> &Vec<usize> {
-        &self.children
-    }
-
-    pub fn status(&self) -> DownloadStatus {
-        self.status
-    }
-
-    pub fn set_status(&mut self, new_status: DownloadStatus) {
-        self.status = new_status
-    }
-}
-
-impl DownloadItem for FolderDownload {
-    fn parent_id(&self) -> Option<usize> {
-        self.parent_id
-    }
-
-    fn id(&self) -> usize {
-        self.id
-    }
-
-    fn relative_path(&self) -> &PathBuf {
-        &self.relative_path
-    }
-
-    fn name(&self) -> &str {
-        &self.folder_name
     }
 }
 

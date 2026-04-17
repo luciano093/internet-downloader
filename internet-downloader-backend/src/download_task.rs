@@ -20,7 +20,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
-use crate::download::{ChangedItem, Download, DownloadId, DownloadItem, DownloadLimiterGroup, DownloadStatus, DownloadType, DownloadUpdate, FileFailureReason, FileSize, FileStatus, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
+use crate::download::items::{ChangedItem, Download, DownloadItem, DownloadType};
+use crate::download::status::{DownloadStatus, FileStatus, StateBucket};
+use crate::download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
 use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
@@ -528,43 +530,39 @@ impl DownloadSupervisor {
 
             let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
-            let (has_active_files, has_ready_files) = state.download.evaluate_active_and_ready_status();
-
-            // If there are no active files, but we got to this point in the code
-            // it means the download is not in a correct state and we have to fix it
-            if !has_active_files {
-                if let Some(new_status) = state.download.reconcile_status() {
-                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                        DownloadUpdate::StatusChanged { id: state.download.id(), status: new_status }
-                    ));
-                    
-                    state.app_context.db_manager.write_download(&state.download).await;
-
-                    if new_status == DownloadStatus::Completed {
-                        Self::finish_download(&mut state).await;
-                    }
-                } else {
-                    warn!("A supervisor for download '{}' was spawned, but it has no active files and its status is already correctly marked as {:?}. This might be due to a logic error in the code.", state.download.name(), state.download.status());
-                }
-
-                // we set demand to 0 just in case to prevent host manager sending us any more permits
-                demand.store(0, Ordering::SeqCst);
-                let _ = state.host_sender.send(HostMessage::DownloadHalted(state.download.id()));
-
-                return;
-            }
-
-            let new_status = if has_ready_files {
-                DownloadStatus::InProgress
-            } else {
-                DownloadStatus::FetchingMetadata
+            let download_status = match state.download.files().get(&0) {
+                Some(DownloadType::File(file)) => file.status().bucket(),
+                Some(DownloadType::Folder(folder)) => folder.status().bucket(),
+                None => StateBucket::Completed, // Download has nothing inside, so we must be completed
             };
 
-            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                DownloadUpdate::StatusChanged { id: state.download.id(), status: new_status }
-            ));
-            state.download.set_status(new_status);
-            state.app_context.db_manager.write_download(&state.download).await;
+            match download_status {
+                StateBucket::InProgress | 
+                StateBucket::FetchingMetadata | 
+                StateBucket::Initializing | 
+                StateBucket::Retrying | 
+                StateBucket::Queued |
+                StateBucket::Waiting => { },
+
+                StateBucket::Paused |
+                StateBucket::Error |
+                StateBucket::CompletedWithErrors |
+                StateBucket::Completed => {
+                    warn!("A supervisor for download '{}' was spawned, but its status is {:?}. Halting.", state.download.name(), download_status);
+
+                    // We set demand to 0 just in case to prevent host manager sending us any more permits
+                    demand.store(0, Ordering::SeqCst);
+                    let _ = state.host_sender.send(HostMessage::DownloadHalted(state.download.id()));
+
+                    if download_status == StateBucket::Completed
+                        || download_status == StateBucket::CompletedWithErrors
+                    {
+                        Self::finish_download(&mut state).await;
+                    }
+
+                    return;
+                }
+            }
             
                 loop {
                     tokio::select! {
@@ -750,31 +748,31 @@ impl DownloadSupervisor {
 
                                     let download_id = state.download.id();
 
-                                    match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                        DownloadType::File(file) => {
-                                            file.reset_retries();
-                                            file.set_size(FileSize::Known(size as u64));
+                                    // Store new progress and resize chunks
+                                    if let Some(file) = state.download.get_file_mut(&file_id) {
+                                        file.reset_retries();
+                                        file.set_size(FileSize::Known(size as u64));
 
-                                            // The file is complete, so we can just store the size in progress
-                                            if let Some(progress) = state.file_progress.get(&file_id) {
-                                                progress.store(size as u64, Ordering::Relaxed);
-                                            }
+                                        // The file is complete, so we can just store the size in progress
+                                        if let Some(progress) = state.file_progress.get(&file_id) {
+                                            progress.store(size as u64, Ordering::Relaxed);
+                                        }
 
-                                            if size > 0 {
-                                                let chunk_count = size.div_ceil(CHUNK_SIZE);
-                                                file.chunks_mut().resize(chunk_count, true);
-                                                trace!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
-                                                file.set_status(FileStatus::Completed); 
-                                            } else {
-                                                trace!("got 0 bytes: {}", file.name());
-                                                // 0 Byte file
-                                                file.set_status(FileStatus::Completed);
-                                            }
+                                        if size > 0 {
+                                            let chunk_count = size.div_ceil(CHUNK_SIZE);
+                                            file.chunks_mut().resize(chunk_count, true);
+                                            trace!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
+                                        } else {
+                                            // 0 Byte file
+                                            trace!("got 0 bytes: {}", file.name());
+                                        }
 
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::FileSize { id: file_id, len: size as u64 }) }));
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: FileStatus::Completed }) }));
-                                        },
-                                        DownloadType::Folder(_) => todo!(),
+                                        let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::FileSize { id: file_id, len: size as u64 }) }));
+                                    }
+
+                                    // Update new statuses
+                                    if let Some(changed_items) = state.download.set_file_status(file_id, FileStatus::Completed) {
+                                        Self::process_status_changes(&mut state, changed_items).await;
                                     }
 
                                     if Self::is_download_finished(&state.download) {
@@ -788,34 +786,37 @@ impl DownloadSupervisor {
                                     drop(permit); 
 
                                     let download_id = state.download.id();
+                                    let mut all_chunks_done = false;
                                     
-                                    match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                        crate::download::DownloadType::File(file_download) => {
-                                            file_download.reset_retries();
+                                    if let Some(file) = state.download.get_file_mut(&file_id) {
+                                        file.reset_retries();
 
-                                            file_download.chunks_mut()[range.0..range.1].fill(true);
+                                        file.chunks_mut()[range.0..range.1].fill(true);
 
+                                        all_chunks_done = file.chunks().all();
+
+                                        if all_chunks_done {
                                             let bytes_downloaded = state.file_progress
-                                                .get(&file_id)
-                                                .map(|p| p.load(Ordering::Relaxed))
-                                                .unwrap_or(0);
+                                            .get(&file_id)
+                                            .map(|p| p.load(Ordering::Relaxed))
+                                            .unwrap_or(0);
 
-                                            let all_chunks_done = file_download.chunks().all();
-
-                                            if all_chunks_done {
-                                                trace!("file {} finished! got {} bytes", file_download.name(), bytes_downloaded);
-                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: FileStatus::Completed }) }));
-                                                file_download.set_status(FileStatus::Completed);
-                                                state.shared_file_maps.remove(&file_id);
-                                            }
-                                        },
-                                        crate::download::DownloadType::Folder(_) => todo!(),
+                                            trace!("file {} finished! got {} bytes", file.name(), bytes_downloaded);
+                                        }
                                     }
 
-                                    if Self::is_download_finished(&state.download) {
-                                        debug!("All files completed for download {}. Exiting supervisor loop.", download_id);
-                                        Self::finish_download(&mut state).await;
-                                        break;
+                                    if all_chunks_done {
+                                        if let Some(changed_items) = state.download.set_file_status(file_id, FileStatus::Completed) {
+                                            Self::process_status_changes(&mut state, changed_items).await;
+                                        }
+                                        
+                                        state.shared_file_maps.remove(&file_id);
+
+                                        if Self::is_download_finished(&state.download) {
+                                            debug!("All files completed for download {}. Exiting supervisor loop.", download_id);
+                                            Self::finish_download(&mut state).await;
+                                            break;
+                                        }
                                     }
                                 },
                                 SupervisorMessage::RangeFailed(permit, file_id, range, url, file_map, expected_len, download_error) => {
@@ -823,100 +824,94 @@ impl DownloadSupervisor {
                                     let file_id = retry_kind.file_id();
                                     let download_name = state.download.name().clone();
 
-                                    let file = match state.download.files_mut().get_mut(&file_id) {
-                                        Some(DownloadType::File(file)) => file,
-                                        _ => continue,
-                                    };
+                                    if let Some(file) = state.download.get_file_mut(&file_id) {
+                                        match download_error {
+                                            RangeDownloadError::Download(download_error) => {
+                                                match download_error {
+                                                    DownloadError::Io(error) =>  {
+                                                        let _ = sender.send(SupervisorMessage::IoError(permit, error, retry_kind));
+                                                    },
+                                                    DownloadError::Network(error) => {
+                                                        let _ = sender.send(SupervisorMessage::NetworkError(permit, error, retry_kind));
+                                                    },
+                                                    DownloadError::RateLimited(retry_after) => {
+                                                        let _ = sender.send(SupervisorMessage::RateLimited(permit, retry_after, retry_kind));
+                                                    },
+                                                    DownloadError::ServerError(status_code) => {
+                                                        let _ = sender.send(SupervisorMessage::ServerError(permit, status_code, retry_kind));
+                                                    },
+                                                    DownloadError::ClientError(status_code) => {
+                                                        let _ = sender.send(SupervisorMessage::ClientError(permit, status_code, retry_kind));
+                                                    },
+                                                }
+                                            },
+                                            RangeDownloadError::UnexpectedStatus(status_code) => {
+                                                warn!("got unexpected status code length for: {} {}. received: {}", download_name, file_id, status_code);
+                                                file.increment_retries();
+                                                if file.retries() > 5 { 
+                                                    // Try to download this as chunked as fallback
+                                                    file.set_size(FileSize::Unknown);
+                                                    file.reset_retries();
+                                                    state.shared_file_maps.remove(&file.id());
+                                                    state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
+                                                    demand.fetch_add(1, Ordering::SeqCst); 
+                                                } else {
+                                                    let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                                }
+                                            },
+                                            RangeDownloadError::UnexpectedLength(bytes_received, bytes_expected) => {
+                                                warn!("got unexpected length for: {} {}. received: {}, expected: {}", download_name, file_id, bytes_received, bytes_expected);
 
-                                    match download_error {
-                                        RangeDownloadError::Download(download_error) => {
-                                            match download_error {
-                                                DownloadError::Io(error) =>  {
-                                                    let _ = sender.send(SupervisorMessage::IoError(permit, error, retry_kind));
-                                                },
-                                                DownloadError::Network(error) => {
-                                                    let _ = sender.send(SupervisorMessage::NetworkError(permit, error, retry_kind));
-                                                },
-                                                DownloadError::RateLimited(retry_after) => {
-                                                    let _ = sender.send(SupervisorMessage::RateLimited(permit, retry_after, retry_kind));
-                                                },
-                                                DownloadError::ServerError(status_code) => {
-                                                    let _ = sender.send(SupervisorMessage::ServerError(permit, status_code, retry_kind));
-                                                },
-                                                DownloadError::ClientError(status_code) => {
-                                                    let _ = sender.send(SupervisorMessage::ClientError(permit, status_code, retry_kind));
-                                                },
-                                            }
-                                        },
-                                        RangeDownloadError::UnexpectedStatus(status_code) => {
-                                            warn!("got unexpected status code length for: {} {}. received: {}", download_name, file_id, status_code);
-                                            file.increment_retries();
-                                            if file.retries() > 5 { 
-                                                // Try to download this as chunked as fallback
+                                                file.increment_retries();
+                                                if file.retries() > 5 { 
+                                                    // Try to download this as chunked as fallback
+                                                    file.set_size(FileSize::Unknown);
+                                                    file.reset_retries();
+                                                    state.shared_file_maps.remove(&file.id());
+                                                    state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
+                                                    demand.fetch_add(1, Ordering::SeqCst); 
+                                                } else {
+                                                    // This error is usually from a droppped connection, so don't wait much before retrying
+                                                    let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_millis(300), retry_kind));
+                                                }
+                                            },
+                                            RangeDownloadError::RangeNotSupported => {
+                                                warn!("got non-range response for: {} {}.", download_name, file_id);
+
+                                                // Set this file as having an unknown length so it can be downloaded as chunked
                                                 file.set_size(FileSize::Unknown);
                                                 file.reset_retries();
                                                 state.shared_file_maps.remove(&file.id());
                                                 state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
                                                 demand.fetch_add(1, Ordering::SeqCst); 
-                                            } else {
-                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
-                                            }
-                                        },
-                                        RangeDownloadError::UnexpectedLength(bytes_received, bytes_expected) => {
-                                            warn!("got unexpected length for: {} {}. received: {}, expected: {}", download_name, file_id, bytes_received, bytes_expected);
+                                            },
+                                            RangeDownloadError::DiskWriteError(error) => {
+                                                let _ = sender.send(SupervisorMessage::IoError(permit, error, retry_kind));
+                                            },
+                                            RangeDownloadError::DiskPoolDropped => {
+                                                error!("App-wide disk pool dropped. App entered an invalid state and should restart. This probably happened due to an OS error or logic bug.");
 
-                                            file.increment_retries();
-                                            if file.retries() > 5 { 
-                                                // Try to download this as chunked as fallback
-                                                file.set_size(FileSize::Unknown);
-                                                file.reset_retries();
-                                                state.shared_file_maps.remove(&file.id());
-                                                state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
-                                                demand.fetch_add(1, Ordering::SeqCst); 
-                                            } else {
-                                                // This error is usually from a droppped connection, so don't wait much before retrying
-                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_millis(300), retry_kind));
-                                            }
-                                        },
-                                        RangeDownloadError::RangeNotSupported => {
-                                            warn!("got non-range response for: {} {}.", download_name, file_id);
+                                                let _ = state.app_context.download_manager.send(ManagerCommand::Shutdown);
 
-                                            // Set this file as having an unknown length so it can be downloaded as chunked
-                                            file.set_size(FileSize::Unknown);
-                                            file.reset_retries();
-                                            state.shared_file_maps.remove(&file.id());
-                                            state.retry_streams.push((file_id, url, file.relative_path().to_owned()));
-                                            demand.fetch_add(1, Ordering::SeqCst); 
-                                        },
-                                        RangeDownloadError::DiskWriteError(error) => {
-                                            let _ = sender.send(SupervisorMessage::IoError(permit, error, retry_kind));
-                                        },
-                                        RangeDownloadError::DiskPoolDropped => {
-                                            error!("App-wide disk pool dropped. App entered an invalid state and should restart. This probably happened due to an OS error or logic bug.");
-
-                                            let _ = state.app_context.download_manager.send(ManagerCommand::Shutdown);
-
-                                            break;
-                                        },
+                                                break;
+                                            },
+                                        }
                                     }
                                 }
                                 SupervisorMessage::MetadataFetched(permit, file_id, url, size_result) => {
                                     trace!("got metadata for: {} {}", state.download.name(), file_id);
 
                                     let download_id = state.download.id();
-                                    let file = match state.download.files_mut().get_mut(&file_id) {
-                                        Some(DownloadType::File(file)) => file,
-                                        _ => continue,
-                                    };
+                                    let mut target_status = None;
+                                    let mut new_jobs = 0;
 
-                                    match size_result {
-                                        SizeResult::Known(size) => {
-                                            trace!("Got known metadata size for {}. Got {}", file_id, size);
-                                            let download_id = state.download.id();
-
-                                            if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
+                                    if let Some(file) = state.download.get_file_mut(&file_id) {
+                                        match size_result {
+                                            SizeResult::Known(size) => {
+                                                trace!("Got known metadata size for {}. Got {}", file_id, size);
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Known(size));
+
                                                 let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::FileSize { id: file_id, len: size }) }));
 
                                                 // Initialize chunks
@@ -924,71 +919,62 @@ impl DownloadSupervisor {
                                                     // Calculate how many 16KB chunks exist
                                                     let chunk_count = size.div_ceil(CHUNK_SIZE as u64);
                                                     file.chunks_mut().resize(chunk_count as usize, false);
-                                                    file.set_status(FileStatus::InProgress); 
 
                                                     // Calculate how many ranges (jobs) are needed for this file
-                                                    let job_count = chunk_count.div_ceil(TARGET_RANGE_SIZE as u64);
-                                                    
-                                                    // Add the required jobs to our demand
-                                                    demand.fetch_add(job_count as usize, Ordering::SeqCst);
-                                                    let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
+                                                    // and add the required jobs to our demand
+                                                    new_jobs = chunk_count.div_ceil(TARGET_RANGE_SIZE as u64) as usize;
+    
+                                                    target_status = Some(FileStatus::InProgress);
                                                 } else {
                                                     warn!("got 0 bytes: {}", file.name());
                                                     // 0 Byte file
-                                                    file.set_status(FileStatus::Completed);
+                                                    target_status = Some(FileStatus::Completed);
                                                 }
-
-                                                // If the download status was previously in fetching metadata
-                                                // we can safely change it to in progress now that we have at least
-                                                // some metadata to start the download
-                                                Self::complete_metadata_fetch(&mut state).await;
-                                            }
-                                        },
-                                        SizeResult::Stream => {
-                                            debug!("Got no known metadata size for {}. Setting to stream.", file_id);
-                                            if let Some(DownloadType::File(file)) = state.download.files_mut().get_mut(&file_id) {
+                                            },
+                                            SizeResult::Stream => {
+                                                debug!("Got no known metadata size for {}. Setting to stream.", file_id);
                                                 file.reset_retries();
                                                 file.set_size(FileSize::Unknown);
-                                                file.set_status(FileStatus::InProgress); 
+                                                new_jobs = 1;
+                                                
+                                                target_status = Some(FileStatus::InProgress);
+                                            },
+                                            SizeResult::Retryable(_) => {
+                                                file.increment_retries();
+                                                if file.retries() > 5 { 
+                                                    warn!("Failed to get metadata size for {} after retrying.", file_id);
+                                                    target_status = Some(FileStatus::Failed(FileFailureReason::MetadataFetchError));
+                                                } else {
+                                                    warn!("Failed to get metadata size for {}. Retrying.", file_id);
+                                                    let retry_kind = RetryKind::Metadata(MetadataRetry { file_id, url });
+                                                    let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                                }
+                                            },
+                                            SizeResult::PermanentFail => {
+                                                warn!("Failed to get metadata size for {}.", file_id);
+                                                target_status = Some(FileStatus::Failed(FileFailureReason::MetadataFetchError));
+                                            },
+                                        }
+                                    }
 
-                                                demand.fetch_add(1, Ordering::SeqCst);
-                                                let _ = state.host_sender.send(HostMessage::RequestPermits(state.download.id())); 
-                                            }
+                                    if let Some(status) = target_status {
+                                        if let Some(changed_items) = state.download.set_file_status(file_id, status) {
+                                            Self::process_status_changes(&mut state, changed_items).await;
+                                        }
+                                    }
 
-                                            // If the download status was previously in fetching metadata
-                                            // we can safely change it to in progress now that we have at least
-                                            // some metadata to start the download
-                                            Self::complete_metadata_fetch(&mut state).await;
-                                        },
-                                        SizeResult::Retryable(_) => {
-                                            file.increment_retries();
-                                            if file.retries() > 5 { 
-                                                warn!("Failed to get metadata size for {} after retrying.", file_id);
-                                                file.set_status(FileStatus::Failed(FileFailureReason::MetadataFetchError));
-                                                let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
-                                            } else {
-                                                warn!("Failed to get metadata size for {}. Retrying.", file_id);
-                                                let retry_kind = RetryKind::Metadata(MetadataRetry { file_id, url });
-                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
-                                            }
-                                        },
-                                        SizeResult::PermanentFail => {
-                                            warn!("Failed to get metadata size for {}.", file_id);
-                                            file.set_status(FileStatus::Failed(FileFailureReason::MetadataFetchError));
-                                            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
-                                        },
+                                    if new_jobs > 0 {
+                                        demand.fetch_add(new_jobs, Ordering::SeqCst);
+                                        let _ = state.host_sender.send(HostMessage::RequestPermits(download_id)); 
                                     }
                                 },
                                 SupervisorMessage::RetryAfter(permit, duration, retry_kind) => {
                                     let download_id = state.download.id();
                                     let file_id = retry_kind.file_id();
 
-                                    let file = match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                        DownloadType::File(file) => file,
-                                        DownloadType::Folder(_) => continue,
-                                    };
-
-                                    file.set_status(FileStatus::Retrying);
+                                    if let Some(changed_items) = state.download.set_file_status(file_id, FileStatus::Retrying) {
+                                        Self::process_status_changes(&mut state, changed_items).await;
+                                    }
 
                                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: FileStatus::Retrying }) }));
 
@@ -1042,127 +1028,125 @@ impl DownloadSupervisor {
                                 SupervisorMessage::ServerError(permit, status_code, retry_kind) => {
                                     warn!("Server error ({}). Retrying...", status_code);
 
-                                    let download_id = state.download.id();
                                     let file_id = retry_kind.file_id();
+                                    let mut status_change = None;
 
-                                    let file = match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                        DownloadType::File(file) => file,
-                                        DownloadType::Folder(_) => continue,
-                                    };
+                                    if let Some(file) = state.download.get_file_mut(&file_id) {
+                                        file.increment_retries();
 
-                                    file.increment_retries();
-                                    if file.retries() > 5 { 
-                                        file.set_status(FileStatus::Failed(FileFailureReason::ServerError));
-                                        let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
-                                    } else {
-                                        let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                        if file.retries() > 5 { 
+                                            status_change = Some(FileStatus::Failed(FileFailureReason::ServerError));
+                                        } else {
+                                            let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                        }
+                                    }
+
+                                    if let Some(status_change) = status_change
+                                        && let Some(changed_items) = state.download.set_file_status(file_id, status_change)
+                                    {
+                                        Self::process_status_changes(&mut state, changed_items).await;
                                     }
                                 },
                                 SupervisorMessage::ClientError(permit, status_code, retry_kind) => {
                                     error!("Client error ({}).", status_code);
                                     drop(permit); 
 
-                                    let download_id = state.download.id();
                                     let file_id = retry_kind.file_id();
 
-                                    let file = match state.download.files_mut().get_mut(&file_id).unwrap() {
-                                        DownloadType::File(file) => file,
-                                        DownloadType::Folder(_) => todo!(),
-                                    };
-
-                                    file.set_status(FileStatus::Failed(FileFailureReason::ClientError));
-
-                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
+                                    if let Some(changed_items) = state.download.set_file_status(file_id, FileStatus::Failed(FileFailureReason::ClientError)) {
+                                        Self::process_status_changes(&mut state, changed_items).await;
+                                    }
                                 }
                                 SupervisorMessage::RateLimited(_permit, retry_after, retry_kind) => {
-                                    let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
-                                        DownloadType::File(file) => file,
-                                        DownloadType::Folder(_) => continue,
-                                    };
+                                    let file_id = retry_kind.file_id();
 
                                     warn!("Rate limited for {}.", retry_kind.file_id());
-                                    file.set_status(FileStatus::Waiting(retry_after));
+
+                                    if let Some(changed_items) = state.download.set_file_status(file_id, FileStatus::Waiting(retry_after)) {
+                                        Self::process_status_changes(&mut state, changed_items).await;
+                                    }
                                     
                                     state.retry_queue_count += 1;
                                     let _ = sender.send(SupervisorMessage::RetryReady(retry_kind));
                                     let _ = state.host_sender.send(HostMessage::RateLimited(retry_after));
                                 },
                                 SupervisorMessage::IoError(permit, error, retry_kind) => {
-                                    let download_id = state.download.id();
                                     let file_id = retry_kind.file_id();
+                                    let mut status_change = None;
 
-                                    let file = match state.download.files_mut().get_mut(&retry_kind.file_id()).unwrap() {
-                                        DownloadType::File(file) => file,
-                                        DownloadType::Folder(_) => continue,
-                                    };
-
-                                    match error.kind() {
-                                        // Permanent Errors that should not be retried
-                                        std::io::ErrorKind::NotFound |
-                                        std::io::ErrorKind::PermissionDenied |
-                                        std::io::ErrorKind::NotADirectory |
-                                        std::io::ErrorKind::IsADirectory |
-                                        std::io::ErrorKind::InvalidInput |
-                                        std::io::ErrorKind::AddrInUse |
-                                        std::io::ErrorKind::AddrNotAvailable |
-                                        std::io::ErrorKind::AlreadyExists |
-                                        std::io::ErrorKind::DirectoryNotEmpty |
-                                        std::io::ErrorKind::ReadOnlyFilesystem |
-                                        std::io::ErrorKind::StaleNetworkFileHandle |
-                                        std::io::ErrorKind::InvalidData |
-                                        std::io::ErrorKind::NotSeekable |
-                                        std::io::ErrorKind::CrossesDevices |
-                                        std::io::ErrorKind::TooManyLinks |
-                                        std::io::ErrorKind::InvalidFilename |
-                                        std::io::ErrorKind::ArgumentListTooLong |
-                                        std::io::ErrorKind::Unsupported =>  {
-                                            error!("IO error: {error}");
-                                            file.set_status(FileStatus::Failed(FileFailureReason::DiskError));
-                                            // fail
-                                        }
-                                        
-                                        // Storage errors
-                                        std::io::ErrorKind::WriteZero |
-                                        std::io::ErrorKind::StorageFull |
-                                        std::io::ErrorKind::QuotaExceeded |
-                                        std::io::ErrorKind::FileTooLarge |
-                                        std::io::ErrorKind::OutOfMemory => {
-                                            error!("The system has ran out of storage: {error}");
-                                            file.set_status(FileStatus::Failed(FileFailureReason::DiskError));
-                                            // fail
-                                        },
-
-                                        // Retryiable errors
-                                        std::io::ErrorKind::NetworkUnreachable |
-                                        std::io::ErrorKind::WouldBlock |
-                                        std::io::ErrorKind::ConnectionReset |
-                                        std::io::ErrorKind::ConnectionAborted |
-                                        std::io::ErrorKind::NotConnected |
-                                        std::io::ErrorKind::NetworkDown |
-                                        std::io::ErrorKind::BrokenPipe |
-                                        std::io::ErrorKind::HostUnreachable |
-                                        std::io::ErrorKind::TimedOut |
-                                        std::io::ErrorKind::ResourceBusy |
-                                        std::io::ErrorKind::ExecutableFileBusy |
-                                        std::io::ErrorKind::Deadlock |
-                                        std::io::ErrorKind::Interrupted => {
-                                            warn!("Temporary OS error: {error}. Retrying...");
-
-                                            let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
-                                        },
-                                        
-                                        _ => {
-                                            error!("OS error: {error}.");
-                                            file.increment_retries();
-                                            if file.retries() > 5 { 
-                                                file.set_status(FileStatus::Failed(FileFailureReason::DiskError));
-                                            } else {
-                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                    if let Some(file) = state.download.get_file_mut(&retry_kind.file_id()) {
+                                        match error.kind() {
+                                            // Permanent Errors that should not be retried
+                                            std::io::ErrorKind::NotFound |
+                                            std::io::ErrorKind::PermissionDenied |
+                                            std::io::ErrorKind::NotADirectory |
+                                            std::io::ErrorKind::IsADirectory |
+                                            std::io::ErrorKind::InvalidInput |
+                                            std::io::ErrorKind::AddrInUse |
+                                            std::io::ErrorKind::AddrNotAvailable |
+                                            std::io::ErrorKind::AlreadyExists |
+                                            std::io::ErrorKind::DirectoryNotEmpty |
+                                            std::io::ErrorKind::ReadOnlyFilesystem |
+                                            std::io::ErrorKind::StaleNetworkFileHandle |
+                                            std::io::ErrorKind::InvalidData |
+                                            std::io::ErrorKind::NotSeekable |
+                                            std::io::ErrorKind::CrossesDevices |
+                                            std::io::ErrorKind::TooManyLinks |
+                                            std::io::ErrorKind::InvalidFilename |
+                                            std::io::ErrorKind::ArgumentListTooLong |
+                                            std::io::ErrorKind::Unsupported =>  {
+                                                error!("IO error: {error}");
+                                                status_change = Some(FileStatus::Failed(FileFailureReason::DiskError));
+                                                // fail
                                             }
-                                        },
+                                            
+                                            // Storage errors
+                                            std::io::ErrorKind::WriteZero |
+                                            std::io::ErrorKind::StorageFull |
+                                            std::io::ErrorKind::QuotaExceeded |
+                                            std::io::ErrorKind::FileTooLarge |
+                                            std::io::ErrorKind::OutOfMemory => {
+                                                error!("The system has ran out of storage: {error}");
+                                                status_change = Some(FileStatus::Failed(FileFailureReason::DiskError));
+                                                // fail
+                                            },
+
+                                            // Retryiable errors
+                                            std::io::ErrorKind::NetworkUnreachable |
+                                            std::io::ErrorKind::WouldBlock |
+                                            std::io::ErrorKind::ConnectionReset |
+                                            std::io::ErrorKind::ConnectionAborted |
+                                            std::io::ErrorKind::NotConnected |
+                                            std::io::ErrorKind::NetworkDown |
+                                            std::io::ErrorKind::BrokenPipe |
+                                            std::io::ErrorKind::HostUnreachable |
+                                            std::io::ErrorKind::TimedOut |
+                                            std::io::ErrorKind::ResourceBusy |
+                                            std::io::ErrorKind::ExecutableFileBusy |
+                                            std::io::ErrorKind::Deadlock |
+                                            std::io::ErrorKind::Interrupted => {
+                                                warn!("Temporary OS error: {error}. Retrying...");
+
+                                                let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                            },
+                                            
+                                            _ => {
+                                                error!("OS error: {error}.");
+                                                file.increment_retries();
+                                                if file.retries() > 5 { 
+                                                    status_change = Some(FileStatus::Failed(FileFailureReason::DiskError));
+                                                } else {
+                                                    let _ = sender.send(SupervisorMessage::RetryAfter(permit, Duration::from_secs(5), retry_kind));
+                                                }
+                                            },
+                                        }
                                     }
 
-                                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(FileUpdate::Status { id: file_id, status: file.status() }) }));
+                                    if let Some(status_change) = status_change
+                                        && let Some(changed_items) = state.download.set_file_status(file_id, status_change)
+                                    {
+                                        Self::process_status_changes(&mut state, changed_items).await;
+                                    }
                                 },
                                 SupervisorMessage::Pause => {
                                     info!("Pausing download.");
@@ -1174,30 +1158,39 @@ impl DownloadSupervisor {
                                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::StatusChanged { id: state.download.id(), status: DownloadStatus::Paused }));
                                     
                                     for item in changed_items {
-                                        let item_update = match item {
-                                            ChangedItem::File(file_id) => {
-                                                ItemUpdate::File(
-                                                    FileUpdate::Status { 
-                                                        id: file_id, 
-                                                        status: FileStatus::Paused 
-                                                    }
-                                                )
+                                        let update = match item {
+                                            ChangedItem::File { id, status } => {
+                                                DownloadUpdate::ItemUpdated {
+                                                    id: download_id,
+                                                    item_update: ItemUpdate::File(
+                                                        FileUpdate::Status { 
+                                                            id: id, 
+                                                            status, 
+                                                        }
+                                                    )
+                                                }
                                             },
-                                            ChangedItem::Folder(folder_id) => {
-                                                ItemUpdate::Folder(
-                                                    FolderUpdate::Status { 
-                                                        id: folder_id, 
-                                                        status: DownloadStatus::Paused 
-                                                    }
-                                                )
+                                            ChangedItem::Folder { id, status } => {
+                                                DownloadUpdate::ItemUpdated {
+                                                    id: download_id,
+                                                    item_update: ItemUpdate::Folder(
+                                                        FolderUpdate::Status { 
+                                                            id: id, 
+                                                            status, 
+                                                        }
+                                                    )
+                                                }
+                                            },
+                                            ChangedItem::Download(status) => {
+                                                DownloadUpdate::StatusChanged { 
+                                                    id: download_id, 
+                                                    status 
+                                                }
                                             },
                                         };
 
                                         let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                                            DownloadUpdate::ItemUpdated { 
-                                                id: download_id, 
-                                                item_update 
-                                            }
+                                            update
                                         ));
                                     }
 
@@ -1300,39 +1293,52 @@ impl DownloadSupervisor {
 
     async fn finish_download(state: &mut SupervisorState) {
         let download = &mut state.download;
-        let final_status = download.calculate_final_status();
 
-        info!("Supervisor finishing download '{}' with final status: {:?}", download.name(), final_status);
+        info!("Supervisor finishing download '{}' with final status: {:?}", download.name(), download.status());
 
-        download.set_status(final_status);
         state.app_context.db_manager.write_download(download).await;
 
-        let _ = state.app_context.ui_sender.send(
-            UiStateEvent::AddUpdate(
-                crate::download::DownloadUpdate::StatusChanged { 
-                    id: download.id(), 
-                    status: final_status, 
-                }
-            )
-        );
-
-        let _ = state.host_sender.send(HostMessage::DownloadFinished(download.id()));
+        let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
     }
 
-    /// Called when metadata is successfully fetched. If the download was 
-    /// waiting on this metadata, it shifts the status to InProgress.
-    async fn complete_metadata_fetch(state: &mut SupervisorState) {
-        if state.download.status() == DownloadStatus::FetchingMetadata {
-            state.download.set_status(DownloadStatus::InProgress);
-            
-            let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
-                DownloadUpdate::StatusChanged { 
-                    id: state.download.id(), 
-                    status: DownloadStatus::InProgress 
+    async fn process_status_changes(state: &mut SupervisorState, changed_items: Vec<ChangedItem>) {
+        if changed_items.is_empty() {
+            return;
+        }
+
+        // Save the new statuses to db
+        state.app_context.db_manager.write_download(&state.download).await;
+
+        let download_id = state.download.id();
+
+        // Send every change to db
+        for item in changed_items {
+            match item {
+                ChangedItem::File { id, status } => {
+                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                        DownloadUpdate::ItemUpdated { 
+                            id: download_id, 
+                            item_update: ItemUpdate::File(FileUpdate::Status { id, status }) 
+                        }
+                    ));
+                },
+                ChangedItem::Folder { id, status } => {
+                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                        DownloadUpdate::ItemUpdated { 
+                            id: download_id,
+                            item_update: ItemUpdate::Folder(FolderUpdate::Status { id, status, }) 
+                        }
+                    ));
                 }
-            ));
-            
-            state.app_context.db_manager.write_download(&state.download).await;
+                ChangedItem::Download(status) => {
+                    let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
+                        DownloadUpdate::StatusChanged { 
+                            id: download_id,
+                            status,
+                        }
+                    ));
+                },
+            }
         }
     }
 }
