@@ -107,63 +107,47 @@ impl Download {
     }
 
     pub fn set_paused(&mut self) -> Vec<ChangedItem> {
-        self.status = DownloadStatus::Paused;
-        let mut changed_items = Vec::new();
+        let mut files_to_pause = Vec::new();
 
-        for (_, item) in &mut self.files {
-            match item {
-                DownloadType::File(file) => {
-                    if file.status().is_active() {
-                        file.status = FileStatus::Paused;
-                        changed_items.push(ChangedItem::File {
-                            id: file.id(),
-                            status: file.status(),
-                        });
-                    }
-                },
-                DownloadType::Folder(folder) => {
-                    if folder.status().is_active() {
-                        folder.status = DownloadStatus::Paused;
-                        changed_items.push(ChangedItem::Folder {
-                            id: folder.id(),
-                            status: folder.status(),
-                        });
-                    }
-                },
+        for (&id, item) in &self.files {
+            if let DownloadType::File(file) = item {
+                if file.status().is_active() {
+                    files_to_pause.push(id);
+                }
             }
         }
 
-        changed_items
+        let mut all_changes = Vec::new();
+
+        for id in files_to_pause {
+            if let Some(changes) = self.set_file_status(id, FileStatus::Paused) {
+                all_changes.extend(changes);
+            }
+        }
+
+        all_changes
     }
 
     pub fn set_queued(&mut self) -> Vec<ChangedItem> {
-        self.status = DownloadStatus::Queued;
-        let mut changed_items = Vec::new();
+        let mut files_to_queue = Vec::new();
 
-        for (_, item) in &mut self.files {
-            match item {
-                DownloadType::File(file) => {
-                    if file.status().can_set_to_queue() {
-                        file.status = FileStatus::Queued;
-                        changed_items.push(ChangedItem::File {
-                            id: file.id(),
-                            status: file.status(),
-                        });
-                    }
-                },
-                DownloadType::Folder(folder) => {
-                    if folder.status().can_set_to_queue() {
-                        folder.status = DownloadStatus::Queued;
-                        changed_items.push(ChangedItem::Folder {
-                            id: folder.id(),
-                            status: folder.status(),
-                        });
-                    }
-                },
+        for (&id, item) in &self.files {
+            if let DownloadType::File(file) = item {
+                if file.status().can_set_to_queue() {
+                    files_to_queue.push(id);
+                }
+            }
+        }
+        
+        let mut all_changes = Vec::new();
+
+        for id in files_to_queue {
+            if let Some(changes) = self.set_file_status(id, FileStatus::Queued) {
+                all_changes.extend(changes);
             }
         }
 
-        changed_items
+        all_changes
     }
 
     pub fn set_file_status(&mut self, id: usize, status: FileStatus) -> Option<Vec<ChangedItem>> {
