@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::download::{AsBitVec, DownloadFailureReason, DownloadId, FileSize};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
-use crate::download::status::{DownloadStatus, FileStatus, StateBucket, StateBucketCounters};
+use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::{serialize_hash, serialize_chunks};
 
 pub trait DownloadItem {
@@ -176,7 +176,7 @@ impl Download {
 
         // Parents don't care if the bucket didn't change, as it means they have no need to
         // update their statuses
-        if previous_status_bucket == new_status_bucket && new_status_bucket != StateBucket::Error {
+        if previous_status_bucket == new_status_bucket && new_status_bucket != StatusBucket::Error {
             return Some(changed_items);
         }
 
@@ -215,7 +215,7 @@ impl Download {
             let new_bucket = new_folder_status.bucket();
 
             // No real state change, parents won't care about the change
-            if old_bucket == new_bucket && new_bucket != StateBucket::Error {
+            if old_bucket == new_bucket && new_bucket != StatusBucket::Error {
                 break; 
             }
         
@@ -504,7 +504,7 @@ pub struct FolderDownload {
 }
 
 impl FolderDownload {
-    pub(super) fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<(usize, StateBucket)>, parent_id: Option<usize>) -> Self {
+    pub(super) fn new(folder_task: &FolderTask, parent_relative_path: &Path, id: usize, children: Vec<(usize, StatusBucket)>, parent_id: Option<usize>) -> Self {
         let relative_path = parent_relative_path.join(folder_task.folder_name());
 
         let mut bucket_counters = StateBucketCounters::new();
@@ -529,22 +529,22 @@ impl FolderDownload {
 
     pub fn calculate_status(&self, files_map: &IndexMap<usize, DownloadType>) -> DownloadStatus {
         match self.dominant_status() {
-            Some(StateBucket::Queued) => DownloadStatus::Queued,
-            Some(StateBucket::Initializing) => DownloadStatus::Initializing,
-            Some(StateBucket::FetchingMetadata) => DownloadStatus::FetchingMetadata,
-            Some(StateBucket::InProgress) => DownloadStatus::InProgress,
-            Some(StateBucket::Retrying) => DownloadStatus::Retrying,
-            Some(StateBucket::Waiting) => DownloadStatus::Waiting,
-            Some(StateBucket::Paused) => DownloadStatus::Paused,
-            Some(StateBucket::Completed) => DownloadStatus::Completed,
-            Some(StateBucket::CompletedWithErrors) => DownloadStatus::CompletedWithErrors,
-            Some(StateBucket::Error) => self.resolve_error_status(files_map),
+            Some(StatusBucket::Queued) => DownloadStatus::Queued,
+            Some(StatusBucket::Initializing) => DownloadStatus::Initializing,
+            Some(StatusBucket::FetchingMetadata) => DownloadStatus::FetchingMetadata,
+            Some(StatusBucket::InProgress) => DownloadStatus::InProgress,
+            Some(StatusBucket::Retrying) => DownloadStatus::Retrying,
+            Some(StatusBucket::Waiting) => DownloadStatus::Waiting,
+            Some(StatusBucket::Paused) => DownloadStatus::Paused,
+            Some(StatusBucket::Completed) => DownloadStatus::Completed,
+            Some(StatusBucket::CompletedWithErrors) => DownloadStatus::CompletedWithErrors,
+            Some(StatusBucket::Error) => self.resolve_error_status(files_map),
             None if self.children.is_empty() => DownloadStatus::Completed, 
             None => DownloadStatus::CompletedWithErrors, 
         }
     }
 
-    fn dominant_status(&self) -> Option<StateBucket> {
+    fn dominant_status(&self) -> Option<StatusBucket> {
         let total = self.children.len();
 
         // No children means we are completed, no dominant status
@@ -555,41 +555,41 @@ impl FolderDownload {
         // Active states, if any of any children has an active state, we adopt the state too
         // Order is important
         // If anything is downloading, the folder is downloading
-        if self.bucket_counters.get(StateBucket::InProgress) > 0 {
-            Some(StateBucket::InProgress)
+        if self.bucket_counters.get(StatusBucket::InProgress) > 0 {
+            Some(StatusBucket::InProgress)
         } 
         // If nothing is downloading yet, but we are fetching metadata, the whole folder is fetching
-        else if self.bucket_counters.get(StateBucket::FetchingMetadata) > 0 {
-            Some(StateBucket::FetchingMetadata)
+        else if self.bucket_counters.get(StatusBucket::FetchingMetadata) > 0 {
+            Some(StatusBucket::FetchingMetadata)
         } 
         // If no network IO is happening, but we are allocating space, we are initializing
-        else if self.bucket_counters.get(StateBucket::Initializing) > 0 {
-            Some(StateBucket::Initializing)
+        else if self.bucket_counters.get(StatusBucket::Initializing) > 0 {
+            Some(StatusBucket::Initializing)
         } 
         // If nothing is downloading, but we are retrying a download
-        else if self.bucket_counters.get(StateBucket::Retrying) > 0 {
-            Some(StateBucket::Retrying)
+        else if self.bucket_counters.get(StatusBucket::Retrying) > 0 {
+            Some(StatusBucket::Retrying)
         } 
         // If everything is either waiting or queued
-        else if self.bucket_counters.get(StateBucket::Waiting) > 0 {
-            Some(StateBucket::Waiting)
+        else if self.bucket_counters.get(StatusBucket::Waiting) > 0 {
+            Some(StatusBucket::Waiting)
         } 
         // Every single download that needs to be downloaded is still in queue
-        else if self.bucket_counters.get(StateBucket::Queued) > 0 {
-            Some(StateBucket::Queued)
+        else if self.bucket_counters.get(StatusBucket::Queued) > 0 {
+            Some(StatusBucket::Queued)
         } 
 
         // If no download is active, but some are paused, then we also are paused
-        else if self.bucket_counters.get(StateBucket::Paused) > 0 {
-            Some(StateBucket::Paused)
+        else if self.bucket_counters.get(StatusBucket::Paused) > 0 {
+            Some(StatusBucket::Paused)
         } 
         // If all children share the same status, we too share it
-        else if self.bucket_counters.get(StateBucket::Error) == total {
-            Some(StateBucket::Error)
-        } else if self.bucket_counters.get(StateBucket::Completed) == total {
-            Some(StateBucket::Completed)
-        } else if self.bucket_counters.get(StateBucket::CompletedWithErrors) == total {
-            Some(StateBucket::CompletedWithErrors)
+        else if self.bucket_counters.get(StatusBucket::Error) == total {
+            Some(StatusBucket::Error)
+        } else if self.bucket_counters.get(StatusBucket::Completed) == total {
+            Some(StatusBucket::Completed)
+        } else if self.bucket_counters.get(StatusBucket::CompletedWithErrors) == total {
+            Some(StatusBucket::CompletedWithErrors)
         } 
         // There is no dominant status that exists 
         else {

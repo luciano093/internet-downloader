@@ -21,7 +21,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
 use crate::download::items::{ChangedItem, Download, DownloadItem, DownloadType};
-use crate::download::status::{DownloadStatus, FileStatus, StateBucket};
+use crate::download::status::{DownloadStatus, FileStatus, StatusBucket};
 use crate::download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
 use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
@@ -533,29 +533,29 @@ impl DownloadSupervisor {
             let download_status = match state.download.files().get(&0) {
                 Some(DownloadType::File(file)) => file.status().bucket(),
                 Some(DownloadType::Folder(folder)) => folder.status().bucket(),
-                None => StateBucket::Completed, // Download has nothing inside, so we must be completed
+                None => StatusBucket::Completed, // Download has nothing inside, so we must be completed
             };
 
             match download_status {
-                StateBucket::InProgress | 
-                StateBucket::FetchingMetadata | 
-                StateBucket::Initializing | 
-                StateBucket::Retrying | 
-                StateBucket::Queued |
-                StateBucket::Waiting => { },
+                StatusBucket::InProgress | 
+                StatusBucket::FetchingMetadata | 
+                StatusBucket::Initializing | 
+                StatusBucket::Retrying | 
+                StatusBucket::Queued |
+                StatusBucket::Waiting => { },
 
-                StateBucket::Paused |
-                StateBucket::Error |
-                StateBucket::CompletedWithErrors |
-                StateBucket::Completed => {
+                StatusBucket::Paused |
+                StatusBucket::Error |
+                StatusBucket::CompletedWithErrors |
+                StatusBucket::Completed => {
                     warn!("A supervisor for download '{}' was spawned, but its status is {:?}. Halting.", state.download.name(), download_status);
 
                     // We set demand to 0 just in case to prevent host manager sending us any more permits
                     demand.store(0, Ordering::SeqCst);
                     let _ = state.host_sender.send(HostMessage::DownloadHalted(state.download.id()));
 
-                    if download_status == StateBucket::Completed
-                        || download_status == StateBucket::CompletedWithErrors
+                    if download_status == StatusBucket::Completed
+                        || download_status == StatusBucket::CompletedWithErrors
                     {
                         Self::finish_download(&mut state).await;
                     }

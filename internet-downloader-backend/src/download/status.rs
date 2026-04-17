@@ -64,23 +64,23 @@ impl DownloadStatus {
         }
     }
 
-    pub fn bucket(&self) -> StateBucket {
+    pub fn bucket(&self) -> StatusBucket {
         match self {
-            Self::Queued => StateBucket::Queued,
-            Self::Initializing => StateBucket::Initializing,
-            Self::FetchingMetadata => StateBucket::FetchingMetadata,
-            Self::InProgress => StateBucket::InProgress,
-            Self::Retrying => StateBucket::Retrying,
-            Self::Waiting => StateBucket::Waiting,
+            Self::Queued => StatusBucket::Queued,
+            Self::Initializing => StatusBucket::Initializing,
+            Self::FetchingMetadata => StatusBucket::FetchingMetadata,
+            Self::InProgress => StatusBucket::InProgress,
+            Self::Retrying => StatusBucket::Retrying,
+            Self::Waiting => StatusBucket::Waiting,
 
-            Self::Completed => StateBucket::Completed,
+            Self::Completed => StatusBucket::Completed,
 
-            Self::CompletedWithErrors => StateBucket::CompletedWithErrors,
+            Self::CompletedWithErrors => StatusBucket::CompletedWithErrors,
 
             Self::Failed(_) | 
-            Self::NotFound => StateBucket::Error,
+            Self::NotFound => StatusBucket::Error,
             
-            Self::Paused => StateBucket::Paused,
+            Self::Paused => StatusBucket::Paused,
         }
     }
 }
@@ -88,7 +88,7 @@ impl DownloadStatus {
 // EnumCount can be changed to std::mem::variant_count whenever it stabilizes its const api
 #[derive(Debug, Clone, Copy, EnumCount, PartialEq)]
 #[repr(usize)] // This allows us to use each enum as an index in an array
-pub enum StateBucket {
+pub enum StatusBucket {
     Queued,
     Initializing,
     FetchingMetadata,
@@ -101,7 +101,7 @@ pub enum StateBucket {
     Paused,
 }
 
-const BUCKET_COUNT: usize = StateBucket::COUNT;
+const BUCKET_COUNT: usize = StatusBucket::COUNT;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateBucketCounters {
@@ -115,15 +115,15 @@ impl StateBucketCounters {
         }
     }
 
-    pub fn increment(&mut self, bucket: StateBucket) {
+    pub fn increment(&mut self, bucket: StatusBucket) {
         self.data[bucket as usize] += 1;
     }
 
-    pub fn decrement(&mut self, bucket: StateBucket) {
+    pub fn decrement(&mut self, bucket: StatusBucket) {
         let _ = self.data[bucket as usize].saturating_sub(1);
     }
 
-    pub fn get(&self, bucket: StateBucket) -> usize {
+    pub fn get(&self, bucket: StatusBucket) -> usize {
         self.data[bucket as usize]
     }
 }
@@ -192,21 +192,21 @@ impl FileStatus {
         }
     }
 
-    pub fn bucket(&self) -> StateBucket {
+    pub fn bucket(&self) -> StatusBucket {
         match self {
-            Self::Queued => StateBucket::Queued,
-            Self::Initializing => StateBucket::Initializing,
-            Self::FetchingMetadata => StateBucket::FetchingMetadata,
-            Self::InProgress => StateBucket::InProgress,
-            Self::Retrying => StateBucket::Retrying,
-            Self::Waiting(_) => StateBucket::Waiting,
+            Self::Queued => StatusBucket::Queued,
+            Self::Initializing => StatusBucket::Initializing,
+            Self::FetchingMetadata => StatusBucket::FetchingMetadata,
+            Self::InProgress => StatusBucket::InProgress,
+            Self::Retrying => StatusBucket::Retrying,
+            Self::Waiting(_) => StatusBucket::Waiting,
 
-            Self::Completed => StateBucket::Completed,
+            Self::Completed => StatusBucket::Completed,
 
             Self::Failed(_) | 
-            Self::NotFound => StateBucket::Error,
+            Self::NotFound => StatusBucket::Error,
             
-            Self::Paused => StateBucket::Paused,
+            Self::Paused => StatusBucket::Paused,
         }
     }
 }
