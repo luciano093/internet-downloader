@@ -118,15 +118,14 @@ impl StateManager {
         .map_err(StateManagerError::TableCreationError)?;
 
         let default_settings = AppSettings::default();
-        let default_blob = rkyv::to_bytes::<rkyv::rancor::Error>(&default_settings).unwrap().into_vec();
 
         sqlx::query(
             r#"
-            INSERT OR IGNORE INTO app_settings (id, settings_blob) 
+            INSERT OR IGNORE INTO app_settings (id, global_speed_limit) 
             VALUES (1, ?)
             "#
         )
-        .bind(default_blob)
+        .bind(default_settings.global_speed_limit.map(|speed| speed as i64))
         .execute(&self.pool)
         .await
         .unwrap();
