@@ -191,7 +191,7 @@ impl Default for StateBucketCounters {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
 #[strum(serialize_all = "snake_case")]
@@ -199,6 +199,7 @@ impl Default for StateBucketCounters {
 #[strum_discriminants(name(FileStatusParse))] 
 #[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum FileStatus {
+    #[default]
     Queued,
     Initializing,
     FetchingMetadata,
@@ -271,19 +272,19 @@ impl FileStatus {
         }
     }
 
-    pub fn from_db_columns(status: &str, file_failure_reason: Option<&str>, wait_time: Option<i64>) -> Self {
+    pub fn from_db_columns(status: &str, file_failure_reason: Option<&str>, wait_time: Option<i64>) -> Option<Self> {
         if let Some(file_failure_reason) = file_failure_reason {
-            let inner_reason = FileFailureReason::from_str(file_failure_reason).unwrap();
-            return Self::Failed(inner_reason);
+            let inner_reason = FileFailureReason::from_str(file_failure_reason).unwrap_or_default();
+            return Some(Self::Failed(inner_reason));
         }
 
         if let Some(wait_time) = wait_time {
-            return Self::Waiting(Some(wait_time as u64));
+            return Some(Self::Waiting(Some(wait_time as u64)));
         }
 
-         let parsed_reason = FileStatusParse::from_str(status).unwrap();
+         let parsed_reason = FileStatusParse::from_str(status).ok()?;
 
-        match parsed_reason {
+        Some(match parsed_reason {
             FileStatusParse::Queued => Self::Queued,
             FileStatusParse::Initializing => Self::Initializing,
             FileStatusParse::FetchingMetadata => Self::FetchingMetadata,
@@ -295,8 +296,8 @@ impl FileStatus {
             
             // Fallback if for some reason we still get here
             FileStatusParse::Failed |
-            FileStatusParse::Waiting => Self::Queued,
-        }
+            FileStatusParse::Waiting => return None,
+        })
     }
 
     pub fn to_db_columns(&self) -> (&'static str, Option<&'static str>, Option<i64>) {

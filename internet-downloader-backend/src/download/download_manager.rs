@@ -641,7 +641,7 @@ async fn hash_file(path: PathBuf) -> u128 {
     }).await.expect("Hashing task panicked")
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumString)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumString, Default)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
@@ -653,6 +653,8 @@ pub enum FileFailureReason {
     ServerError,
     MetadataFetchError,
     BadPath,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]

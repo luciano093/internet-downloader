@@ -439,7 +439,7 @@ impl FileDownload {
             chunks.truncate(len as usize);
         }
 
-        let mut status = FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time);
+        let mut status = FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time).unwrap_or_default();
 
         let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
             .unwrap_or_else(|| {

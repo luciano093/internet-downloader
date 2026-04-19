@@ -488,7 +488,7 @@ fn reconstruct_file_tree(item_rows: Vec<DownloadItemRow>) -> IndexMap<usize, Dow
                 .push(row.item_id as usize);
 
             let bucket = if row.item_type == "file" {
-                FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time).bucket()
+                FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time).unwrap_or_default().bucket()
             } else {
                 DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref()).unwrap_or_default().bucket()
             };
