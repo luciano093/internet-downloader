@@ -652,6 +652,7 @@ pub enum FileFailureReason {
     ClientError,
     ServerError,
     MetadataFetchError,
+    BadPath,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]

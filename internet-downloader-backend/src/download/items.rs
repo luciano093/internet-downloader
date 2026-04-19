@@ -9,7 +9,7 @@ use os_str_bytes::OsStringBytes;
 use serde::{Deserialize, Serialize};
 
 use crate::db::rows::{DownloadItemRow, DownloadRow};
-use crate::download::{DownloadFailureReason, DownloadId, FileSize};
+use crate::download::{DownloadFailureReason, DownloadId, FileFailureReason, FileSize};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::{serialize_hash, serialize_chunks};
@@ -417,16 +417,20 @@ impl FileDownload {
     pub fn from_db(row: DownloadItemRow) -> Self {
         // Reconstruct the FileSize
         let size = match row.size_type.as_deref() {
-            Some("known") => Some(FileSize::Known(row.size_bytes.unwrap() as u64)),
+            Some("known") if let Some(size_bytes) = row.size_bytes => Some(FileSize::Known(size_bytes as u64)),
             Some("unknown") => Some(FileSize::Unknown),
-            _ => None,
+
+            // If we have a known size, but the size was corrupted from the db, set it as None to fetch it again
+            Some("known") | Some(_) | None => None,
         };
 
         // Reconstruct the Hash
-        let hash = row.hash.map(|b| {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(&b[0..16]);
-            u128::from_be_bytes(arr)
+        let hash = row.hash.and_then(|bytes| {
+            let slice = bytes.get(0..16)?;
+            
+            let array: [u8; 16] = slice.try_into().ok()?; 
+
+            Some(u128::from_be_bytes(array))
         });
 
         // Reconstruct the Chunks (BitVec)
@@ -435,13 +439,22 @@ impl FileDownload {
             chunks.truncate(len as usize);
         }
 
+        let mut status = FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time);
+
+        let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
+            .unwrap_or_else(|| {
+                status = FileStatus::Failed(FileFailureReason::BadPath);
+            
+                PathBuf::new()
+            });
+
         Self {
             parent_id: row.parent_id.map(|id| id as usize),
             id: row.item_id as usize,
             url: Arc::new(row.url.unwrap_or_default()),
             file_name: row.name,
-            relative_path: PathBuf::from_io_vec(row.relative_path_raw).unwrap(),
-            status: FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time),
+            relative_path,
+            status,
             hash,
             chunks,
             size,
