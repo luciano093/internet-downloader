@@ -3,7 +3,6 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use strum::EnumCount;
 use strum_macros::{EnumCount, EnumDiscriminants, EnumString, IntoStaticStr};
-use strum_macros;
 
 use crate::download::{DownloadFailureReason, FileFailureReason};
 
