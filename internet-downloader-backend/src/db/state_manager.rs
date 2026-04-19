@@ -356,16 +356,17 @@ impl StateManager {
         result.unwrap_or(false)
     }
 
-    pub async fn load_app_settings(&self) -> Result<AppSettings, sqlx::Error> {
-        let global_row = sqlx::query_as::<_, GlobalSettingsRow>("SELECT global_speed_limit FROM app_settings WHERE id = 1")
+    pub async fn load_app_settings(&self) -> Result<Option<AppSettings>, sqlx::Error> {
+        let Some(global_row) = sqlx::query_as::<_, GlobalSettingsRow>("SELECT global_speed_limit FROM app_settings WHERE id = 1")
             .fetch_optional(&self.pool)
-            .await
-            .unwrap()
-            .unwrap();
+            .await? 
+        else {
+            return Ok(None);
+        };
 
         let host_rows = sqlx::query_as::<_, HostSettingsRow>("SELECT host, speed_limit FROM host_settings")
             .fetch_all(&self.pool)
-            .await.unwrap();
+            .await?;
         
         let joined_download_settings_rows = sqlx::query_as::<_, JoinedDownloadSettingsRow>(
             r#"
@@ -381,7 +382,7 @@ impl StateManager {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(AppSettings::from_db(global_row, host_rows, joined_download_settings_rows))
+        Ok(Some(AppSettings::from_db(global_row, host_rows, joined_download_settings_rows)))
     }
 
     pub async fn write_app_settings(&self, app_settings: &AppSettings) {
