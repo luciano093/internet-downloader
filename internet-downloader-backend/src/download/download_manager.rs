@@ -654,7 +654,7 @@ pub enum FileFailureReason {
     MetadataFetchError,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
@@ -672,18 +672,20 @@ pub enum DownloadFailureReason {
     AllFilesFailed(FileFailureReason),
     FilesMissingFromDisk,
     StateDesynchronized,
+    #[default]
+    Unknown,
 }
 
 impl DownloadFailureReason {
-    pub fn from_db_string(reason_str: &str) -> Self {
+    pub fn from_db_string(reason_str: &str) -> Option<Self> {
         if let Some((_prefix, inner_str)) = reason_str.split_once(':') {
-            let inner_reason = FileFailureReason::from_str(inner_str).unwrap();
-            return Self::AllFilesFailed(inner_reason);
+            let inner_reason = FileFailureReason::from_str(inner_str).ok()?;
+            return Some(Self::AllFilesFailed(inner_reason));
         }
         
-        let parsed_reason = DownloadFailureReasonParse::from_str(reason_str).unwrap();
+        let parsed_reason = DownloadFailureReasonParse::from_str(reason_str).ok()?;
 
-        match parsed_reason {
+        let reason = Some(match parsed_reason {
             DownloadFailureReasonParse::HashMismatch => Self::HashMismatch,
             DownloadFailureReasonParse::DiskError => Self::DiskError,
             DownloadFailureReasonParse::ClientError => Self::ClientError,
@@ -692,10 +694,13 @@ impl DownloadFailureReason {
             DownloadFailureReasonParse::MultipleErrors => Self::MultipleErrors,
             DownloadFailureReasonParse::FilesMissingFromDisk => Self::FilesMissingFromDisk,
             DownloadFailureReasonParse::StateDesynchronized => Self::StateDesynchronized,
+            DownloadFailureReasonParse::Unknown => Self::Unknown,
             
             // Fallback if for some reason we still get here
-            DownloadFailureReasonParse::AllFilesFailed =>Self::ClientError,
-        }
+            DownloadFailureReasonParse::AllFilesFailed => return None,
+        });
+
+        reason
     }
 }
 

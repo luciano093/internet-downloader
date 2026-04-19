@@ -7,7 +7,7 @@ use strum_macros;
 
 use crate::download::{DownloadFailureReason, FileFailureReason};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
 #[strum(serialize_all = "snake_case")]
@@ -15,6 +15,7 @@ use crate::download::{DownloadFailureReason, FileFailureReason};
 #[strum_discriminants(name(DownloadStatusParse))] 
 #[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum DownloadStatus {
+    #[default]
     Queued,
     Initializing,
     FetchingMetadata,
@@ -30,17 +31,16 @@ pub enum DownloadStatus {
 
 
 impl DownloadStatus {
-    pub fn from_db_columns(status: &str, failure_reason: Option<&str>) -> Self {
+    pub fn from_db_columns(status: &str, failure_reason: Option<&str>) -> Option<Self> {
         if let Some(reason_str) = failure_reason {
-            let reason = DownloadFailureReason::from_db_string(reason_str);
-            return Self::Failed(reason);
+            let reason = DownloadFailureReason::from_db_string(reason_str).unwrap_or_default();
+            return Some(Self::Failed(reason));
         }
 
         // If we fail to deserialize, we fallback to Queued
-        let parsed_state = DownloadStatusParse::from_str(status)
-            .unwrap_or(DownloadStatusParse::Queued);
+        let parsed_state = DownloadStatusParse::from_str(status).ok()?;
 
-        match parsed_state {
+        Some(match parsed_state {
             DownloadStatusParse::Queued => Self::Queued,
             DownloadStatusParse::Initializing => Self::Initializing,
             DownloadStatusParse::FetchingMetadata => Self::FetchingMetadata,
@@ -53,8 +53,8 @@ impl DownloadStatus {
             DownloadStatusParse::Waiting => Self::Waiting,
             
             // Fallback if for some reason we still get Failed here
-            DownloadStatusParse::Failed => Self::Queued, 
-        }
+            DownloadStatusParse::Failed => return None, 
+        })
     }
 
     /// Returns true if download is actively downloading or waiting to be downloaded.
