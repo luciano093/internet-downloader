@@ -672,6 +672,7 @@ pub enum DownloadFailureReason {
     AllFilesFailed(FileFailureReason),
     FilesMissingFromDisk,
     StateDesynchronized,
+    BadPath,
     #[default]
     Unknown,
 }
@@ -695,6 +696,7 @@ impl DownloadFailureReason {
             DownloadFailureReasonParse::FilesMissingFromDisk => Self::FilesMissingFromDisk,
             DownloadFailureReasonParse::StateDesynchronized => Self::StateDesynchronized,
             DownloadFailureReasonParse::Unknown => Self::Unknown,
+            DownloadFailureReasonParse::BadPath => Self::BadPath,
             
             // Fallback if for some reason we still get here
             DownloadFailureReasonParse::AllFilesFailed => return None,

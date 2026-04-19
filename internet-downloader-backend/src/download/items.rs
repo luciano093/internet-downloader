@@ -264,11 +264,21 @@ impl Download {
     }
 
     pub fn from_db(row: DownloadRow, files: IndexMap<usize, DownloadType>) -> Self {
+        let mut status = DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref())
+            .unwrap_or_default();
+
+        let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
+            .unwrap_or_else(|| {
+                status = DownloadStatus::Failed(DownloadFailureReason::BadPath);
+            
+                PathBuf::new()
+            });
+
         Self {
             id: DownloadId(row.id as usize),
             url: row.url,
-            relative_path: PathBuf::from_io_vec(row.relative_path_raw).unwrap(),
-            status: DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref()).unwrap_or_default(),
+            relative_path,
+            status,
             files,
             name: row.name,
         }
