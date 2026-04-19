@@ -128,7 +128,7 @@ impl StateManager {
         .bind(default_settings.global_speed_limit.map(|speed| speed as i64))
         .execute(&self.pool)
         .await
-        .unwrap();
+        .map_err(StateManagerError::TableCreationError)?;
 
         Ok(())
     }
