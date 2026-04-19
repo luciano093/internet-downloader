@@ -150,7 +150,9 @@ impl StateManager {
             r#"
             INSERT INTO downloads (id, url, name, relative_path_raw, relative_path, status, failure_reason) 
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET 
+            ON CONFLICT(id) DO UPDATE SET
+                url = excluded.url,
+                name = excluded.name,
                 relative_path_raw = excluded.relative_path_raw,
                 relative_path = excluded.relative_path,
                 status = excluded.status, 
@@ -176,7 +178,7 @@ impl StateManager {
         let mut files_iter = download.files.iter().peekable();
 
         while files_iter.peek().is_some() {
-            let mut builder: QueryBuilder<Sqlite> = QueryBuilder::new(
+            let mut builder = QueryBuilder::new(
                 "INSERT INTO download_items (
                     download_id, item_id, parent_id, item_type, 
                     name, relative_path_raw, relative_path, 
