@@ -1,3 +1,5 @@
+use indexmap::IndexMap;
+
 use crate::download::{items::{Download, DownloadType, FileDownload, FolderDownload}, status::StateBucketCounters};
 
 #[derive(sqlx::FromRow)]
@@ -12,8 +14,8 @@ pub struct DownloadRow {
 }
 
 impl DownloadRow {
-    pub fn into_download(self) -> Download {
-        todo!()
+    pub fn into_download(self, files: IndexMap<usize, DownloadType>) -> Download {
+        Download::from_db(self, files)
     }
 }
 
