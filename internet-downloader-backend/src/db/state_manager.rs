@@ -80,6 +80,19 @@ impl StateManager {
 
                 -- Ensures every parent id exists in the download_id we are referencing
                 FOREIGN KEY (download_id, parent_id) REFERENCES download_items(download_id, item_id) ON DELETE CASCADE
+
+                -- Size constraints
+                CONSTRAINT check_size_logic CHECK (
+                    (size_type = 'known' AND size_bytes IS NOT NULL) OR 
+                    (size_type = 'unknown' AND size_bytes IS NULL) OR
+                    (size_type IS NULL AND size_bytes IS NULL)
+                ), 
+
+                -- Hash constraints
+                CONSTRAINT check_hash_length CHECK (hash IS NULL OR length(hash) = 16)
+
+                -- Item type constraint
+                CONSTRAINT check_item_type CHECK (item_type IN ('file', 'folder'))
             );
 
             CREATE INDEX IF NOT EXISTS idx_download_items_parent ON download_items(download_id, parent_id);
