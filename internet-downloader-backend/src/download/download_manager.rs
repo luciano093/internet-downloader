@@ -15,7 +15,7 @@ use rkyv::vec::{ArchivedVec, VecResolver};
 use rkyv::Place;
 use rkyv::with::ArchiveWith;
 use serde::{Deserialize, Serialize, Serializer};
-use strum_macros::{EnumString, IntoStaticStr};
+use strum_macros::{EnumDiscriminants, EnumString, IntoStaticStr};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
@@ -660,11 +660,14 @@ pub enum FileFailureReason {
     MetadataFetchError,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, IntoStaticStr, EnumString)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, IntoStaticStr, EnumDiscriminants)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
 #[strum(serialize_all = "snake_case")]
+#[strum_discriminants(derive(EnumString, IntoStaticStr))]
+#[strum_discriminants(name(DownloadFailureReasonParse))] 
+#[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum DownloadFailureReason {
     HashMismatch,
     DiskError,
@@ -672,7 +675,6 @@ pub enum DownloadFailureReason {
     ServerError,
     MetadataFetchError,
     MultipleErrors,
-    #[strum(disabled)]
     AllFilesFailed(FileFailureReason),
     FilesMissingFromDisk,
     StateDesynchronized,
@@ -685,7 +687,21 @@ impl DownloadFailureReason {
             return Self::AllFilesFailed(inner_reason);
         }
         
-        Self::from_str(reason_str).unwrap()
+        let parsed_reason = DownloadFailureReasonParse::from_str(reason_str).unwrap();
+
+        match parsed_reason {
+            DownloadFailureReasonParse::HashMismatch => Self::HashMismatch,
+            DownloadFailureReasonParse::DiskError => Self::DiskError,
+            DownloadFailureReasonParse::ClientError => Self::ClientError,
+            DownloadFailureReasonParse::ServerError => Self::ServerError,
+            DownloadFailureReasonParse::MetadataFetchError => Self::MetadataFetchError,
+            DownloadFailureReasonParse::MultipleErrors => Self::MultipleErrors,
+            DownloadFailureReasonParse::FilesMissingFromDisk => Self::FilesMissingFromDisk,
+            DownloadFailureReasonParse::StateDesynchronized => Self::StateDesynchronized,
+            
+            // Fallback if for some reason we still get here
+            DownloadFailureReasonParse::AllFilesFailed =>Self::ClientError,
+        }
     }
 }
 
