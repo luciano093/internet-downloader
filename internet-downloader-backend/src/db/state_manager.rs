@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 use os_str_bytes::OsStrBytes;
-use sqlx::{QueryBuilder, Sqlite, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{QueryBuilder, SqlitePool, sqlite::SqlitePoolOptions};
 use thiserror::Error;
 
-use crate::{db::rows::{DownloadItemRow, DownloadRow}, download::{AppSettings, DownloadId, FileSize, items::{Download, DownloadItem, DownloadType}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
+use crate::{db::rows::{DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, DownloadId, FileSize, items::{Download, DownloadItem, DownloadType}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
@@ -84,10 +84,32 @@ impl StateManager {
 
             CREATE INDEX IF NOT EXISTS idx_download_items_parent ON download_items(download_id, parent_id);
 
+            -- AppSettings
             CREATE TABLE IF NOT EXISTS app_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                settings_blob BLOB NOT NULL,
-                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                global_speed_limit INTEGER
+            );
+
+            -- HostSettings
+            CREATE TABLE IF NOT EXISTS host_settings (
+                host TEXT PRIMARY KEY,
+                speed_limit INTEGER
+            );
+
+            -- DownloadSettings
+            CREATE TABLE IF NOT EXISTS download_settings (
+                download_id INTEGER PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
+                speed_limit INTEGER
+            );
+
+            -- FileSettings
+            CREATE TABLE IF NOT EXISTS file_settings (
+                download_id INTEGER NOT NULL,
+                item_id INTEGER NOT NULL,
+                speed_limit INTEGER,
+                
+                PRIMARY KEY (download_id, item_id),
+                FOREIGN KEY (download_id, item_id) REFERENCES download_items(download_id, item_id) ON DELETE CASCADE
             );
             "#
         )
@@ -333,15 +355,121 @@ impl StateManager {
         result.unwrap_or(false)
     }
 
-    pub async fn write_app_settings(&self, app_settings: &AppSettings) {
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(app_settings).unwrap();
+    pub async fn load_app_settings(&self) -> Result<AppSettings, sqlx::Error> {
+        let global_row = sqlx::query_as::<_, GlobalSettingsRow>("SELECT global_speed_limit FROM app_settings WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap()
+            .unwrap();
 
-        sqlx::query("INSERT OR REPLACE INTO app_settings (id, settings_blob) VALUES (?, ?)")
-            .bind(1i64) 
-            .bind(bytes.as_slice())
-            .execute(&self.pool)
+        let host_rows = sqlx::query_as::<_, HostSettingsRow>("SELECT host, speed_limit FROM host_settings")
+            .fetch_all(&self.pool)
+            .await.unwrap();
+        
+        let joined_download_settings_rows = sqlx::query_as::<_, JoinedDownloadSettingsRow>(
+            r#"
+            SELECT 
+                download.download_id, 
+                download.speed_limit AS download_speed_limit,
+                file.item_id, 
+                file.speed_limit AS file_speed_limit
+            FROM download_settings download
+            LEFT JOIN file_settings file ON download.download_id = file.download_id
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(AppSettings::from_db(global_row, host_rows, joined_download_settings_rows))
+    }
+
+    pub async fn write_app_settings(&self, app_settings: &AppSettings) {
+        let mut transaction = self.pool.begin().await.unwrap();
+
+        sqlx::query("PRAGMA defer_foreign_keys = ON")
+            .execute(&mut *transaction)
             .await
             .unwrap();
+
+        sqlx::query(r#"
+            INSERT INTO app_settings (id, global_speed_limit)
+            VALUES (1, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                global_speed_limit = excluded.global_speed_limit
+        "#)
+        .bind(app_settings.global_speed_limit.map(|speed_limit| speed_limit as i64))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+
+        if !app_settings.host_settings.is_empty() {
+            let mut host_builder = QueryBuilder::new(r#"
+                INSERT INTO host_settings (host, speed_limit)
+            "#);
+
+            host_builder.push_values(&app_settings.host_settings, |mut builder, (host, host_settings)| {
+                builder.push_bind(host);
+                builder.push_bind(host_settings.speed_limit.map(|speed_limit| speed_limit as i64));
+            });
+
+            host_builder.push(r#"
+                ON CONFLICT(host) DO UPDATE SET
+                    speed_limit = excluded.speed_limit
+            "#);
+
+            let host_query = host_builder.build();
+            host_query.execute(&mut *transaction).await.unwrap();
+        }
+
+        if !app_settings.download_settings.is_empty() {
+            let mut downloads_builder = QueryBuilder::new(r#"
+                INSERT INTO download_settings (download_id, speed_limit)
+            "#);
+
+            downloads_builder.push_values(&app_settings.download_settings, |mut builder, (download_id, download_settings)| {
+                builder
+                    .push_bind(**download_id as i64)
+                    .push_bind(download_settings.speed_limit.map(|speed_limit| speed_limit as i64));
+            });
+
+            downloads_builder.push(r#"
+                ON CONFLICT(download_id) DO UPDATE SET
+                    speed_limit = excluded.speed_limit
+            "#);
+
+            let downloads_query = downloads_builder.build();
+            downloads_query.execute(&mut *transaction).await.unwrap();
+        }
+
+        let has_any_files = app_settings.download_settings.values().any(|d| !d.file_settings.is_empty());
+
+        if has_any_files {
+            let mut files_builder = QueryBuilder::new(r#"
+                INSERT INTO file_settings (download_id, item_id, speed_limit)
+            "#);
+
+            let all_files_iterator = app_settings.download_settings.iter().flat_map(|(download_id, download_settings)| {
+                download_settings.file_settings.iter().map(move |(file_id, file_settings)| {
+                    (download_id, file_id, file_settings)
+                })
+            });
+
+            files_builder.push_values(all_files_iterator, |mut builder, (download_id, file_id, file_settings)| {
+                builder.push_bind(**download_id as i64)
+                .push_bind(*file_id as i64)
+                .push_bind(file_settings.speed_limit.map(|speed_limit| speed_limit as i64));
+            });
+
+            files_builder.push(r#"
+                ON CONFLICT(download_id, item_id) DO UPDATE SET
+                    speed_limit = excluded.speed_limit
+            "#);
+
+            let files_query = files_builder.build();
+            files_query.execute(&mut *transaction).await.unwrap();
+        }
+
+        transaction.commit().await.unwrap();
     }
 }
 

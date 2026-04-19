@@ -24,6 +24,7 @@ use url::Host;
 
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
+use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
 use crate::download::items::{Download, DownloadItem, DownloadType};
 use crate::download::status::{DownloadStatus, FileStatus};
 use crate::download_writer_manager::DownloadWriterManager;
@@ -243,6 +244,40 @@ impl AppSettings {
 
     pub fn get_download_settings(&self, download_id: DownloadId) -> Option<DownloadSettings> {
         self.download_settings.get(&download_id).cloned()
+    }
+
+    pub fn from_db(global_settings_row: GlobalSettingsRow, host_settings_rows: Vec<HostSettingsRow>, joined_download_settings: Vec<JoinedDownloadSettingsRow>) -> Self {
+        let mut host_settings = HashMap::new();
+
+        for row in host_settings_rows {
+            let host_settings_object = HostSettings {
+                speed_limit: row.speed_limit.map(|speed_limit| speed_limit as u64),
+            };
+
+            host_settings.insert(row.host, host_settings_object);
+        }
+
+        let mut download_settings = HashMap::new();
+
+        for row in joined_download_settings {
+            let download_settings_object = download_settings.entry(DownloadId(row.download_id as usize)).or_insert_with(|| 
+                DownloadSettings {
+                    speed_limit: row.download_speed_limit.map(|speed_limit| speed_limit as u64),
+                    file_settings: HashMap::new()
+                });
+
+            if let Some(item_id) = row.item_id {
+                download_settings_object.file_settings.insert(item_id as usize, 
+                    FileSettings { speed_limit: row.file_speed_limit.map(|speed_limit| speed_limit as u64) }
+                );
+            }
+        }
+
+        Self {
+            global_speed_limit: global_settings_row.global_speed_limit.map(|speed_limit| speed_limit as u64),
+            download_settings: download_settings,
+            host_settings: host_settings,
+        }
     }
 }
 

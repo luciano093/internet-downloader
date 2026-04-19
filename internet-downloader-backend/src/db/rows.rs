@@ -51,3 +51,38 @@ impl DownloadItemRow {
         }
     }
 }
+
+#[derive(sqlx::FromRow)]
+pub struct GlobalSettingsRow {
+    pub global_speed_limit: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+pub struct HostSettingsRow {
+    pub host: String,
+    pub speed_limit: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+pub struct DownloadSettingsRow {
+    pub download_id: i64,
+    pub speed_limit: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+pub struct FileSettingsRow {
+    pub download_id: i64,
+    pub item_id: i64,
+    pub speed_limit: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+pub struct JoinedDownloadSettingsRow {
+    // Download settings fields
+    pub download_id: i64,
+    pub download_speed_limit: Option<i64>,
+    
+    // File settings fields (wrapped in Option because of left join)
+    pub item_id: Option<i64>,
+    pub file_speed_limit: Option<i64>,
+}
