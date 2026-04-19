@@ -6,11 +6,10 @@ use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
 use os_str_bytes::OsStringBytes;
-use rkyv::with::{AsString, Skip};
 use serde::{Deserialize, Serialize};
 
 use crate::db::rows::{DownloadItemRow, DownloadRow};
-use crate::download::{AsBitVec, DownloadFailureReason, DownloadId, FileSize};
+use crate::download::{DownloadFailureReason, DownloadId, FileSize};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::{serialize_hash, serialize_chunks};
@@ -33,11 +32,10 @@ pub enum ChangedItem {
 }
 
 /// Has either a file or folder as the only item in root
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Download {
     id: DownloadId,
     url: String,
-    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: DownloadStatus,
     pub(crate) files: IndexMap<usize, DownloadType>,
@@ -277,7 +275,7 @@ impl Download {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DownloadType {
     File(FileDownload),
@@ -338,19 +336,17 @@ impl DownloadItem for DownloadType {
 }
 
 
-#[derive(Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct FileDownload {
     parent_id: Option<usize>,
     id: usize,
     url: Arc<String>,
     file_name: String,
-    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: FileStatus,
     #[serde(serialize_with = "serialize_hash")] 
     hash: Option<u128>,
     #[serde(serialize_with = "serialize_chunks")]
-    #[rkyv(with = AsBitVec)]
     chunks: BitVec<u8, Msb0>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     #[serde(skip)]
@@ -539,19 +535,17 @@ impl FileDownload {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FolderDownload {
     parent_id: Option<usize>,
     id: usize,
     folder_name: String,
-    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: DownloadStatus,
     children: Vec<usize>,
 
     // Counters to keep track of children statuses without having to recalculate them
     #[serde(skip)]
-    #[rkyv(with = Skip)]
     bucket_counters: StateBucketCounters,
 }
 

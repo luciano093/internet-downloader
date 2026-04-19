@@ -7,7 +7,7 @@ use strum_macros;
 
 use crate::download::{DownloadFailureReason, FileFailureReason};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, IntoStaticStr, EnumDiscriminants)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
 #[strum(serialize_all = "snake_case")]
@@ -192,7 +192,7 @@ impl Default for StateBucketCounters {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, IntoStaticStr, EnumDiscriminants)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
 #[strum(serialize_all = "snake_case")]

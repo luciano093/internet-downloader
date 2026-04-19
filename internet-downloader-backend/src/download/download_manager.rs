@@ -9,11 +9,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
-use rkyv::munge::munge;
-use rkyv::rancor::Fallible;
-use rkyv::vec::{ArchivedVec, VecResolver};
-use rkyv::Place;
-use rkyv::with::ArchiveWith;
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::{EnumDiscriminants, EnumString, IntoStaticStr};
 use tokio::sync::mpsc::UnboundedSender;
@@ -71,8 +66,7 @@ pub enum FolderUpdate {
     Status { id: usize, status: DownloadStatus }, 
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, sqlx::Type)]
-#[rkyv(derive(Hash, PartialEq, Eq))]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, sqlx::Type)]
 #[serde(transparent)]
 #[sqlx(transparent)]
 pub struct DownloadId(pub usize);
@@ -202,23 +196,23 @@ impl LimiterRegistry {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct FileSettings {
     pub speed_limit: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct DownloadSettings {
     pub speed_limit: Option<u64>,
     pub file_settings: HashMap<usize, FileSettings>, 
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct HostSettings {
     pub speed_limit: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct AppSettings {
     pub global_speed_limit: Option<u64>,
     pub download_settings: HashMap<DownloadId, DownloadSettings>,
@@ -647,7 +641,7 @@ async fn hash_file(path: PathBuf) -> u128 {
     }).await.expect("Hashing task panicked")
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, IntoStaticStr, EnumString)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumString)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
@@ -660,7 +654,7 @@ pub enum FileFailureReason {
     MetadataFetchError,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, IntoStaticStr, EnumDiscriminants)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
@@ -705,59 +699,6 @@ impl DownloadFailureReason {
     }
 }
 
-pub struct AsBitVec;
-
-pub struct BitVecResolver {
-    len: u64,
-    inner: VecResolver,
-}
-
-#[derive(rkyv::Portable, bytecheck::CheckBytes)]
-#[repr(C)]
-pub struct ArchivedBitVec {
-    pub data: ArchivedVec<u8>,
-    pub bit_len: rkyv::rend::u64_le,
-}
-
-impl ArchiveWith<BitVec<u8, Msb0>> for AsBitVec {
-    type Archived = ArchivedBitVec;
-    type Resolver = BitVecResolver;
-
-    fn resolve_with(field: &BitVec<u8, Msb0>, resolver: Self::Resolver, out: Place<Self::Archived>) {
-        munge!(let ArchivedBitVec { data, bit_len } = out);
-
-        ArchivedVec::resolve_from_len(field.as_raw_slice().len(), resolver.inner, data);
-
-        bit_len.write(resolver.len.into());
-    }
-}
-
-impl<S: rkyv::ser::Writer + ?Sized + rkyv::rancor::Fallible + rkyv::ser::Allocator> rkyv::with::SerializeWith<BitVec<u8, Msb0>, S> for AsBitVec {
-    fn serialize_with(
-        field: &BitVec<u8, Msb0>,
-        serializer: &mut S,
-    ) -> Result<Self::Resolver, <S as rkyv::rancor::Fallible>::Error> {
-        
-        Ok(BitVecResolver { 
-            len: field.len() as u64,
-            inner: ArchivedVec::serialize_from_slice(field.as_raw_slice(), serializer)?
-        })
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::with::DeserializeWith<ArchivedBitVec, BitVec<u8, Msb0>, D> for AsBitVec 
-    where <D as Fallible>::Error: rkyv::rancor::Source {
-    fn deserialize_with(field: &ArchivedBitVec, deserializer: &mut D)
-        -> Result<BitVec<u8, Msb0>, <D as rkyv::rancor::Fallible>::Error> {
-        let bytes: Vec<u8> = rkyv::Deserialize::deserialize(&field.data, deserializer)?;
-        let mut bitvec = BitVec::<u8, Msb0>::from_vec(bytes);
-        
-        let bit_len: u64 = field.bit_len.into();
-        bitvec.truncate(bit_len as usize);
-        Ok(bitvec)
-    }
-}
-
 pub fn serialize_hash<S>(hash: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -783,7 +724,7 @@ where
     }
 }
 
-#[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
 pub enum FileSize {
     Unknown,
     Known(u64)
