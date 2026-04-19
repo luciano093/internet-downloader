@@ -11,7 +11,7 @@ use crate::{db::rows::{DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSett
 pub enum StateManagerError {
     #[error("Connection error: {0}")]
     ConnectionError(sqlx::Error),
-    #[error("Error createing database tables: {0}")]
+    #[error("Error creating database tables: {0}")]
     TableCreationError(sqlx::Error),
 }
 
