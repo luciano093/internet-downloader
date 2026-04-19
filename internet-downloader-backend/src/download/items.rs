@@ -597,11 +597,21 @@ impl FolderDownload {
     }
 
     pub fn from_db(row: DownloadItemRow, children: Vec<usize>, bucket_counters: StateBucketCounters) -> Self {
+        let mut status = DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref())
+            .unwrap_or_default();
+
+        let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
+            .unwrap_or_else(|| {
+                status = DownloadStatus::Failed(DownloadFailureReason::BadPath);
+            
+                PathBuf::new()
+            });
+
         Self {
             parent_id: row.parent_id.map(|id| id as usize),
             id: row.item_id as usize,
             folder_name: row.name,
-            relative_path: PathBuf::from(row.relative_path),
+            relative_path,
             status: DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_ref().map(|str| str.as_str())).unwrap_or_default(),
             children,
             bucket_counters,
