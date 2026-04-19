@@ -22,7 +22,7 @@ use crate::download::items::{DownloadType, Download};
 use crate::download::FileUpdate;
 use crate::download::status::DownloadStatus;
 use crate::download::status::FileStatus;
-use crate::state_manager::StateManager;
+use crate::db::state_manager::StateManager;
 
 pub enum UiStateEvent {
     AddDownload(Download),

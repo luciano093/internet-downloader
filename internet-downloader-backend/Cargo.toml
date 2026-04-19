@@ -19,6 +19,7 @@ futures-util = "0.3.31"
 http = "1.4.0"
 indexmap = { version = "2.13.0", features = ["serde"] }
 memmap2 = "0.9.9"
+os_str_bytes = "7.1.1"
 pin-project-lite = "0.2.17"
 regex = { version = "1.12.2", features = ["use_std"] }
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset", "system-proxy", "stream"] }
@@ -28,7 +29,8 @@ rustls = { version = "0.23.35", default-features = false, features = ["ring", "s
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.148"
 serde_with = "3.16.1"
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
+# TODO: sqlx 0.8.6 lacks Cow<[u8]> support. Move away from using git when new version releases
+sqlx = { git = "https://github.com/launchbadge/sqlx", rev = "b180eba9012c486e1c46d6aaf156d8f79ab37cdc", features = ["runtime-tokio", "sqlite"] }
 strum = { version = "0.28.0", features = ["strum_macros"] }
 strum_macros = "0.28.0"
 thiserror = "2.0.18"

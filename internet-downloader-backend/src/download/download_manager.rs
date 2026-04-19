@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -14,6 +15,7 @@ use rkyv::vec::{ArchivedVec, VecResolver};
 use rkyv::Place;
 use rkyv::with::ArchiveWith;
 use serde::{Deserialize, Serialize, Serializer};
+use strum_macros::{EnumString, IntoStaticStr};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
@@ -29,7 +31,7 @@ use crate::plugin_registry::PluginRegistryHandler;
 use crate::utils::file_utils::force_delete_file;
 use crate::network_manager;
 use crate::network_manager::{NetworkConfig, NetworkHandle};
-use crate::state_manager::StateManager;
+use crate::db::state_manager::StateManager;
 use crate::utils::network_utils::BandwidthLimiter;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -68,9 +70,10 @@ pub enum FolderUpdate {
     Status { id: usize, status: DownloadStatus }, 
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, sqlx::Type)]
 #[rkyv(derive(Hash, PartialEq, Eq))]
 #[serde(transparent)]
+#[sqlx(transparent)]
 pub struct DownloadId(pub usize);
 
 impl Deref for DownloadId {
@@ -609,10 +612,11 @@ async fn hash_file(path: PathBuf) -> u128 {
     }).await.expect("Hashing task panicked")
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, IntoStaticStr, EnumString)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
+#[strum(serialize_all = "snake_case")]
 pub enum FileFailureReason {
     HashMismatch,
     DiskError,
@@ -621,10 +625,11 @@ pub enum FileFailureReason {
     MetadataFetchError,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive, IntoStaticStr, EnumString)]
 #[repr(u8)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
+#[strum(serialize_all = "snake_case")]
 pub enum DownloadFailureReason {
     HashMismatch,
     DiskError,
@@ -632,9 +637,21 @@ pub enum DownloadFailureReason {
     ServerError,
     MetadataFetchError,
     MultipleErrors,
+    #[strum(disabled)]
     AllFilesFailed(FileFailureReason),
     FilesMissingFromDisk,
     StateDesynchronized,
+}
+
+impl DownloadFailureReason {
+    pub fn from_db_string(reason_str: &str) -> Self {
+        if let Some((_prefix, inner_str)) = reason_str.split_once(':') {
+            let inner_reason = FileFailureReason::from_str(inner_str).unwrap();
+            return Self::AllFilesFailed(inner_reason);
+        }
+        
+        Self::from_str(reason_str).unwrap()
+    }
 }
 
 pub struct AsBitVec;

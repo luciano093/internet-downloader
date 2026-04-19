@@ -5,9 +5,11 @@ use std::fmt::Debug;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
+use os_str_bytes::OsStringBytes;
 use rkyv::with::{AsString, Skip};
 use serde::{Deserialize, Serialize};
 
+use crate::db::rows::{DownloadItemRow, DownloadRow};
 use crate::download::{AsBitVec, DownloadFailureReason, DownloadId, FileSize};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
@@ -262,6 +264,17 @@ impl Download {
 
         files.insert(folder_id, DownloadType::Folder(FolderDownload::new(folder_task, parent_relative_path, folder_id, children, parent_id)));
     }
+
+    pub fn from_db(row: DownloadRow, files: IndexMap<usize, DownloadType>) -> Self {
+        Self {
+            id: DownloadId(row.id as usize),
+            url: row.url,
+            relative_path: PathBuf::from_io_vec(row.relative_path_raw).unwrap(),
+            status: DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref()),
+            files,
+            name: row.name,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
@@ -395,6 +408,41 @@ impl FileDownload {
         }
     }
 
+    pub fn from_db(row: DownloadItemRow) -> Self {
+        // Reconstruct the FileSize
+        let size = match row.size_type.as_deref() {
+            Some("known") => Some(FileSize::Known(row.size_bytes.unwrap() as u64)),
+            Some("unknown") => Some(FileSize::Unknown),
+            _ => None,
+        };
+
+        // Reconstruct the Hash
+        let hash = row.hash.map(|b| {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&b[0..16]);
+            u128::from_be_bytes(arr)
+        });
+
+        // Reconstruct the Chunks (BitVec)
+        let mut chunks = BitVec::<u8, Msb0>::from_vec(row.chunks_raw.unwrap_or_default());
+        if let Some(len) = row.chunks_len {
+            chunks.truncate(len as usize);
+        }
+
+        Self {
+            parent_id: row.parent_id.map(|id| id as usize),
+            id: row.item_id as usize,
+            url: Arc::new(row.url.unwrap_or_default()),
+            file_name: row.name,
+            relative_path: PathBuf::from_io_vec(row.relative_path_raw).unwrap(),
+            status: FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time),
+            hash,
+            chunks,
+            size,
+            retries: row.retries as usize,
+        }
+    }
+
     pub const fn chunks(&self) -> &BitVec<u8, Msb0> {
         &self.chunks
     }
@@ -409,6 +457,10 @@ impl FileDownload {
 
     pub fn url(&self) -> Arc<String> {
         self.url.clone()
+    }
+
+    pub fn url_ref(&self) -> &String {
+        self.url.as_ref()
     }
 
     pub fn status(&self) -> FileStatus {
@@ -523,6 +575,18 @@ impl FolderDownload {
             status: DownloadStatus::Queued,
             children: children_ids,
 
+            bucket_counters,
+        }
+    }
+
+    pub fn from_db(row: DownloadItemRow, children: Vec<usize>, bucket_counters: StateBucketCounters) -> Self {
+        Self {
+            parent_id: row.parent_id.map(|id| id as usize),
+            id: row.item_id as usize,
+            folder_name: row.name,
+            relative_path: PathBuf::from(row.relative_path),
+            status: DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_ref().map(|str| str.as_str())),
+            children,
             bucket_counters,
         }
     }

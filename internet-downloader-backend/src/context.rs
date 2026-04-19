@@ -6,7 +6,7 @@ use crate::download::ManagerCommand;
 use crate::download_writer_manager::DownloadWriterManager;
 use crate::network_manager::NetworkConfig;
 use crate::plugin_registry::PluginRegistryHandler;
-use crate::state_manager::StateManager;
+use crate::db::state_manager::StateManager;
 
 #[derive(Clone)]
 pub struct AppContext {
