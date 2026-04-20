@@ -1,13 +1,20 @@
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 use strum::EnumCount;
-use strum_macros::EnumCount;
+use strum_macros::{EnumCount, EnumDiscriminants, EnumString, IntoStaticStr};
 
 use crate::download::{DownloadFailureReason, FileFailureReason};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
+#[strum(serialize_all = "snake_case")]
+#[strum_discriminants(derive(EnumString, IntoStaticStr))]
+#[strum_discriminants(name(DownloadStatusParse))] 
+#[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum DownloadStatus {
+    #[default]
     Queued,
     Initializing,
     FetchingMetadata,
@@ -23,6 +30,32 @@ pub enum DownloadStatus {
 
 
 impl DownloadStatus {
+    pub fn from_db_columns(status: &str, failure_reason: Option<&str>) -> Option<Self> {
+        if let Some(reason_str) = failure_reason {
+            let reason = DownloadFailureReason::from_db_string(reason_str).unwrap_or_default();
+            return Some(Self::Failed(reason));
+        }
+
+        // If we fail to deserialize, we fallback to Queued
+        let parsed_state = DownloadStatusParse::from_str(status).ok()?;
+
+        Some(match parsed_state {
+            DownloadStatusParse::Queued => Self::Queued,
+            DownloadStatusParse::Initializing => Self::Initializing,
+            DownloadStatusParse::FetchingMetadata => Self::FetchingMetadata,
+            DownloadStatusParse::InProgress => Self::InProgress,
+            DownloadStatusParse::Completed => Self::Completed,
+            DownloadStatusParse::CompletedWithErrors => Self::CompletedWithErrors,
+            DownloadStatusParse::Paused => Self::Paused,
+            DownloadStatusParse::NotFound => Self::NotFound,
+            DownloadStatusParse::Retrying => Self::Retrying,
+            DownloadStatusParse::Waiting => Self::Waiting,
+            
+            // Fallback if for some reason we still get Failed here
+            DownloadStatusParse::Failed => return None, 
+        })
+    }
+
     /// Returns true if download is actively downloading or waiting to be downloaded.
     pub fn is_active(&self) -> bool {
         match self {
@@ -83,6 +116,30 @@ impl DownloadStatus {
             Self::Paused => StatusBucket::Paused,
         }
     }
+
+        pub fn to_db_columns(&self) -> (&'static str, Option<&'static str>) {
+        let status_str: &'static str = self.into(); 
+
+        // Enum variants that contain extra information need to be extracted
+        match self {
+            DownloadStatus::Failed(reason) => {
+                let reason_str: &'static str = reason.into();
+
+                (status_str, Some(reason_str))
+            }
+
+            DownloadStatus::Queued |
+            DownloadStatus::Initializing |
+            DownloadStatus::FetchingMetadata |
+            DownloadStatus::InProgress |
+            DownloadStatus::Paused |
+            DownloadStatus::NotFound |
+            DownloadStatus::Retrying |
+            DownloadStatus::CompletedWithErrors |
+            DownloadStatus::Waiting |
+            DownloadStatus::Completed => (status_str, None),
+        }
+    }
 }
 
 // EnumCount can be changed to std::mem::variant_count whenever it stabilizes its const api
@@ -134,10 +191,15 @@ impl Default for StateBucketCounters {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "state", content = "value")]
+#[strum(serialize_all = "snake_case")]
+#[strum_discriminants(derive(EnumString, IntoStaticStr))]
+#[strum_discriminants(name(FileStatusParse))] 
+#[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum FileStatus {
+    #[default]
     Queued,
     Initializing,
     FetchingMetadata,
@@ -207,6 +269,58 @@ impl FileStatus {
             Self::NotFound => StatusBucket::Error,
             
             Self::Paused => StatusBucket::Paused,
+        }
+    }
+
+    pub fn from_db_columns(status: &str, file_failure_reason: Option<&str>, wait_time: Option<i64>) -> Option<Self> {
+        if let Some(file_failure_reason) = file_failure_reason {
+            let inner_reason = FileFailureReason::from_str(file_failure_reason).unwrap_or_default();
+            return Some(Self::Failed(inner_reason));
+        }
+
+        if let Some(wait_time) = wait_time {
+            return Some(Self::Waiting(Some(wait_time as u64)));
+        }
+
+         let parsed_reason = FileStatusParse::from_str(status).ok()?;
+
+        Some(match parsed_reason {
+            FileStatusParse::Queued => Self::Queued,
+            FileStatusParse::Initializing => Self::Initializing,
+            FileStatusParse::FetchingMetadata => Self::FetchingMetadata,
+            FileStatusParse::InProgress => Self::InProgress,
+            FileStatusParse::Completed => Self::Completed,
+            FileStatusParse::Paused => Self::Paused,
+            FileStatusParse::NotFound => Self::NotFound,
+            FileStatusParse::Retrying => Self::Retrying,
+            
+            // Fallback if for some reason we still get here
+            FileStatusParse::Failed |
+            FileStatusParse::Waiting => return None,
+        })
+    }
+
+    pub fn to_db_columns(&self) -> (&'static str, Option<&'static str>, Option<i64>) {
+        let status_str: &'static str = self.into(); 
+
+        // Enum variants that contain extra information need to be extracted
+        match self {
+            FileStatus::Waiting(time) => (status_str, None, time.map(|t| t as i64)),
+            
+            FileStatus::Failed(reason) => {
+                let reason_str: &'static str = reason.into();
+
+                (status_str, Some(reason_str), None)
+            }
+
+            FileStatus::Queued |
+            FileStatus::Initializing |
+            FileStatus::FetchingMetadata |
+            FileStatus::InProgress |
+            FileStatus::Paused |
+            FileStatus::NotFound |
+            FileStatus::Retrying |
+            FileStatus::Completed => (status_str, None, None),
         }
     }
 }

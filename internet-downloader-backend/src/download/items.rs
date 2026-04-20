@@ -5,10 +5,11 @@ use std::fmt::Debug;
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
-use rkyv::with::{AsString, Skip};
+use os_str_bytes::OsStringBytes;
 use serde::{Deserialize, Serialize};
 
-use crate::download::{AsBitVec, DownloadFailureReason, DownloadId, FileSize};
+use crate::db::rows::{DownloadItemRow, DownloadRow};
+use crate::download::{DownloadFailureReason, DownloadId, FileFailureReason, FileSize};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::{serialize_hash, serialize_chunks};
@@ -31,11 +32,10 @@ pub enum ChangedItem {
 }
 
 /// Has either a file or folder as the only item in root
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Download {
     id: DownloadId,
     url: String,
-    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: DownloadStatus,
     pub(crate) files: IndexMap<usize, DownloadType>,
@@ -262,9 +262,30 @@ impl Download {
 
         files.insert(folder_id, DownloadType::Folder(FolderDownload::new(folder_task, parent_relative_path, folder_id, children, parent_id)));
     }
+
+    pub fn from_db(row: DownloadRow, files: IndexMap<usize, DownloadType>) -> Self {
+        let mut status = DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref())
+            .unwrap_or_default();
+
+        let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
+            .unwrap_or_else(|| {
+                status = DownloadStatus::Failed(DownloadFailureReason::BadPath);
+            
+                PathBuf::new()
+            });
+
+        Self {
+            id: DownloadId(row.id as usize),
+            url: row.url,
+            relative_path,
+            status,
+            files,
+            name: row.name,
+        }
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DownloadType {
     File(FileDownload),
@@ -325,19 +346,17 @@ impl DownloadItem for DownloadType {
 }
 
 
-#[derive(Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct FileDownload {
     parent_id: Option<usize>,
     id: usize,
     url: Arc<String>,
     file_name: String,
-    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: FileStatus,
     #[serde(serialize_with = "serialize_hash")] 
     hash: Option<u128>,
     #[serde(serialize_with = "serialize_chunks")]
-    #[rkyv(with = AsBitVec)]
     chunks: BitVec<u8, Msb0>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     #[serde(skip)]
@@ -395,6 +414,54 @@ impl FileDownload {
         }
     }
 
+    pub fn from_db(row: DownloadItemRow) -> Self {
+        // Reconstruct the FileSize
+        let size = match row.size_type.as_deref() {
+            Some("known") if let Some(size_bytes) = row.size_bytes => Some(FileSize::Known(size_bytes as u64)),
+            Some("unknown") => Some(FileSize::Unknown),
+
+            // If we have a known size, but the size was corrupted from the db, set it as None to fetch it again
+            Some("known") | Some(_) | None => None,
+        };
+
+        // Reconstruct the Hash
+        let hash = row.hash.and_then(|bytes| {
+            let slice = bytes.get(0..16)?;
+            
+            let array: [u8; 16] = slice.try_into().ok()?; 
+
+            Some(u128::from_be_bytes(array))
+        });
+
+        // Reconstruct the Chunks (BitVec)
+        let mut chunks = BitVec::<u8, Msb0>::from_vec(row.chunks_raw.unwrap_or_default());
+        if let Some(len) = row.chunks_len {
+            chunks.truncate(len as usize);
+        }
+
+        let mut status = FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time).unwrap_or_default();
+
+        let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
+            .unwrap_or_else(|| {
+                status = FileStatus::Failed(FileFailureReason::BadPath);
+            
+                PathBuf::new()
+            });
+
+        Self {
+            parent_id: row.parent_id.map(|id| id as usize),
+            id: row.item_id as usize,
+            url: Arc::new(row.url.unwrap_or_default()),
+            file_name: row.name,
+            relative_path,
+            status,
+            hash,
+            chunks,
+            size,
+            retries: row.retries as usize,
+        }
+    }
+
     pub const fn chunks(&self) -> &BitVec<u8, Msb0> {
         &self.chunks
     }
@@ -409,6 +476,10 @@ impl FileDownload {
 
     pub fn url(&self) -> Arc<String> {
         self.url.clone()
+    }
+
+    pub fn url_ref(&self) -> &String {
+        self.url.as_ref()
     }
 
     pub fn status(&self) -> FileStatus {
@@ -487,19 +558,17 @@ impl FileDownload {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, rkyv::Serialize, rkyv::Deserialize, rkyv::Archive)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FolderDownload {
     parent_id: Option<usize>,
     id: usize,
     folder_name: String,
-    #[rkyv(with = AsString)]
     relative_path: PathBuf,
     status: DownloadStatus,
     children: Vec<usize>,
 
     // Counters to keep track of children statuses without having to recalculate them
     #[serde(skip)]
-    #[rkyv(with = Skip)]
     bucket_counters: StateBucketCounters,
 }
 
@@ -523,6 +592,28 @@ impl FolderDownload {
             status: DownloadStatus::Queued,
             children: children_ids,
 
+            bucket_counters,
+        }
+    }
+
+    pub fn from_db(row: DownloadItemRow, children: Vec<usize>, bucket_counters: StateBucketCounters) -> Self {
+        let mut status = DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref())
+            .unwrap_or_default();
+
+        let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
+            .unwrap_or_else(|| {
+                status = DownloadStatus::Failed(DownloadFailureReason::BadPath);
+            
+                PathBuf::new()
+            });
+
+        Self {
+            parent_id: row.parent_id.map(|id| id as usize),
+            id: row.item_id as usize,
+            folder_name: row.name,
+            relative_path,
+            status: DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_ref().map(|str| str.as_str())).unwrap_or_default(),
+            children,
             bucket_counters,
         }
     }
