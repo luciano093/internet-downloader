@@ -29,6 +29,8 @@ use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
 const CHUNK_SIZE: usize = 16384; // 16 KB
+const HASH_CHUNK_SIZE_BYTES: usize = 1048576; // 1 MB 
+const HASH_CHUNK_SIZE: usize = HASH_CHUNK_SIZE_BYTES / CHUNK_SIZE; // (1 MB / 16 KB) or 64 chunks
 const TARGET_RANGE_SIZE: usize = 5242880 / CHUNK_SIZE; // 320 ranges of chunks
 const CHANNEL_UPDATE_THRESHOLD: u64 = 128 * 1024; // 128 KB
 
@@ -370,14 +372,39 @@ impl SupervisorState {
 
             // Try to find an undownloaded chunk
             if let Some(relative_start) = chunks[cursor..].first_zero() {
-                let start_index = relative_start + cursor;
+                let zero_index = relative_start + cursor;
+
+                // In the case that the start index isn't aligned with the boundary we need for chunks
+                // we snap back to force align it
+                // For example: if we want to align to a 1MB chunk size, but the zero_index is 
+                // 3.5 MB, this converts it to 3MB
+                let start_index = (zero_index / HASH_CHUNK_SIZE) * HASH_CHUNK_SIZE;
                 
+                // We aim for the target range size, this is the ideal end for this chunk
                 let max_end = (start_index + TARGET_RANGE_SIZE).min(chunks.len());
 
-                let end_index = chunks[start_index..max_end]
+                // We look for the first block that is 1 in the range from the start index to our max index
+                let first_one_index = chunks[start_index..max_end]
                     .first_one()
-                    .map(|idx| idx + start_index)
-                    .unwrap_or(max_end);
+                    .map(|idx| idx + start_index);
+
+                // This would be our end index if we didn't have to align first to our HASH_CHUNK_SIZE boundary
+                let unaligned_end_index = first_one_index.unwrap_or(max_end);
+
+                let mut end_index = {
+                    // We align to our chunk size   
+                    let aligned_end = (unaligned_end_index / HASH_CHUNK_SIZE) * HASH_CHUNK_SIZE;
+
+                    // If the alignment was less than our start index, we have a problem and should align forward
+                    if aligned_end > start_index {
+                        aligned_end
+                    } else {
+                        start_index + HASH_CHUNK_SIZE
+                    }
+                };
+
+                // We do want to limit the index to the maximum chunk even if it ends up unaligned
+                end_index = end_index.min(chunks.len());
 
                 self.chunk_cursors.insert(file_id, end_index);
 
