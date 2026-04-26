@@ -358,6 +358,7 @@ pub struct FileDownload {
     hash: Option<u128>,
     #[serde(serialize_with = "serialize_chunks")]
     chunks: BitVec<u8, Msb0>,
+    chunk_hashes: Vec<Option<[u8; 16]>>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     #[serde(skip)]
     /// tracks consecutive retries
@@ -409,12 +410,13 @@ impl FileDownload {
             status: FileStatus::Queued,
             hash: None,
             chunks: BitVec::new(),
+            chunk_hashes: Vec::new(),
             size: None,
             retries: 0,
         }
     }
 
-    pub fn from_db(row: DownloadItemRow) -> Self {
+    pub fn from_db(row: DownloadItemRow, chunk_hashes: Vec<Option<[u8; 16]>>) -> Self {
         // Reconstruct the FileSize
         let size = match row.size_type.as_deref() {
             Some("known") if let Some(size_bytes) = row.size_bytes => Some(FileSize::Known(size_bytes as u64)),
@@ -457,6 +459,7 @@ impl FileDownload {
             status,
             hash,
             chunks,
+            chunk_hashes,
             size,
             retries: row.retries as usize,
         }
@@ -468,6 +471,14 @@ impl FileDownload {
 
     pub fn chunks_mut(&mut self) -> &mut BitVec<u8, Msb0> {
         &mut self.chunks
+    }
+
+    pub const fn chunk_hashes(&self) -> &Vec<Option<[u8; 16]>> {
+        &self.chunk_hashes
+    }
+
+    pub fn chunk_hashes_mut(&mut self) -> &mut Vec<Option<[u8; 16]>> {
+        &mut self.chunk_hashes
     }
 
     pub const fn hash(&self) -> Option<u128> {

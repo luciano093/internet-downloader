@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 use os_str_bytes::OsStrBytes;
-use sqlx::{QueryBuilder, SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{QueryBuilder, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
 use thiserror::Error;
 
-use crate::{db::rows::{DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, DownloadId, FileSize, items::{Download, DownloadItem, DownloadType}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
+use crate::{db::rows::{ChunkHashRow, DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, DownloadId, FileSize, items::{Download, DownloadItem, DownloadType, FileDownload}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
@@ -96,6 +96,18 @@ impl StateManager {
             );
 
             CREATE INDEX IF NOT EXISTS idx_download_items_parent ON download_items(download_id, parent_id);
+
+            CREATE TABLE IF NOT EXISTS chunk_hashes (
+                download_id INTEGER NOT NULL,
+                item_id     INTEGER NOT NULL,
+                chunk_index   INTEGER NOT NULL,
+                hash        BLOB(16),
+                PRIMARY KEY (download_id, item_id, chunk_index),
+                FOREIGN KEY (download_id, item_id)
+                    REFERENCES download_items(download_id, item_id)
+                    ON DELETE CASCADE,
+                CONSTRAINT check_hash_length CHECK (hash IS NULL OR length(hash) = 16)
+            );
 
             -- AppSettings
             CREATE TABLE IF NOT EXISTS app_settings (
@@ -199,7 +211,9 @@ impl StateManager {
                 ) "
             );
 
-            builder.push_values(files_iter.by_ref().take(1000), |mut builder, (item_id, item_type)| {
+            let batch: Vec<_> = files_iter.by_ref().take(1000).collect();
+
+            builder.push_values(&batch, |mut builder, (item_id, item_type)| {
                 match item_type {
                     DownloadType::File(file) => {
                         let (status, reason, wait_time) = file.status().to_db_columns();
@@ -214,7 +228,7 @@ impl StateManager {
                         };
 
                         builder.push_bind(*download.id() as i64)
-                            .push_bind(*item_id as i64)
+                            .push_bind(**item_id as i64)
                             .push_bind(file.parent_id().map(|id| id as i64))
                             .push_bind("file")
                             .push_bind(file.name())
@@ -236,7 +250,7 @@ impl StateManager {
                         let path_bytes = folder.relative_path().to_io_bytes_lossy();
 
                         builder.push_bind(*download.id() as i64)
-                        .push_bind(*item_id as i64)
+                        .push_bind(**item_id as i64)
                         .push_bind(folder.parent_id().map(|id| id as i64))
                         .push_bind("folder")
                         .push_bind(folder.name())
@@ -255,6 +269,14 @@ impl StateManager {
                     },
                 }
             });
+
+            for (_, item_type) in &batch {
+                if let DownloadType::File(file) = item_type {
+                    write_chunk_hashes(&mut transaction, download.id(), file)
+                        .await
+                        .unwrap();
+                }
+            }
 
             builder.push(
             " ON CONFLICT(download_id, item_id) DO UPDATE SET 
@@ -303,7 +325,9 @@ impl StateManager {
             .await
             .unwrap();
 
-        let files = reconstruct_file_tree(item_rows);
+        
+        let chunk_hashes_map = self.load_download_chunk_hashes(id).await.unwrap();
+        let files = reconstruct_file_tree(item_rows, chunk_hashes_map);
 
         let download = Download::from_db(download_row, files);
 
@@ -333,18 +357,78 @@ impl StateManager {
         }
 
         let mut downloads = IndexMap::with_capacity(download_rows.len());
+        let mut chunk_hashes = self.load_chunk_hashes().await.unwrap();
 
         for download_row in download_rows {
             let download_id_val = download_row.id;
+            let download_id = DownloadId(download_id_val as usize);
             
             let current_item_rows = items_by_download.remove(&download_id_val).unwrap_or_default();
-            let files = reconstruct_file_tree(current_item_rows);
+            let chunk_hashes_map = chunk_hashes.remove(&download_id).unwrap_or_default();
+            let files = reconstruct_file_tree(current_item_rows, chunk_hashes_map);
 
             let download = Download::from_db(download_row, files);
-            downloads.insert(DownloadId(download_id_val as usize), download);
+            downloads.insert(download_id, download);
         }
 
         Ok(downloads)
+    }
+
+    async fn load_download_chunk_hashes(&self, download_id: DownloadId) -> Result<HashMap<usize, Vec<Option<[u8; 16]>>>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, ChunkHashRow>(
+            "SELECT * FROM chunk_hashes WHERE download_id = ? ORDER BY item_id, chunk_index"
+        )
+        .bind(*download_id as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut map = HashMap::new();
+
+        for row in rows {
+            let hashes: &mut Vec<Option<[u8; 16]>> = map.entry(row.item_id as usize).or_default();
+            let index = row.chunk_index as usize;
+
+            if hashes.len() <= index {
+                hashes.resize(index + 1, None);
+            }
+
+            if let Some(hash_vec) = row.hash {
+                let arr: [u8; 16] = hash_vec.try_into().unwrap();
+
+                hashes[index] = Some(arr);
+            }
+        }
+
+        Ok(map)
+    }
+
+    async fn load_chunk_hashes(&self) -> Result<HashMap<DownloadId, HashMap<usize, Vec<Option<[u8; 16]>>>>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, ChunkHashRow>(
+            "SELECT * FROM chunk_hashes ORDER BY download_id ASC, item_id, chunk_index"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut map = HashMap::new();
+
+        for row in rows {
+            let chunk_hash_map: &mut HashMap<usize, Vec<Option<[u8; 16]>>> = map.entry(DownloadId(row.download_id as usize)).or_default();
+
+            let hashes: &mut Vec<Option<[u8; 16]>> = chunk_hash_map.entry(row.item_id as usize).or_default();
+            let index = row.chunk_index as usize;
+
+            if hashes.len() <= index {
+                hashes.resize(index + 1, None);
+            }
+
+            if let Some(hash_vec) = row.hash {
+                let arr: [u8; 16] = hash_vec.try_into().unwrap();
+
+                hashes[index] = Some(arr);
+            }
+        }
+
+        Ok(map)
     }
 
     pub async fn get_all_download_urls(&self) -> Vec<(usize, String)> {
@@ -486,9 +570,73 @@ impl StateManager {
 
         transaction.commit().await.unwrap();
     }
+
+    pub async fn populate_hash_table(&self, download_id: DownloadId, file_id: usize, num_chunk_hashes: usize)  -> Result<(), sqlx::Error> {
+        if num_chunk_hashes == 0 {
+            return Ok(());
+        }
+
+        let mut transaction = self.pool.begin().await.unwrap();
+
+        let mut chunks_iter = (0..num_chunk_hashes).peekable();
+
+        // we take in chunks of 1000 chunk hashes to avoid hitting sqlite's default limit per query
+        while chunks_iter.peek().is_some() {
+            let mut builder = QueryBuilder::new(
+                "INSERT INTO chunk_hashes (download_id, item_id, chunk_index, hash)"
+            );
+
+            builder.push_values(chunks_iter.by_ref().take(1000), |mut builder, chunk_index| {
+                builder.push_bind(*download_id as i64)
+                    .push_bind(file_id as i64)
+                    .push_bind(chunk_index as i64)
+                    .push_bind(None::<&[u8]>);  // null hash initially just for population purposes
+            });
+
+            builder.build().execute(&mut *transaction).await?;
+        }
+
+        transaction.commit().await?;
+        Ok(())
+    }
 }
 
-fn reconstruct_file_tree(item_rows: Vec<DownloadItemRow>) -> IndexMap<usize, DownloadType> {
+async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, download_id: DownloadId, file: &FileDownload) -> Result<(), sqlx::Error> {
+    let hashes = file.chunk_hashes();
+
+    if hashes.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query("DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ?")
+        .bind(*download_id as i64)
+        .bind(file.id() as i64)
+        .execute(&mut **transaction)
+        .await?;
+
+    let mut range = (0..hashes.len()).peekable();
+
+    while range.peek().is_some() {
+        let mut builder = QueryBuilder::new(
+            "INSERT INTO chunk_hashes (download_id, item_id, chunk_index, hash)"
+        );
+
+        builder.push_values(range.by_ref().take(1000), |mut builder, chunk_index| {
+            let hash = hashes[chunk_index].as_ref();
+
+            builder.push_bind(*download_id as i64)
+                .push_bind(file.id() as i64)
+                .push_bind(chunk_index as i64)
+                .push_bind(hash.map(|hash| &hash[..]));
+        });
+
+        builder.build().execute(&mut **transaction).await?;
+    }
+
+    Ok(())
+}
+
+fn reconstruct_file_tree(item_rows: Vec<DownloadItemRow>, mut chunk_hashes: HashMap<usize, Vec<Option<[u8; 16]>>>) -> IndexMap<usize, DownloadType> {
     let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut folder_buckets = std::collections::HashMap::new();
 
@@ -522,7 +670,7 @@ fn reconstruct_file_tree(item_rows: Vec<DownloadItemRow>) -> IndexMap<usize, Dow
         let children = children.remove(&item_id).unwrap_or_default();
         let counters = folder_buckets.remove(&item_id).unwrap_or_else(StateBucketCounters::new);
 
-        files.insert(item_id, row.into_download_type(children, counters));
+        files.insert(item_id, row.into_download_type(children, counters, &mut chunk_hashes));
     }
 
     files

@@ -29,8 +29,8 @@ use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
 const CHUNK_SIZE: usize = 16384; // 16 KB
-const HASH_CHUNK_SIZE_BYTES: usize = 1048576; // 1 MB 
-const HASH_CHUNK_SIZE: usize = HASH_CHUNK_SIZE_BYTES / CHUNK_SIZE; // (1 MB / 16 KB) or 64 chunks
+const HASH_CHUNK_SIZE: usize = 1048576; // 1 MB 
+const CHUNKS_PER_HASH: usize = HASH_CHUNK_SIZE / CHUNK_SIZE; // (1 MB / 16 KB) or 64 chunks
 const TARGET_RANGE_SIZE: usize = 5242880 / CHUNK_SIZE; // 320 ranges of chunks
 const CHANNEL_UPDATE_THRESHOLD: u64 = 128 * 1024; // 128 KB
 
@@ -196,7 +196,7 @@ enum SupervisorMessage {
     ProcessPermit(ActiveDownloadPermit),
     Pause,
     SpawnWorker(ValidDownloadPermit),
-    RangeSuccess(ActiveDownloadPermit, usize, (usize, usize)), // permit, id, range
+    RangeSuccess(ActiveDownloadPermit, usize, (usize, usize), Vec<[u8; 16]>), // permit, id, range, chunk hashes
     RangeFailed(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, RangeDownloadError), // permit, id, range, url
     StreamSuccess(ActiveDownloadPermit, usize, usize), // permit, id, size of file
     StreamFailed(ActiveDownloadPermit, usize, Arc<String>, PathBuf, DownloadError), // permit, id, url, path, error
@@ -378,7 +378,7 @@ impl SupervisorState {
                 // we snap back to force align it
                 // For example: if we want to align to a 1MB chunk size, but the zero_index is 
                 // 3.5 MB, this converts it to 3MB
-                let start_index = (zero_index / HASH_CHUNK_SIZE) * HASH_CHUNK_SIZE;
+                let start_index = (zero_index / CHUNKS_PER_HASH) * CHUNKS_PER_HASH;
                 
                 // We aim for the target range size, this is the ideal end for this chunk
                 let max_end = (start_index + TARGET_RANGE_SIZE).min(chunks.len());
@@ -393,13 +393,13 @@ impl SupervisorState {
 
                 let mut end_index = {
                     // We align to our chunk size   
-                    let aligned_end = (unaligned_end_index / HASH_CHUNK_SIZE) * HASH_CHUNK_SIZE;
+                    let aligned_end = (unaligned_end_index / CHUNKS_PER_HASH) * CHUNKS_PER_HASH;
 
                     // If the alignment was less than our start index, we have a problem and should align forward
                     if aligned_end > start_index {
                         aligned_end
                     } else {
-                        start_index + HASH_CHUNK_SIZE
+                        start_index + CHUNKS_PER_HASH
                     }
                 };
 
@@ -409,6 +409,7 @@ impl SupervisorState {
                 self.chunk_cursors.insert(file_id, end_index);
 
                 let range = (start_index, end_index);
+                info!("Got chunk job ({}, {}) for {}", start_index, end_index, file_download.name());
 
                 let file_size = match file_download.size()? {
                     FileSize::Unknown => return None,
@@ -700,8 +701,8 @@ impl DownloadSupervisor {
                                                     // Do worker stuff
                                                     result = download_range(client, &url, range, io_sender, file_map.clone(), expected_len, limiters, ui_sender, download_id, file_id, file_progress) => {
                                                         match result {
-                                                            Ok(_) => {
-                                                                let _ = sender.send(SupervisorMessage::RangeSuccess(permit.downgrade(), file_id, range));
+                                                            Ok(chunk_hashes) => {
+                                                                let _ = sender.send(SupervisorMessage::RangeSuccess(permit.downgrade(), file_id, range, chunk_hashes));
                                                             }
                                                             Err(download_error) => {
                                                                 let _ = sender.send(SupervisorMessage::RangeFailed(permit.downgrade(), file_id, range, url, file_map, expected_len, download_error));
@@ -812,7 +813,7 @@ impl DownloadSupervisor {
                                         break;
                                     }
                                 },
-                                SupervisorMessage::RangeSuccess(permit, file_id, range) => {
+                                SupervisorMessage::RangeSuccess(permit, file_id, range, chunk_hashes) => {
                                     state.active_downloads -= 1;
                                     drop(permit); 
 
@@ -823,6 +824,11 @@ impl DownloadSupervisor {
                                         file.reset_retries();
 
                                         file.chunks_mut()[range.0..range.1].fill(true);
+
+                                        let start = range.0.div_ceil(CHUNKS_PER_HASH);
+                                        for (i, hash) in chunk_hashes.into_iter().enumerate() {
+                                            file.chunk_hashes_mut()[start + i] = Some(hash);
+                                        }
 
                                         all_chunks_done = file.chunks().all();
 
@@ -835,7 +841,6 @@ impl DownloadSupervisor {
                                             trace!("file {} finished! got {} bytes", file.name(), bytes_downloaded);
                                         }
                                     }
-
                                     if all_chunks_done {
                                         if let Some(changed_items) = state.download.set_file_status(file_id, FileStatus::Completed) {
                                             Self::process_status_changes(&mut state, changed_items).await;
@@ -951,9 +956,18 @@ impl DownloadSupervisor {
                                                     let chunk_count = size.div_ceil(CHUNK_SIZE as u64);
                                                     file.chunks_mut().resize(chunk_count as usize, false);
 
+                                                    let num_chunk_hashes = size.div_ceil(HASH_CHUNK_SIZE as u64);
+
+                                                    file.chunk_hashes_mut().resize(num_chunk_hashes as usize, None);
+
+                                                    info!("{} has {} blocks and {} hashes", file.name(), chunk_count, num_chunk_hashes);
+
                                                     // Calculate how many ranges (jobs) are needed for this file
                                                     // and add the required jobs to our demand
-                                                    new_jobs = chunk_count.div_ceil(TARGET_RANGE_SIZE as u64) as usize;
+                                                    // Because currently, the ranges are aligned to 1MB to align with chunk boundaries
+                                                    // we can safely say that the maximum number of new jobs, will be the same as the 
+                                                    // number of chunks.
+                                                    new_jobs = num_chunk_hashes as usize;
     
                                                     target_status = Some(FileStatus::InProgress);
                                                 } else {
@@ -1453,6 +1467,7 @@ async fn download_range(
     file_id: usize,
     file_progress: Arc<AtomicU64>, 
 )-> Result<Vec<[u8; 16]>, RangeDownloadError> {
+    info!("Spawned worker for [{}, {})", range.0, range.1);
     let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
     let end_byte = start_byte + expected_len.saturating_sub(1); // -1 because http ranges are inclusive
 
@@ -1615,14 +1630,14 @@ async fn download_range(
             // This substraction should use saturate_sub, if HASH_CHUNK_SIZE_BYTES - chunk_bytes_hashed < 0
             // is true, then that's a logic bug. saturate_sub might hide this logic bug and create an infinite loop here
             // the program crashing is better to catch that bug if it ever happens.
-            assert!(chunk_bytes_hashed <= HASH_CHUNK_SIZE_BYTES);
+            assert!(chunk_bytes_hashed <= HASH_CHUNK_SIZE);
 
             // Check just in case this happens in release mode
-            if chunk_bytes_hashed > HASH_CHUNK_SIZE_BYTES {
+            if chunk_bytes_hashed > HASH_CHUNK_SIZE {
                 warn!("chunk_bytes_hashed is greater HASH_CHUNK_SIZE_BYTES. This is a massive bug that invalidates chunk hashes and makes verification after a download impossible.");
             }
 
-            let bytes_needed_for_hash = HASH_CHUNK_SIZE_BYTES - chunk_bytes_hashed;
+            let bytes_needed_for_hash = HASH_CHUNK_SIZE - chunk_bytes_hashed;
 
             let take_len = remaining_chunk.len().min(bytes_needed_for_hash);
 
@@ -1631,7 +1646,7 @@ async fn download_range(
             hasher.update(to_hash);
             chunk_bytes_hashed += to_hash.len();
 
-            if chunk_bytes_hashed == HASH_CHUNK_SIZE_BYTES {
+            if chunk_bytes_hashed == HASH_CHUNK_SIZE {
                 let full_hash = hasher.finalize();
                 let mut hash_16 = [0u8; 16];
                 hash_16.copy_from_slice(&full_hash.as_bytes()[..16]);
@@ -1702,6 +1717,8 @@ async fn download_range(
     }
 
     range_progress.complete();
+
+    info!("Worker [{}, {}) finished", range.0, range.1);
 
     Ok(hashes)
 }
