@@ -1452,7 +1452,7 @@ async fn download_range(
     download_id: DownloadId,
     file_id: usize,
     file_progress: Arc<AtomicU64>, 
-)-> Result<(), RangeDownloadError> {
+)-> Result<Vec<[u8; 16]>, RangeDownloadError> {
     let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
     let end_byte = start_byte + expected_len.saturating_sub(1); // -1 because http ranges are inclusive
 
@@ -1500,12 +1500,18 @@ async fn download_range(
     let mut unnotified_bytes = 0; 
     let mut current_progress = 0;
 
+    // Disk IO variables
     let buffer_capacity: usize = 1024 * 1024; // 1 MB
     let mut buffer = BytesMut::with_capacity(buffer_capacity);
     let mut buffer_start_offset = current_offset;
 
     let mut in_flight_acks: VecDeque<(u64, oneshot::Receiver<std::io::Result<()>>)> = VecDeque::new();
     const MAX_IN_FLIGHT: usize = 4; // Max 4MB in RAM per worker before we apply backpressure
+
+    // Chunk hashing variables
+    let mut hashes = Vec::new();
+    let mut hasher = blake3::Hasher::new();
+    let mut chunk_bytes_hashed = 0;
 
     while let Some(chunk) = throttled_stream.next().await {
         let chunk = chunk.map_err(DownloadError::from)?; 
@@ -1544,6 +1550,7 @@ async fn download_range(
         current_offset += chunk_len;
         bytes_received += chunk_len;
 
+        // Disk IO sending logic
         if buffer.len() >= buffer_capacity {
             // Swap full buffer for an empty one
             let buffer_to_write = buffer.split().freeze();
@@ -1592,9 +1599,54 @@ async fn download_range(
                 }
             }
                 
-        }      
+        }
+
+        // Chunk hashing logic
+        let mut remaining_chunk = chunk.as_ref();
+
+        // We ue the reference to a slice of the hash to only calculate the hash when the hasher
+        // receives `HASH_CHUNK_SIZE_BYTES`. If for some reason we receive less than expected
+        // we store the remaining bytes in the hasher but don't calculate the hash, instead leaving
+        // the calcualtion for next iteration when `chunk_bytes_hashed` can reach the size we expect.
+        // This works due to chunk jobs being aligned to `HASH_CHUNK_SIZE_BYTES` so there will be no
+        // situation where we hash anything less than expected unless we are in the very final
+        // chunk of the whole file.
+        while !remaining_chunk.is_empty() {
+            // This substraction should use saturate_sub, if HASH_CHUNK_SIZE_BYTES - chunk_bytes_hashed < 0
+            // is true, then that's a logic bug. saturate_sub might hide this logic bug and create an infinite loop here
+            // the program crashing is better to catch that bug if it ever happens.
+            assert!(chunk_bytes_hashed <= HASH_CHUNK_SIZE_BYTES);
+
+            // Check just in case this happens in release mode
+            if chunk_bytes_hashed > HASH_CHUNK_SIZE_BYTES {
+                warn!("chunk_bytes_hashed is greater HASH_CHUNK_SIZE_BYTES. This is a massive bug that invalidates chunk hashes and makes verification after a download impossible.");
+            }
+
+            let bytes_needed_for_hash = HASH_CHUNK_SIZE_BYTES - chunk_bytes_hashed;
+
+            let take_len = remaining_chunk.len().min(bytes_needed_for_hash);
+
+            let (to_hash, remainder) = remaining_chunk.split_at(take_len);
+
+            hasher.update(to_hash);
+            chunk_bytes_hashed += to_hash.len();
+
+            if chunk_bytes_hashed == HASH_CHUNK_SIZE_BYTES {
+                let full_hash = hasher.finalize();
+                let mut hash_16 = [0u8; 16];
+                hash_16.copy_from_slice(&full_hash.as_bytes()[..16]);
+                hashes.push(hash_16);
+                
+                hasher.reset();
+                chunk_bytes_hashed = 0;
+            }
+
+            remaining_chunk = remainder;
+        }
+
     }
 
+    // Disk IO buffer has some remaining bytes
     if !buffer.is_empty() {
         let final_bytes_len = buffer.len() as u64;
         let (ack_sender, ack_receiver) = oneshot::channel();
@@ -1621,6 +1673,16 @@ async fn download_range(
         unnotified_bytes += bytes_written;
     }
 
+    // This can happen only in the final chunk of the whole file, as this is the
+    // only chunk that isn't necessarily aligned to `HASH_CHUNK_SIZE_BYTES`.
+    // So we just calculate the hash with anything that is left in the hasher.
+    if chunk_bytes_hashed > 0 {
+        let full_hash = hasher.finalize();
+        let mut hash_16 = [0u8; 16];
+        hash_16.copy_from_slice(&full_hash.as_bytes()[..16]);
+        hashes.push(hash_16);
+    }
+
     // Update UI if any unnotified bytes remain
     if unnotified_bytes > 0 {
         let _ = ui_sender.send(UiStateEvent::AddUpdate(
@@ -1641,7 +1703,7 @@ async fn download_range(
 
     range_progress.complete();
 
-    Ok(())
+    Ok(hashes)
 }
 
 /// Downloads a file from a server that requested `Transfer-Encoding: chunked`. 
