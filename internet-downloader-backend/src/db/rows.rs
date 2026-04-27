@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
-use crate::download::{items::{Download, DownloadType, FileDownload, FolderDownload}, status::StateBucketCounters};
+use crate::{download::{items::{Download, DownloadType, FileDownload, FolderDownload}, status::StateBucketCounters}, download_task::HASH_CHUNK_SIZE};
 
 #[derive(sqlx::FromRow)]
 pub struct DownloadRow {
@@ -52,7 +52,20 @@ impl DownloadItemRow {
             DownloadType::Folder(FolderDownload::from_db(self, children, buckets))
         } else {
             let file_id = self.item_id as usize;
-            let chunk_hashes = chunk_hashes.remove(&file_id).unwrap_or_default();
+            let chunk_hashes = chunk_hashes.remove(&file_id).unwrap_or_else(|| {
+                // We have to reconstruct the vector of chunks with None values
+                // Otherwise we would have no space for chunk hashes
+
+                if let Some(size) = self.size_bytes {
+                    let size = size as u64;
+
+                    let num_chunk_hashes = size.div_ceil(HASH_CHUNK_SIZE as u64);
+    
+                    vec![None; num_chunk_hashes as usize]
+                } else {
+                    Vec::new()
+                }
+            });
 
             DownloadType::File(FileDownload::from_db(self, chunk_hashes))
         }
