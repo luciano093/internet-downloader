@@ -695,6 +695,22 @@ impl FolderDownload {
             return None; 
         }
 
+        // Compile time guard
+        // A reminder to update this function if a new StatusBucket gets added
+        let _assert_exhaustive = |status| match status {
+            StatusBucket::InProgress |
+            StatusBucket::FetchingMetadata |
+            StatusBucket::Initializing |
+            StatusBucket::Retrying |
+            StatusBucket::Verifying |
+            StatusBucket::Waiting |
+            StatusBucket::Queued |
+            StatusBucket::Paused |
+            StatusBucket::Error |
+            StatusBucket::Completed |
+            StatusBucket::CompletedWithErrors => (),
+        };
+
         // Active states, if any of any children has an active state, we adopt the state too
         // Order is important
         // If anything is downloading, the folder is downloading
@@ -712,6 +728,10 @@ impl FolderDownload {
         // If nothing is downloading, but we are retrying a download
         else if self.bucket_counters.get(StatusBucket::Retrying) > 0 {
             Some(StatusBucket::Retrying)
+        } 
+        // If at least some file is still being verified
+        else if self.bucket_counters.get(StatusBucket::Verifying) > 0 {
+            Some(StatusBucket::Verifying)
         } 
         // If everything is either waiting or queued
         else if self.bucket_counters.get(StatusBucket::Waiting) > 0 {
