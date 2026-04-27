@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
 use std::str::FromStr;
@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::{EnumDiscriminants, EnumString, IntoStaticStr};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{Semaphore, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
 use dashmap::DashMap;
 use url::Host;
@@ -21,6 +21,7 @@ use crate::context::AppContext;
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
 use crate::download::items::{Download, DownloadItem, DownloadType};
 use crate::download::status::{DownloadStatus, FileStatus};
+use crate::download::verifier::VerifierHandle;
 use crate::download_writer_manager::DownloadWriterManager;
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::utils::file_utils::force_delete_file;
@@ -107,7 +108,7 @@ pub enum DownloadCommand {
 // Set host max connections
 pub enum ManagerCommand {
     QueueDownload(String),
-    QueueDownloadObject(Download),
+    DownloadVerified(Download),
     RemoveDownload(DownloadId, bool), // true if we want to remove from disk too
     CleanUpDownload(DownloadId),
     PauseDownload(DownloadId),
@@ -282,7 +283,6 @@ pub struct DownloadManager {
     unprocessed_downloads: IndexMap<DownloadId, Download>,
     ui_state_handle: Option<UiStateHandle>,
     command_sender: Option<UnboundedSender<ManagerCommand>>,
-    concurrency_limit: Arc<Semaphore>,
 }
 
 impl DownloadManager {
@@ -293,7 +293,6 @@ impl DownloadManager {
             unprocessed_downloads: IndexMap::new(),
             ui_state_handle: None,
             command_sender: None,
-            concurrency_limit: Arc::new(Semaphore::const_new(10))
         }
     }
 
@@ -374,10 +373,9 @@ impl DownloadManager {
         
         // Clone shared resources
         let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
-        let concurrency_limit = self.concurrency_limit.clone();
         let db_manager = self.db_state_manager.clone();
 
-        let mut unprocessed_downloads: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
+        let unprocessed_downloads: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
 
         let plugin_registry = PluginRegistryHandler::spawn().await;
         
@@ -420,6 +418,24 @@ impl DownloadManager {
         
         let mut removed_downloads = HashMap::new();
 
+        // These two separate sets are needed to track two things:
+        // is the current download being handled by the verify manager? and
+        // does the current download already went through the verification process?
+        // Separating these two allows us to implement pausing verification by just dropping the handle,
+        // while allowing us to not have to save Verifying as a state to the db, which would be unnecessary
+        // as no download loaded at the start of the program should be in a Veriying state.
+        let mut verifying_downloads = HashSet::new();
+        let mut needs_verification = HashSet::new(); 
+
+        let verifier = VerifierHandle::spawn(command_sender.clone(), ui_event_sender.clone(), db_manager.clone());
+
+        for &download_id in unprocessed_downloads.keys() {
+            verifying_downloads.insert(download_id);
+            needs_verification.insert(download_id);
+        }
+
+        let _ = verifier.verify_downloads(unprocessed_downloads).await;
+
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -444,12 +460,11 @@ impl DownloadManager {
                                 // First, we set it as removed
                                 removed_downloads.insert(id, from_disk);
 
-                                 // Try to remove from Pending Queue
-                                if unprocessed_downloads.shift_remove(&id).is_some() {
-                                    debug!("Removed pending download {}", id);
-                                    let _ = command_sender.send(ManagerCommand::CleanUpDownload(id));
-                                } 
-                                // If not in queue, it might be running. Send Cancel signal.
+                                 // Cancel the verification if there is any
+                                if verifying_downloads.contains(&id) {
+                                    let _ = verifier.cancel_verification(id).await;
+                                }
+                                // If it is running. Send Cancel signal.
                                 else if let Some(url) = id_registry.get(&id) {
                                     // In this case, we have to wait for the download to finish so it sends the clean up command
                                     network_manager.cancel_download(url.clone(), DownloadId(*id));
@@ -465,6 +480,9 @@ impl DownloadManager {
                                 if let Some(url) = id_registry.remove(&download_id) {
                                     url_registry.remove(&url);
                                 }
+
+                                verifying_downloads.remove(&download_id);
+                                needs_verification.remove(&download_id);
                                 
                                 // Finally, we clean it up from the set
                                 if let Some(from_disk) = removed_downloads.remove(&download_id) {
@@ -495,14 +513,24 @@ impl DownloadManager {
                                 info!("Download cleaned up");
                             },
                             ManagerCommand::PauseDownload(download_id) => {
+                                // Tell the Verifier to cancel if it's currently hashing
+                                verifying_downloads.remove(&download_id);
+                                let _ = verifier.pause_verification(download_id).await;
+
+                                // Otherwise the download is currently being managed by a host
                                 if let Some(url) = id_registry.get(&download_id) {
                                     network_manager.pause_download(url.to_string(), download_id);
                                 }
                             },
                             ManagerCommand::ResumeDownload(download_id) => if let Ok(download) = db_manager.load_download(download_id).await {
-                                let download_settings = app_settings.get_download_settings(download_id);
+                                if needs_verification.contains(&download_id) {
+                                    verifying_downloads.insert(download_id);
+                                    let _ = verifier.verify_download(download).await;
+                                } else {
+                                    let download_settings = app_settings.get_download_settings(download_id);
 
-                                network_manager.resume_download(download, download_settings);
+                                    network_manager.resume_download(download, download_settings);
+                                }
                             },
                             ManagerCommand::Shutdown => {
                                 break;
@@ -545,13 +573,15 @@ impl DownloadManager {
                                     warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
                                 }
                             },
-                            ManagerCommand::QueueDownloadObject(download) => todo!(),
-                        }
-                    }
+                            ManagerCommand::DownloadVerified(download) => {
+                                let download_id = download.id();
 
-                    Ok(_) = concurrency_limit.clone().acquire_owned(), if !unprocessed_downloads.is_empty() => {
-                        if let Some((_, download)) = unprocessed_downloads.shift_remove_index(0) {
-                            let _ = command_sender.send(ManagerCommand::QueueDownload(download.url().to_string()));
+                                verifying_downloads.remove(&download_id);
+                                needs_verification.remove(&download_id); 
+
+                                let download_settings = app_settings.get_download_settings(download_id);
+                                network_manager.resume_download(download, download_settings);
+                            },
                         }
                     }
                 }

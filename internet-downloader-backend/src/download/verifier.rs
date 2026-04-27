@@ -7,8 +7,10 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use memmap2::MmapOptions;
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
+use tracing::info;
 
 use crate::client_state_manager::UiStateEvent;
 use crate::db::state_manager::StateManager;
@@ -28,6 +30,7 @@ pub enum VerifierMessage {
     VerifyDownload(Download),
     VerifyDownloads(IndexMap<DownloadId, Download>),
     CancelVerification(DownloadId),
+    PauseVerification(DownloadId),
 }
 
 struct Verifier {
@@ -63,13 +66,33 @@ impl Verifier {
                 VerifierMessage::CancelVerification(download_id) => {
                     if let Some(handle) = self.handles.remove(&download_id) {
                         handle.abort();
+
+                        // We want to wait until the handle ends before sending the clean up message
+                        let _ = handle.await; 
+                    }
+
+                    let _ = self.download_manager.send(ManagerCommand::CleanUpDownload(download_id));
+                },
+                VerifierMessage::PauseVerification(download_id) => {
+                    if let Some(handle) = self.handles.remove(&download_id) {
+                        handle.abort();
                     }
                 },
                 VerifierMessage::VerifyDownload(download) => {
-                   self.handle_download(download).await;
+                    let download_name = download.name().clone();
+
+                    info!("Queued {} for verification", download_name); 
+
+                    let _ = self.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
+                    self.handle_download(download).await;
                 },
                 VerifierMessage::VerifyDownloads(download_map) => {
                     for (_, download) in download_map {
+                        let download_name = download.name().clone();
+
+                        info!("Queued {} for verification", download_name); 
+
+                        let _ = self.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
                         self.handle_download(download).await;
                     }
                 },
@@ -119,6 +142,9 @@ impl Verifier {
         let semaphore = self.semaphore.clone();
 
         let handle = tokio::spawn(async move {
+            let start_time = std::time::Instant::now();
+            info!("Started verifying {}.", download.name());
+
             let _permit = semaphore.acquire_owned().await.unwrap();
 
             let diffs = Self::verify_download(&download).await;
@@ -171,8 +197,10 @@ impl Verifier {
                 }
             }
 
+            info!("Finished hashing {} in {:?}", download.name(), start_time.elapsed());
+
             db_manager.write_download(&download).await;
-            let _ = download_manager.send(ManagerCommand::QueueDownloadObject(download));
+            let _ = download_manager.send(ManagerCommand::DownloadVerified(download));
         });
 
         self.handles.insert(download_id, handle);
@@ -335,15 +363,19 @@ impl VerifierHandle {
         }
     }
 
-    pub async fn verify_download(&self, download: Download) {
-        let _ = self.sender.send(VerifierMessage::VerifyDownload(download)).await;
+    pub async fn verify_download(&self, download: Download) -> Result<(), SendError<VerifierMessage>> {
+        self.sender.send(VerifierMessage::VerifyDownload(download)).await
     }
 
-    pub async fn verify_downloads(&self, downloads: IndexMap<DownloadId, Download>) {
-        let _ = self.sender.send(VerifierMessage::VerifyDownloads(downloads)).await;
+    pub async fn verify_downloads(&self, downloads: IndexMap<DownloadId, Download>) -> Result<(), SendError<VerifierMessage>> {
+        self.sender.send(VerifierMessage::VerifyDownloads(downloads)).await
     }
 
-    pub async fn cancel_verification(&self, download_id: DownloadId) {
-        let _ = self.sender.send(VerifierMessage::CancelVerification(download_id)).await;
+    pub async fn cancel_verification(&self, download_id: DownloadId) -> Result<(), SendError<VerifierMessage>> {
+        self.sender.send(VerifierMessage::CancelVerification(download_id)).await
+    }
+
+    pub async fn pause_verification(&self, download_id: DownloadId) -> Result<(), SendError<VerifierMessage>> {
+        self.sender.send(VerifierMessage::PauseVerification(download_id)).await
     }
 }
