@@ -17,7 +17,7 @@ use crate::db::state_manager::StateManager;
 use crate::download::{DownloadId, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
 use crate::download::items::{ChangedItem, Download, DownloadItem, DownloadType};
 use crate::download::status::FileStatus;
-use crate::download_task::HASH_CHUNK_SIZE;
+use crate::download_task::{CHUNKS_PER_HASH, HASH_CHUNK_SIZE};
 use crate::utils::file_utils::hash_file;
 
 struct FileVerificationDiff {
@@ -191,7 +191,12 @@ impl Verifier {
                         let chunks = file.chunks_mut();
 
                         for failed_chunk in failed_chunks {
-                            chunks.get_mut(failed_chunk).unwrap().set(false);
+                            let start_block = failed_chunk * CHUNKS_PER_HASH;
+                            let end_block = std::cmp::min(start_block + CHUNKS_PER_HASH, chunks.len());
+
+                            for block_index in start_block..end_block {
+                                chunks.get_mut(block_index).unwrap().set(false);
+                            }
                         }
                     }
                 }

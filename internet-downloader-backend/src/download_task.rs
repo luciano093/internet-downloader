@@ -30,7 +30,7 @@ use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
 const CHUNK_SIZE: usize = 16384; // 16 KB
 pub const HASH_CHUNK_SIZE: usize = 1048576; // 1 MB 
-const CHUNKS_PER_HASH: usize = HASH_CHUNK_SIZE / CHUNK_SIZE; // (1 MB / 16 KB) or 64 chunks
+pub const CHUNKS_PER_HASH: usize = HASH_CHUNK_SIZE / CHUNK_SIZE; // (1 MB / 16 KB) or 64 chunks
 const TARGET_RANGE_SIZE: usize = 5242880 / CHUNK_SIZE; // 320 ranges of chunks
 const CHANNEL_UPDATE_THRESHOLD: u64 = 128 * 1024; // 128 KB
 
@@ -1317,10 +1317,7 @@ impl DownloadSupervisor {
                     demand += 1;
                 } else {
                     // Initialized file: count how many ranges have at least one chunk missing
-                    let incomplete_jobs = chunks
-                        .chunks(TARGET_RANGE_SIZE)
-                        .filter(|chunk_range| !chunk_range.all())
-                        .count();
+                    let incomplete_jobs = file.chunk_hashes().len();
                     
                     demand += incomplete_jobs;
                 }
