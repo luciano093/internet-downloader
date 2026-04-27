@@ -409,7 +409,6 @@ impl SupervisorState {
                 self.chunk_cursors.insert(file_id, end_index);
 
                 let range = (start_index, end_index);
-                info!("Got chunk job ({}, {}) for {}", start_index, end_index, file_download.name());
 
                 let file_size = match file_download.size()? {
                     FileSize::Unknown => return None,
@@ -1465,7 +1464,6 @@ async fn download_range(
     file_id: usize,
     file_progress: Arc<AtomicU64>, 
 )-> Result<Vec<[u8; 16]>, RangeDownloadError> {
-    info!("Spawned worker for [{}, {})", range.0, range.1);
     let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
     let end_byte = start_byte + expected_len.saturating_sub(1); // -1 because http ranges are inclusive
 
@@ -1716,7 +1714,7 @@ async fn download_range(
 
     range_progress.complete();
 
-    info!("Worker [{}, {}) finished", range.0, range.1);
+    debug!("Worker [{}, {}) finished", range.0, range.1);
 
     Ok(hashes)
 }
