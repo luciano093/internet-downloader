@@ -101,6 +101,17 @@ impl Verifier {
     }
 
     async fn handle_download(&mut self, mut download: Download) {
+        let original_statuses: HashMap<usize, FileStatus> = download.files()
+            .iter()
+            .filter_map(|(&id, item)| {
+                if let DownloadType::File(file) = item {
+                    Some((id, file.status()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let changed_items = download.set_verifying();
                     
         let download_id = download.id();
@@ -147,7 +158,7 @@ impl Verifier {
 
             let _permit = semaphore.acquire_owned().await.unwrap();
 
-            let diffs = Self::verify_download(&download).await;
+            let diffs = Self::verify_download(&download, original_statuses).await;
 
             for diff in diffs {
                 let file_id = diff.file_id;
@@ -211,7 +222,7 @@ impl Verifier {
         self.handles.insert(download_id, handle);
     }
 
-    async fn verify_download(download: &Download) -> Vec<FileVerificationDiff> {
+    async fn verify_download(download: &Download, original_statuses: HashMap<usize, FileStatus>) -> Vec<FileVerificationDiff> {
         let mut pending_changes = Vec::new();
 
         for (&id, download_item) in download.files() {
@@ -219,16 +230,18 @@ impl Verifier {
                 let mut new_status = None;
                 let mut failed_chunks = None;
 
+                let original_status = original_statuses.get(&id).cloned().unwrap_or(FileStatus::NotFound);
+
                 // We first check if the file exists in disk
                 let exists_physically = tokio::fs::try_exists(file.relative_path()).await.unwrap_or(false);
 
-                if file.must_exist_in_disk() && !exists_physically {
+                if file.must_exist_with_status(&original_status) && !exists_physically {
                     new_status = Some(FileStatus::NotFound);
                 }
 
                 // Then we check if the download is completed, and if so, we check the stored hash
                 // against the hash of the file in disk
-                else if file.status() == FileStatus::Completed  {
+                else if original_status == FileStatus::Completed  {
                     let path = file.relative_path().to_path_buf();
 
                     let hash = tokio::task::spawn_blocking(move || {

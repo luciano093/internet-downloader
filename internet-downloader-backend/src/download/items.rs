@@ -584,7 +584,14 @@ impl FileDownload {
     }
 
     pub fn must_exist_in_disk(&self) -> bool {
-        match self.status {
+        self.must_exist_with_status(&self.status)
+    }
+
+    // This and `must_exist_in_disk` are separate functions to allow the case where
+    // a file's status has to be modified but the original status is required to check
+    // if the file must have existed.
+    pub fn must_exist_with_status(&self, status: &FileStatus) -> bool {
+        match status {
             FileStatus::Completed => true,
 
             // A file should only exist on disk once metadata has been fetched (file size is not None).
