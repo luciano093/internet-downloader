@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use memmap2::MmapOptions;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
 
@@ -33,7 +35,8 @@ struct Verifier {
     download_manager: UnboundedSender<ManagerCommand>,
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
-    handles: HashMap<DownloadId, JoinHandle<()>>
+    handles: HashMap<DownloadId, JoinHandle<()>>,
+    semaphore: Arc<Semaphore>,
 }
 
 impl Verifier {
@@ -50,6 +53,7 @@ impl Verifier {
             ui_sender,
             db_manager,
             handles: HashMap::new(),
+            semaphore: Arc::new(Semaphore::new(1)), 
         }
     }
 
@@ -112,7 +116,11 @@ impl Verifier {
         let db_manager = self.db_manager.clone();
         let download_manager = self.download_manager.clone();
 
+        let semaphore = self.semaphore.clone();
+
         let handle = tokio::spawn(async move {
+            let _permit = semaphore.acquire_owned().await.unwrap();
+
             let diffs = Self::verify_download(&download).await;
 
             for diff in diffs {
