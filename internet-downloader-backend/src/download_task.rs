@@ -29,7 +29,7 @@ use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
 const CHUNK_SIZE: usize = 16384; // 16 KB
-const HASH_CHUNK_SIZE: usize = 1048576; // 1 MB 
+pub const HASH_CHUNK_SIZE: usize = 1048576; // 1 MB 
 const CHUNKS_PER_HASH: usize = HASH_CHUNK_SIZE / CHUNK_SIZE; // (1 MB / 16 KB) or 64 chunks
 const TARGET_RANGE_SIZE: usize = 5242880 / CHUNK_SIZE; // 320 ranges of chunks
 const CHANNEL_UPDATE_THRESHOLD: u64 = 128 * 1024; // 128 KB
@@ -570,6 +570,7 @@ impl DownloadSupervisor {
                 StatusBucket::Initializing | 
                 StatusBucket::Retrying | 
                 StatusBucket::Queued |
+                StatusBucket::Verifying |
                 StatusBucket::Waiting => { },
 
                 StatusBucket::Paused |

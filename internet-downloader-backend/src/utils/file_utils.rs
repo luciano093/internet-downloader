@@ -1,3 +1,7 @@
+use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
+
+use memmap2::MmapOptions;
+
 pub fn force_delete_file(path: &std::path::Path) {
     // Windows
     #[cfg(target_os = "windows")]
@@ -72,4 +76,45 @@ pub fn force_delete_file(path: &std::path::Path) {
             tracing::info!("Successfully deleted file from disk: {:?}", path);
         }
     }
+}
+
+pub fn hash_file(path: &Path) -> u128 {
+    let mut hasher = blake3::Hasher::new();
+    
+    hasher.update_mmap_rayon(&path).expect("Failed to hash file");
+
+    let mut output = [0u8; 16];
+
+    hasher.finalize_xof().fill(&mut output);
+
+    u128::from_le_bytes(output)
+}
+
+pub fn hash_file_chunk(path: &Path, start: u64, length: usize) -> [u8; 16] {
+    let mut file = File::open(&path).expect("Failed to open file");
+    let mut hasher = blake3::Hasher::new();
+
+    // If the chunk is tiny, skip the mmap overhead and just read it.
+    if length < 16 * 1024 {
+        let mut buffer = vec![0u8; length];
+        file.seek(SeekFrom::Start(start)).expect("Failed to seek");
+        file.read_exact(&mut buffer).expect("Failed to read");
+        
+        hasher.update(&buffer);
+    } else {
+        let mmap = unsafe { 
+            MmapOptions::new()
+                .offset(start)
+                .len(length)
+                .map(&file)
+                .expect("Failed to map file chunk") 
+        };
+        
+        hasher.update_rayon(&mmap);
+    }
+
+    let mut output = [0u8; 16];
+    hasher.finalize_xof().fill(&mut output);
+
+    output
 }

@@ -17,6 +17,7 @@ pub enum DownloadStatus {
     #[default]
     Queued,
     Initializing,
+    Verifying,
     FetchingMetadata,
     InProgress,
     Completed,
@@ -42,6 +43,7 @@ impl DownloadStatus {
         Some(match parsed_state {
             DownloadStatusParse::Queued => Self::Queued,
             DownloadStatusParse::Initializing => Self::Initializing,
+            DownloadStatusParse::Verifying => Self::Verifying,
             DownloadStatusParse::FetchingMetadata => Self::FetchingMetadata,
             DownloadStatusParse::InProgress => Self::InProgress,
             DownloadStatusParse::Completed => Self::Completed,
@@ -56,29 +58,6 @@ impl DownloadStatus {
         })
     }
 
-    /// Returns true if download is actively downloading or waiting to be downloaded.
-    pub fn is_active(&self) -> bool {
-        match self {
-            Self::Queued | 
-            Self::Initializing | 
-            Self::FetchingMetadata | 
-            Self::InProgress | 
-            Self::Retrying | 
-            Self::Waiting => true,
-
-            Self::Completed | 
-            Self::CompletedWithErrors | 
-            Self::Failed(_) | 
-            Self::NotFound | 
-            Self::Paused => false,
-        }
-    }
-
-    /// Returns true if the download is in a final state and should not be modified.
-    pub fn is_inactive(&self) -> bool {
-        !self.is_active()
-    }
-
     /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
     pub fn can_set_to_queue(&self) -> bool {
         match self {
@@ -90,6 +69,7 @@ impl DownloadStatus {
             Self::Paused | 
             Self::Failed(_) | 
             Self::Initializing | 
+            Self::Verifying | 
             Self::FetchingMetadata | 
             Self::InProgress | 
             Self::Retrying | 
@@ -101,6 +81,7 @@ impl DownloadStatus {
         match self {
             Self::Queued => StatusBucket::Queued,
             Self::Initializing => StatusBucket::Initializing,
+            Self::Verifying => StatusBucket::Verifying,
             Self::FetchingMetadata => StatusBucket::FetchingMetadata,
             Self::InProgress => StatusBucket::InProgress,
             Self::Retrying => StatusBucket::Retrying,
@@ -137,6 +118,7 @@ impl DownloadStatus {
             DownloadStatus::Retrying |
             DownloadStatus::CompletedWithErrors |
             DownloadStatus::Waiting |
+            DownloadStatus::Verifying |
             DownloadStatus::Completed => (status_str, None),
         }
     }
@@ -148,6 +130,7 @@ impl DownloadStatus {
 pub enum StatusBucket {
     Queued,
     Initializing,
+    Verifying,
     FetchingMetadata,
     InProgress,
     Retrying,
@@ -202,6 +185,7 @@ pub enum FileStatus {
     #[default]
     Queued,
     Initializing,
+    Verifying,
     FetchingMetadata,
     InProgress,
     Completed,
@@ -214,7 +198,7 @@ pub enum FileStatus {
 
 impl FileStatus {
     /// Returns true if the file is actively downloading or waiting to download.
-    pub fn is_active(&self) -> bool {
+    pub fn can_be_paused(&self) -> bool {
         match self {
             // Active states
             Self::Queued | 
@@ -222,6 +206,7 @@ impl FileStatus {
             Self::FetchingMetadata | 
             Self::InProgress | 
             Self::Retrying | 
+            Self::Verifying |
             Self::Waiting(_) => true,
 
             // Inactive states
@@ -230,11 +215,6 @@ impl FileStatus {
             Self::NotFound | 
             Self::Paused => false,
         }
-    }
-
-    /// Returns true if the file is in a final state and should not be modified.
-    pub fn is_inactive(&self) -> bool {
-        !self.is_active()
     }
 
     /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
@@ -248,6 +228,7 @@ impl FileStatus {
             Self::Failed(_) | 
             Self::Initializing | 
             Self::FetchingMetadata | 
+            Self::Verifying |
             Self::InProgress | 
             Self::Retrying | 
             Self::Waiting(_) => true,
@@ -258,6 +239,7 @@ impl FileStatus {
         match self {
             Self::Queued => StatusBucket::Queued,
             Self::Initializing => StatusBucket::Initializing,
+            Self::Verifying => StatusBucket::Verifying,
             Self::FetchingMetadata => StatusBucket::FetchingMetadata,
             Self::InProgress => StatusBucket::InProgress,
             Self::Retrying => StatusBucket::Retrying,
@@ -293,6 +275,7 @@ impl FileStatus {
             FileStatusParse::Paused => Self::Paused,
             FileStatusParse::NotFound => Self::NotFound,
             FileStatusParse::Retrying => Self::Retrying,
+            FileStatusParse::Verifying => Self::Verifying,
             
             // Fallback if for some reason we still get here
             FileStatusParse::Failed |
@@ -320,6 +303,7 @@ impl FileStatus {
             FileStatus::Paused |
             FileStatus::NotFound |
             FileStatus::Retrying |
+            FileStatus::Verifying |
             FileStatus::Completed => (status_str, None, None),
         }
     }

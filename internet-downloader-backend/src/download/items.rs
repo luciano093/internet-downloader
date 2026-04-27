@@ -111,7 +111,7 @@ impl Download {
 
         for (&id, item) in &self.files {
             if let DownloadType::File(file) = item {
-                if file.status().is_active() {
+                if file.status().can_be_paused() {
                     files_to_pause.push(id);
                 }
             }
@@ -143,6 +143,20 @@ impl Download {
 
         for id in files_to_queue {
             if let Some(changes) = self.set_file_status(id, FileStatus::Queued) {
+                all_changes.extend(changes);
+            }
+        }
+
+        all_changes
+    }
+    
+    pub fn set_verifying(&mut self) -> Vec<ChangedItem> {
+        let ids: Vec<usize> = self.files.keys().copied().collect();
+
+        let mut all_changes = Vec::new();
+
+        for id in ids {
+            if let Some(changes) = self.set_file_status(id, FileStatus::Verifying) {
                 all_changes.extend(changes);
             }
         }
@@ -305,6 +319,7 @@ impl DownloadType {
                 FileStatus::Paused => DownloadStatus::Paused,
                 FileStatus::NotFound => DownloadStatus::NotFound,
                 FileStatus::Retrying => DownloadStatus::Retrying,
+                FileStatus::Verifying => DownloadStatus::Verifying,
                 FileStatus::Waiting(_) => DownloadStatus::Waiting,
                 
                 FileStatus::Failed(reason) => {
@@ -567,6 +582,24 @@ impl FileDownload {
         
         expected_len.min(file_size)
     }
+
+    pub fn must_exist_in_disk(&self) -> bool {
+        match self.status {
+            FileStatus::Completed => true,
+
+            // A file should only exist on disk once metadata has been fetched (file size is not None).
+            FileStatus::Paused | FileStatus::InProgress | FileStatus::Waiting(_) | FileStatus::Retrying => {
+                self.size.is_some() 
+            },
+
+            FileStatus::Failed(_) |
+            FileStatus::Queued |
+            FileStatus::Initializing |
+            FileStatus::FetchingMetadata |
+            FileStatus::Verifying |
+            FileStatus::NotFound  => false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -633,6 +666,7 @@ impl FolderDownload {
         match self.dominant_status() {
             Some(StatusBucket::Queued) => DownloadStatus::Queued,
             Some(StatusBucket::Initializing) => DownloadStatus::Initializing,
+            Some(StatusBucket::Verifying) => DownloadStatus::Verifying,
             Some(StatusBucket::FetchingMetadata) => DownloadStatus::FetchingMetadata,
             Some(StatusBucket::InProgress) => DownloadStatus::InProgress,
             Some(StatusBucket::Retrying) => DownloadStatus::Retrying,

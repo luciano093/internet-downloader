@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,6 +107,7 @@ pub enum DownloadCommand {
 // Set host max connections
 pub enum ManagerCommand {
     QueueDownload(String),
+    QueueDownloadObject(Download),
     RemoveDownload(DownloadId, bool), // true if we want to remove from disk too
     CleanUpDownload(DownloadId),
     PauseDownload(DownloadId),
@@ -377,10 +377,9 @@ impl DownloadManager {
         let concurrency_limit = self.concurrency_limit.clone();
         let db_manager = self.db_state_manager.clone();
 
-        let mut queue: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
+        let mut unprocessed_downloads: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
 
         let plugin_registry = PluginRegistryHandler::spawn().await;
-
         
         let network_config = NetworkConfig::default();
         let client = network_manager::build_global_client(&network_config);
@@ -412,7 +411,7 @@ impl DownloadManager {
         }
 
         // Add queued downloads to registry
-        for (id, download) in &queue {
+        for (id, download) in &unprocessed_downloads {
             url_registry.insert(download.url().to_string(), *id);
             id_registry.insert(*id, download.url().to_string());
         }
@@ -446,7 +445,7 @@ impl DownloadManager {
                                 removed_downloads.insert(id, from_disk);
 
                                  // Try to remove from Pending Queue
-                                if queue.shift_remove(&id).is_some() {
+                                if unprocessed_downloads.shift_remove(&id).is_some() {
                                     debug!("Removed pending download {}", id);
                                     let _ = command_sender.send(ManagerCommand::CleanUpDownload(id));
                                 } 
@@ -546,11 +545,12 @@ impl DownloadManager {
                                     warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
                                 }
                             },
+                            ManagerCommand::QueueDownloadObject(download) => todo!(),
                         }
                     }
 
-                    Ok(_) = concurrency_limit.clone().acquire_owned(), if !queue.is_empty() => {
-                        if let Some((_, download)) = queue.shift_remove_index(0) {
+                    Ok(_) = concurrency_limit.clone().acquire_owned(), if !unprocessed_downloads.is_empty() => {
+                        if let Some((_, download)) = unprocessed_downloads.shift_remove_index(0) {
                             let _ = command_sender.send(ManagerCommand::QueueDownload(download.url().to_string()));
                         }
                     }
@@ -566,20 +566,6 @@ impl DownloadManager {
     pub async fn get_snapshot(&self) -> DownloadSnapshot {
         get_snapshot(&self.db_state_manager).await
     }
-}
-
-async fn hash_file(path: PathBuf) -> u128 {
-    tokio::task::spawn_blocking(move || {
-        let mut hasher = blake3::Hasher::new();
-        
-        hasher.update_mmap_rayon(&path).expect("Failed to hash file");
-
-        let mut output = [0u8; 16];
-
-        hasher.finalize_xof().fill(&mut output);
-
-        u128::from_le_bytes(output)
-    }).await.expect("Hashing task panicked")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumString, Default)]
