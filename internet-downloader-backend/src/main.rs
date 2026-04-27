@@ -62,8 +62,6 @@ async fn main() {
 
     download_manager.load_state().await;
 
-    download_manager.verify_downloads().await;
-
     download_manager.start_processing().await;
 
     let download_manager = Arc::new(Mutex::new(download_manager));

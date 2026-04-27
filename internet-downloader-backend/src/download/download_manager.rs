@@ -312,65 +312,6 @@ impl DownloadManager {
         }
     }
 
-    pub async fn verify_downloads(&mut self) {
-        for (_, download) in &mut self.unprocessed_downloads {
-            let mut pending_changes = Vec::new();
-
-            for (&id, download_item) in &mut download.files {
-
-                if let DownloadType::File(file) = download_item {
-                    let exists_physically = file.relative_path().exists();
-
-                    let should_exist  = match file.status() {
-                        FileStatus::Completed => true,
-
-                        // A file should only exist on disk once metadata has been fetched (file size is not None).
-                        FileStatus::Paused | FileStatus::InProgress | FileStatus::Waiting(_) | FileStatus::Retrying => {
-                            file.size().is_some() 
-                        },
-
-                        FileStatus::Failed(_) |
-                        FileStatus::Queued |
-                        FileStatus::Initializing |
-                        FileStatus::FetchingMetadata |
-                        FileStatus::NotFound  => false,
-                    };
-
-                    // Check if file is missing (not queued and doesn't exist)
-                    if should_exist && !exists_physically {
-                        pending_changes.push((id, FileStatus::NotFound));
-                    } 
-
-
-                    // We check the hash only if the download is completed
-                    else if file.status() == FileStatus::Completed  {
-                        let hash = hash_file(file.relative_path().to_path_buf()).await;
-
-                        if Some(hash) != file.hash() {
-                            pending_changes.push((id, FileStatus::Failed(FileFailureReason::HashMismatch)));
-                        }
-                    }
-                }
-            }
-
-            let mut state_changed = false;
-
-            // Apply all file status changes
-            for (id, new_status) in pending_changes {
-                if let Some(changed_items) = download.set_file_status(id, new_status) {
-                    if !changed_items.is_empty() {
-                        state_changed = true;
-                    }
-                }
-            }
-
-            if state_changed {
-                // We should always write the change to db when the state has changed
-                self.db_state_manager.write_download(download).await;
-            }
-        }
-    }
-
     pub async fn queue_download(&mut self, url: String) -> Result<(), ()> {
         if let Some(sender) = &self.command_sender {
             sender.send(ManagerCommand::QueueDownload(url)).unwrap();
