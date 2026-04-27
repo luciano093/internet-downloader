@@ -608,12 +608,6 @@ async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, dow
         return Ok(());
     }
 
-    sqlx::query("DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ?")
-        .bind(*download_id as i64)
-        .bind(file.id() as i64)
-        .execute(&mut **transaction)
-        .await?;
-
     let mut range = (0..hashes.len()).peekable();
 
     while range.peek().is_some() {
@@ -629,6 +623,12 @@ async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, dow
                 .push_bind(chunk_index as i64)
                 .push_bind(hash.map(|hash| &hash[..]));
         });
+
+        builder.push(r#"
+            ON CONFLICT(download_id, item_id, chunk_index) DO UPDATE SET 
+                hash = excluded.hash
+                    WHERE chunk_hashes.hash IS DISTINCT FROM excluded.hash
+        "#);
 
         builder.build().execute(&mut **transaction).await?;
     }
