@@ -173,6 +173,7 @@ struct RangeDownload {
     url: Arc<String>,
     file_map: Arc<SharedFileMap>,
     expected_len: u64,
+    previously_downloaded: u64,
 }
 
 impl FileDownloadRetry for RangeDownload {
@@ -197,7 +198,7 @@ enum SupervisorMessage {
     Pause,
     SpawnWorker(ValidDownloadPermit),
     RangeSuccess(ActiveDownloadPermit, usize, (usize, usize), Vec<[u8; 16]>), // permit, id, range, chunk hashes
-    RangeFailed(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, RangeDownloadError), // permit, id, range, url
+    RangeFailed(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, RangeDownloadError, u64), // permit, id, range, url
     StreamSuccess(ActiveDownloadPermit, usize, usize), // permit, id, size of file
     StreamFailed(ActiveDownloadPermit, usize, Arc<String>, PathBuf, DownloadError), // permit, id, url, path, error
     MetadataFetched(ActiveDownloadPermit, usize, Arc<String>, SizeResult), 
@@ -219,6 +220,7 @@ pub enum Job {
         range: (usize, usize),
         file_map: Arc<SharedFileMap>,
         expected_len: u64,
+        previously_downloaded: u64,
     }, // file id, url, range
     DownloadStream(usize, Arc<String>, PathBuf), // file id, url
 }
@@ -229,6 +231,7 @@ pub struct RangeRetryJob {
     pub url: Arc<String>,
     pub file_map: Arc<SharedFileMap>,
     pub expected_len: u64,
+    pub previously_downloaded: u64,
 }
 
 // TODO: try to see if i can implement a get_next_chunk()
@@ -356,7 +359,8 @@ impl SupervisorState {
                     url: retry_range_job.url,
                     range: retry_range_job.range,
                     file_map: retry_range_job.file_map,
-                    expected_len: retry_range_job.expected_len
+                    expected_len: retry_range_job.expected_len,
+                    previously_downloaded: retry_range_job.previously_downloaded,
                 });
             }
 
@@ -415,6 +419,23 @@ impl SupervisorState {
                     FileSize::Known(file_size) => file_size,
                 };
 
+                let mut previously_downloaded = 0;
+
+                let chunks_len = file_download.chunks().len();
+
+                for block_index in range.0..range.1 {
+                    if file_download.chunks().get(block_index).unwrap() == true {
+                        // If we are on the last block, it is very possible that the size of the block
+                        // in bytes is less than the normal CHUNK_SIZE
+                        if block_index == (chunks_len - 1) {
+                            let block_start_byte = block_index as u64 * CHUNK_SIZE as u64;
+                            previously_downloaded += file_size - block_start_byte;
+                        } else {
+                            previously_downloaded += CHUNK_SIZE as u64; 
+                        }
+                    }
+                }
+
                 let expected_len = self.calculate_chunk_expected_len(CHUNK_SIZE as u64, range, file_size);
 
                 let path = file_download.relative_path();
@@ -437,6 +458,7 @@ impl SupervisorState {
                     range, 
                     file_map, 
                     expected_len,
+                    previously_downloaded,
                 })
             }
         }
@@ -670,7 +692,7 @@ impl DownloadSupervisor {
                                                 }
                                             });
                                         },
-                                        Job::DownloadChunk { file_id, url, range, file_map, expected_len } => {
+                                        Job::DownloadChunk { file_id, url, range, file_map, expected_len, previously_downloaded } => {
                                             state.active_downloads += 1;
 
                                             let client = state.app_context.client.clone();
@@ -699,13 +721,13 @@ impl DownloadSupervisor {
                                                         return;
                                                     }
                                                     // Do worker stuff
-                                                    result = download_range(client, &url, range, io_sender, file_map.clone(), expected_len, limiters, ui_sender, download_id, file_id, file_progress) => {
+                                                    result = download_range(client, &url, range, io_sender, file_map.clone(), expected_len, limiters, ui_sender, download_id, file_id, file_progress, previously_downloaded) => {
                                                         match result {
                                                             Ok(chunk_hashes) => {
                                                                 let _ = sender.send(SupervisorMessage::RangeSuccess(permit.downgrade(), file_id, range, chunk_hashes));
                                                             }
                                                             Err(download_error) => {
-                                                                let _ = sender.send(SupervisorMessage::RangeFailed(permit.downgrade(), file_id, range, url, file_map, expected_len, download_error));
+                                                                let _ = sender.send(SupervisorMessage::RangeFailed(permit.downgrade(), file_id, range, url, file_map, expected_len, download_error, previously_downloaded));
                                                             }
                                                         }
                                                     }
@@ -855,8 +877,8 @@ impl DownloadSupervisor {
                                         }
                                     }
                                 },
-                                SupervisorMessage::RangeFailed(permit, file_id, range, url, file_map, expected_len, download_error) => {
-                                    let retry_kind = RetryKind::RangeDownload(RangeDownload { file_id, range, url: url.clone(), file_map, expected_len });
+                                SupervisorMessage::RangeFailed(permit, file_id, range, url, file_map, expected_len, download_error, previously_downloaded) => {
+                                    let retry_kind = RetryKind::RangeDownload(RangeDownload { file_id, range, url: url.clone(), file_map, expected_len, previously_downloaded });
                                     let file_id = retry_kind.file_id();
                                     let download_name = state.download.name().clone();
 
@@ -1058,7 +1080,8 @@ impl DownloadSupervisor {
                                                     range: range_download.range,
                                                     url: range_download.url,
                                                     file_map: range_download.file_map,
-                                                    expected_len: range_download.expected_len
+                                                    expected_len: range_download.expected_len,
+                                                    previously_downloaded: range_download.previously_downloaded,
                                                 });
                                         },
                                     }
@@ -1462,7 +1485,10 @@ async fn download_range(
     ui_sender: UnboundedSender<UiStateEvent>,
     download_id: DownloadId,
     file_id: usize,
-    file_progress: Arc<AtomicU64>, 
+    file_progress: Arc<AtomicU64>,
+    // How many bytes out of this range were already downloaded if any
+    // (required to report accurate progress when healing and redownloading certain bytes)
+    previously_downloaded_bytes: u64, 
 )-> Result<Vec<[u8; 16]>, RangeDownloadError> {
     let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
     let end_byte = start_byte + expected_len.saturating_sub(1); // -1 because http ranges are inclusive
@@ -1511,6 +1537,8 @@ async fn download_range(
     let mut unnotified_bytes = 0; 
     let mut current_progress = 0;
 
+    let mut bytes_to_skip_reporting = previously_downloaded_bytes;
+
     // Disk IO variables
     let buffer_capacity: usize = 1024 * 1024; // 1 MB
     let mut buffer = BytesMut::with_capacity(buffer_capacity);
@@ -1534,22 +1562,34 @@ async fn download_range(
             match receiver.try_recv() {
                 Ok(Ok(_)) => {
                     let (bytes_written, _) = in_flight_acks.pop_front().unwrap();
-                    current_progress = range_progress.add(bytes_written);
-                    unnotified_bytes += bytes_written;
+                    let mut reportable_bytes = bytes_written;
 
-                    if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
-                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                            DownloadUpdate::ItemUpdated { 
-                                id: download_id,
-                                item_update: ItemUpdate::File(
-                                    FileUpdate::BytesDownloaded { 
-                                        id: file_id,
-                                        len: current_progress, 
-                                    }
-                                ) 
-                            }
-                        ));
-                        unnotified_bytes = 0; 
+                    // If there are still some bytes that we have to skip due to them already being downloaded for this range
+                    // we subtract them from both the bytes we report now and from the bytes to skip
+                    if bytes_to_skip_reporting > 0 {
+                        let skip = reportable_bytes.min(bytes_to_skip_reporting);
+                        bytes_to_skip_reporting -= skip;
+                        reportable_bytes -= skip;
+                    }
+
+                    if reportable_bytes > 0 {
+                        current_progress = range_progress.add(reportable_bytes);
+                        unnotified_bytes += reportable_bytes;
+
+                        if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
+                            let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                                DownloadUpdate::ItemUpdated { 
+                                    id: download_id,
+                                    item_update: ItemUpdate::File(
+                                        FileUpdate::BytesDownloaded { 
+                                            id: file_id,
+                                            len: current_progress, 
+                                        }
+                                    ) 
+                                }
+                            ));
+                            unnotified_bytes = 0; 
+                        }
                     }
                 }
                 Ok(Err(error)) => return Err(RangeDownloadError::DiskWriteError(error)), // Disk failed
@@ -1590,23 +1630,33 @@ async fn download_range(
                 receiver.await
                     .map_err(|_| RangeDownloadError::DiskPoolDropped)? 
                     .map_err(RangeDownloadError::DiskWriteError)?; 
+                
+                let mut reportable_bytes = bytes_written;
 
-                current_progress = range_progress.add(bytes_written);
-                unnotified_bytes += bytes_written;
+                if bytes_to_skip_reporting > 0 {
+                    let skip = reportable_bytes.min(bytes_to_skip_reporting);
+                    bytes_to_skip_reporting -= skip;
+                    reportable_bytes -= skip;
+                }
 
-                if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
-                    let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                        DownloadUpdate::ItemUpdated { 
-                            id: download_id,
-                            item_update: ItemUpdate::File(
-                                FileUpdate::BytesDownloaded { 
-                                    id: file_id,
-                                    len: current_progress, 
-                                }
-                            ) 
-                        }
-                    ));
-                    unnotified_bytes = 0; 
+                if reportable_bytes > 0 {
+                    current_progress = range_progress.add(reportable_bytes);
+                    unnotified_bytes += reportable_bytes;
+
+                    if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
+                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                            DownloadUpdate::ItemUpdated { 
+                                id: download_id,
+                                item_update: ItemUpdate::File(
+                                    FileUpdate::BytesDownloaded { 
+                                        id: file_id,
+                                        len: current_progress, 
+                                    }
+                                ) 
+                            }
+                        ));
+                        unnotified_bytes = 0; 
+                    }
                 }
             }
                 
@@ -1680,8 +1730,18 @@ async fn download_range(
             .map_err(|_| RangeDownloadError::DiskPoolDropped)?
             .map_err(RangeDownloadError::DiskWriteError)?;
 
-        current_progress = range_progress.add(bytes_written);
-        unnotified_bytes += bytes_written;
+        let mut reportable_bytes = bytes_written;
+
+        if bytes_to_skip_reporting > 0 {
+            let skip = reportable_bytes.min(bytes_to_skip_reporting);
+            bytes_to_skip_reporting -= skip;
+            reportable_bytes -= skip;
+        }
+
+        if reportable_bytes > 0 {
+            current_progress = range_progress.add(reportable_bytes);
+            unnotified_bytes += reportable_bytes;
+        }
     }
 
     // This can happen only in the final chunk of the whole file, as this is the
