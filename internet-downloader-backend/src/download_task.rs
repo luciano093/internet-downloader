@@ -1338,8 +1338,11 @@ impl DownloadSupervisor {
                     // Uninitialized file: needs 1 permit for metadata/stream request
                     demand += 1;
                 } else {
-                    // Initialized file: count how many ranges have at least one chunk missing
-                    let incomplete_jobs = file.chunk_hashes().len();
+                    // Initialized file: count how many 1MB ranges have at least one chunk missing
+                    let incomplete_jobs = chunks
+                        .chunks(BLOCKS_PER_HASH)
+                        .filter(|chunk_slice| !chunk_slice.all())
+                        .count();
                     
                     demand += incomplete_jobs;
                 }
