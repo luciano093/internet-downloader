@@ -239,8 +239,8 @@ impl StateManager {
                             .push_bind(wait_time)
                             .push_bind(file.url_ref()) 
                             .push_bind(hash)
-                            .push_bind(file.chunks().as_raw_slice())   
-                            .push_bind(file.chunks().len() as i64)   
+                            .push_bind(file.blocks().as_raw_slice())   
+                            .push_bind(file.blocks().len() as i64)   
                             .push_bind(size_type)
                             .push_bind(size_bytes)
                             .push_bind(file.retries() as i64);

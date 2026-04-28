@@ -372,7 +372,7 @@ pub struct FileDownload {
     #[serde(serialize_with = "serialize_hash")] 
     hash: Option<u128>,
     #[serde(serialize_with = "serialize_chunks")]
-    chunks: BitVec<u8, Msb0>,
+    blocks: BitVec<u8, Msb0>,
     chunk_hashes: Vec<Option<[u8; 16]>>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     #[serde(skip)]
@@ -407,7 +407,7 @@ impl Debug for FileDownload {
             .field("relative_path", &self.relative_path)
             .field("status", &self.status)
             .field("hash", &self.hash)
-            .field("chunks", &self.chunks.len())
+            .field("chunks", &self.blocks.len())
             .finish()
     }
 }
@@ -424,7 +424,7 @@ impl FileDownload {
             relative_path,
             status: FileStatus::Queued,
             hash: None,
-            chunks: BitVec::new(),
+            blocks: BitVec::new(),
             chunk_hashes: Vec::new(),
             size: None,
             retries: 0,
@@ -473,19 +473,19 @@ impl FileDownload {
             relative_path,
             status,
             hash,
-            chunks,
+            blocks: chunks,
             chunk_hashes,
             size,
             retries: row.retries as usize,
         }
     }
 
-    pub const fn chunks(&self) -> &BitVec<u8, Msb0> {
-        &self.chunks
+    pub const fn blocks(&self) -> &BitVec<u8, Msb0> {
+        &self.blocks
     }
 
-    pub fn chunks_mut(&mut self) -> &mut BitVec<u8, Msb0> {
-        &mut self.chunks
+    pub fn blocks_mut(&mut self) -> &mut BitVec<u8, Msb0> {
+        &mut self.blocks
     }
 
     pub const fn chunk_hashes(&self) -> &Vec<Option<[u8; 16]>> {
@@ -533,7 +533,7 @@ impl FileDownload {
     }
 
     pub fn calculate_initial_bytes(&self, chunk_size: u64) -> u64 {
-        let chunks = self.chunks();
+        let chunks = self.blocks();
 
         if chunks.is_empty() {
             return 0;

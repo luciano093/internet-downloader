@@ -28,10 +28,10 @@ use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit
 use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
-const CHUNK_SIZE: usize = 16384; // 16 KB
+const BLOCK_SIZE: usize = 16384; // 16 KB
 pub const HASH_CHUNK_SIZE: usize = 1048576; // 1 MB 
-pub const CHUNKS_PER_HASH: usize = HASH_CHUNK_SIZE / CHUNK_SIZE; // (1 MB / 16 KB) or 64 chunks
-const TARGET_RANGE_SIZE: usize = 5242880 / CHUNK_SIZE; // 320 ranges of chunks
+pub const BLOCKS_PER_HASH: usize = HASH_CHUNK_SIZE / BLOCK_SIZE; // (1 MB / 16 KB) or 64 blocks
+const TARGET_RANGE_SIZE: usize = 5242880 / BLOCK_SIZE; // 320 ranges of chunks
 const CHANNEL_UPDATE_THRESHOLD: u64 = 128 * 1024; // 128 KB
 
 #[derive(Debug, Error)]
@@ -261,7 +261,7 @@ impl SupervisorState {
         let mut file_progress = HashMap::new();
         for (id, item) in download.files() {
             if let DownloadType::File(file) = item {
-                let initial_bytes = file.calculate_initial_bytes(CHUNK_SIZE as u64);
+                let initial_bytes = file.calculate_initial_bytes(BLOCK_SIZE as u64);
                 
                 file_progress.insert(*id, Arc::new(AtomicU64::new(initial_bytes)));
             }
@@ -367,7 +367,7 @@ impl SupervisorState {
             // get cursor for this particular file
             let cursor = *self.chunk_cursors.entry(file_id).or_insert(0);
 
-            let chunks = file_download.chunks();
+            let chunks = file_download.blocks();
 
             // This means that the metadata is still not fetched, so we can skip it
             if chunks.is_empty() {
@@ -382,7 +382,7 @@ impl SupervisorState {
                 // we snap back to force align it
                 // For example: if we want to align to a 1MB chunk size, but the zero_index is 
                 // 3.5 MB, this converts it to 3MB
-                let start_index = (zero_index / CHUNKS_PER_HASH) * CHUNKS_PER_HASH;
+                let start_index = (zero_index / BLOCKS_PER_HASH) * BLOCKS_PER_HASH;
                 
                 // We aim for the target range size, this is the ideal end for this chunk
                 let max_end = (start_index + TARGET_RANGE_SIZE).min(chunks.len());
@@ -397,13 +397,13 @@ impl SupervisorState {
 
                 let mut end_index = {
                     // We align to our chunk size   
-                    let aligned_end = (unaligned_end_index / CHUNKS_PER_HASH) * CHUNKS_PER_HASH;
+                    let aligned_end = (unaligned_end_index / BLOCKS_PER_HASH) * BLOCKS_PER_HASH;
 
                     // If the alignment was less than our start index, we have a problem and should align forward
                     if aligned_end > start_index {
                         aligned_end
                     } else {
-                        start_index + CHUNKS_PER_HASH
+                        start_index + BLOCKS_PER_HASH
                     }
                 };
 
@@ -421,22 +421,22 @@ impl SupervisorState {
 
                 let mut previously_downloaded = 0;
 
-                let chunks_len = file_download.chunks().len();
+                let chunks_len = file_download.blocks().len();
 
                 for block_index in range.0..range.1 {
-                    if file_download.chunks().get(block_index).unwrap() == true {
+                    if file_download.blocks().get(block_index).unwrap() == true {
                         // If we are on the last block, it is very possible that the size of the block
                         // in bytes is less than the normal CHUNK_SIZE
                         if block_index == (chunks_len - 1) {
-                            let block_start_byte = block_index as u64 * CHUNK_SIZE as u64;
+                            let block_start_byte = block_index as u64 * BLOCK_SIZE as u64;
                             previously_downloaded += file_size - block_start_byte;
                         } else {
-                            previously_downloaded += CHUNK_SIZE as u64; 
+                            previously_downloaded += BLOCK_SIZE as u64; 
                         }
                     }
                 }
 
-                let expected_len = self.calculate_chunk_expected_len(CHUNK_SIZE as u64, range, file_size);
+                let expected_len = self.calculate_chunk_expected_len(BLOCK_SIZE as u64, range, file_size);
 
                 let path = file_download.relative_path();
 
@@ -813,9 +813,9 @@ impl DownloadSupervisor {
                                         }
 
                                         if size > 0 {
-                                            let chunk_count = size.div_ceil(CHUNK_SIZE);
-                                            file.chunks_mut().resize(chunk_count, true);
-                                            trace!("got chunk size completed: {}/{}", file.chunks_mut().count_ones(), file.chunks().len());
+                                            let chunk_count = size.div_ceil(BLOCK_SIZE);
+                                            file.blocks_mut().resize(chunk_count, true);
+                                            trace!("got chunk size completed: {}/{}", file.blocks_mut().count_ones(), file.blocks().len());
                                         } else {
                                             // 0 Byte file
                                             trace!("got 0 bytes: {}", file.name());
@@ -845,14 +845,14 @@ impl DownloadSupervisor {
                                     if let Some(file) = state.download.get_file_mut(&file_id) {
                                         file.reset_retries();
 
-                                        file.chunks_mut()[range.0..range.1].fill(true);
+                                        file.blocks_mut()[range.0..range.1].fill(true);
 
-                                        let start = range.0.div_ceil(CHUNKS_PER_HASH);
+                                        let start = range.0.div_ceil(BLOCKS_PER_HASH);
                                         for (i, hash) in chunk_hashes.into_iter().enumerate() {
                                             file.chunk_hashes_mut()[start + i] = Some(hash);
                                         }
 
-                                        all_chunks_done = file.chunks().all();
+                                        all_chunks_done = file.blocks().all();
 
                                         if all_chunks_done {
                                             let bytes_downloaded = state.file_progress
@@ -975,8 +975,8 @@ impl DownloadSupervisor {
                                                 // Initialize chunks
                                                 if size > 0 {
                                                     // Calculate how many 16KB chunks exist
-                                                    let chunk_count = size.div_ceil(CHUNK_SIZE as u64);
-                                                    file.chunks_mut().resize(chunk_count as usize, false);
+                                                    let chunk_count = size.div_ceil(BLOCK_SIZE as u64);
+                                                    file.blocks_mut().resize(chunk_count as usize, false);
 
                                                     let num_chunk_hashes = size.div_ceil(HASH_CHUNK_SIZE as u64);
 
@@ -1332,7 +1332,7 @@ impl DownloadSupervisor {
                     continue; 
                 }
 
-                let chunks = file.chunks(); 
+                let chunks = file.blocks(); 
 
                 if chunks.is_empty() {
                     // Uninitialized file: needs 1 permit for metadata/stream request
@@ -1490,7 +1490,7 @@ async fn download_range(
     // (required to report accurate progress when healing and redownloading certain bytes)
     previously_downloaded_bytes: u64, 
 )-> Result<Vec<[u8; 16]>, RangeDownloadError> {
-    let start_byte = range.0 as u64 * (CHUNK_SIZE as u64);
+    let start_byte = range.0 as u64 * (BLOCK_SIZE as u64);
     let end_byte = start_byte + expected_len.saturating_sub(1); // -1 because http ranges are inclusive
 
     let range_header = format!("bytes={}-{}", start_byte, end_byte);
