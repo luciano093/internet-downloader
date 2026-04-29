@@ -584,20 +584,23 @@ async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, dow
         return Ok(());
     }
 
-    let mut range = (0..hashes.len()).peekable();
+    let mut range = (0..hashes.len())
+        .filter_map(|chunk_index| {
+            let hash = hashes.get(chunk_index)?.as_ref()?;
+            Some((chunk_index, hash))
+        })
+        .peekable();
 
     while range.peek().is_some() {
         let mut builder = QueryBuilder::new(
             "INSERT INTO chunk_hashes (download_id, item_id, chunk_index, hash)"
         );
 
-        builder.push_values(range.by_ref().take(1000), |mut builder, chunk_index| {
-            let hash = hashes[chunk_index].as_ref();
-
+        builder.push_values(range.by_ref().take(1000), |mut builder, (chunk_index, hash)| {
             builder.push_bind(*download_id as i64)
                 .push_bind(file.id() as i64)
                 .push_bind(chunk_index as i64)
-                .push_bind(hash.map(|hash| &hash[..]));
+                .push_bind(&hash[..]);
         });
 
         builder.push(r#"
