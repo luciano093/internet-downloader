@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 use os_str_bytes::OsStrBytes;
 use sqlx::{QueryBuilder, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
 use thiserror::Error;
+use tracing::warn;
 
 use crate::{db::rows::{ChunkHashRow, DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, DownloadId, FileSize, items::{Download, DownloadItem, DownloadType, FileDownload}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
@@ -393,9 +394,11 @@ impl StateManager {
             }
 
             if let Some(hash_vec) = row.hash {
-                let arr: [u8; 16] = hash_vec.try_into().unwrap();
-
-                hashes[index] = Some(arr);
+                if let Ok(arr) = hash_vec.try_into() {
+                    hashes[index] = Some(arr);
+                } else {
+                    warn!("Malformed chunk hash found at index {} for download. Treating as missing.", index);
+                }
             }
         }
 
@@ -422,9 +425,11 @@ impl StateManager {
             }
 
             if let Some(hash_vec) = row.hash {
-                let arr: [u8; 16] = hash_vec.try_into().unwrap();
-
-                hashes[index] = Some(arr);
+                if let Ok(arr) = hash_vec.try_into() {
+                    hashes[index] = Some(arr);
+                } else {
+                    warn!("Malformed chunk hash found at index {} for download. Treating as missing.", index);
+                }
             }
         }
 
