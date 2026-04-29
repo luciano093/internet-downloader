@@ -296,8 +296,21 @@ impl Verifier {
                                 Self::verify_file_chunks(&path, HASH_CHUNK_SIZE, size as usize, chunks_to_check)
                             }).await.unwrap();
 
-                            if !failed_indices.is_empty() {
-                                failed_chunks = Some(failed_indices);
+                            match failed_indices {
+                                Ok(failed_indices) => {
+                                    if !failed_indices.is_empty() {
+                                        failed_chunks = Some(failed_indices);
+                                    }   
+                                },
+                                Err(error) => {
+                                    if error.kind() == std::io::ErrorKind::NotFound {
+                                        warn!("Failed to find file {} during verification: {}", file.name(), error);
+                                        new_status = Some(FileStatus::NotFound); 
+                                    } else {
+                                        warn!("Failed to read file {} during verification: {}", file.name(), error);
+                                        new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
+                                    }
+                                },
                             }
                         }
                     }
@@ -316,18 +329,18 @@ impl Verifier {
         pending_changes
     }
 
-    fn verify_file_chunks(path: &Path, chunk_size: usize, file_len: usize, chunks_to_check: Vec<Option<[u8; 16]>>) -> Vec<usize> {
+    fn verify_file_chunks(path: &Path, chunk_size: usize, file_len: usize, chunks_to_check: Vec<Option<[u8; 16]>>) -> Result<Vec<usize>, std::io::Error> {
         let mut failed_chunks = Vec::new();
 
-        let mut file = File::open(&path).expect("Failed to open file");
+        let mut file = File::open(&path)?;
         let mut hasher = blake3::Hasher::new();
 
         // If the file is tiny, skip the mmap overhead and just read it.
         if file_len < 16 * 1024 {
             let mut buffer = vec![0u8; file_len];
 
-            file.seek(SeekFrom::Start(0)).expect("Failed to seek");
-            file.read_exact(&mut buffer).expect("Failed to read");
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut buffer)?;
 
             for (index, expected) in chunks_to_check.iter().enumerate() {
                 // We only want to check, if we know we have another hash to check against
@@ -355,8 +368,7 @@ impl Verifier {
         } else {
             let mmap = unsafe { 
                 MmapOptions::new()
-                    .map(&file)
-                    .expect("Failed to map file chunk") 
+                    .map(&file)?
             };
 
             for (index, expected) in chunks_to_check.iter().enumerate() {
@@ -383,7 +395,7 @@ impl Verifier {
             }
         }
 
-        failed_chunks
+        Ok(failed_chunks)
     }
 }
 
