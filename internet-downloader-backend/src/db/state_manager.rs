@@ -575,35 +575,6 @@ impl StateManager {
 
         transaction.commit().await.unwrap();
     }
-
-    pub async fn populate_hash_table(&self, download_id: DownloadId, file_id: usize, num_chunk_hashes: usize)  -> Result<(), sqlx::Error> {
-        if num_chunk_hashes == 0 {
-            return Ok(());
-        }
-
-        let mut transaction = self.pool.begin().await.unwrap();
-
-        let mut chunks_iter = (0..num_chunk_hashes).peekable();
-
-        // we take in chunks of 1000 chunk hashes to avoid hitting sqlite's default limit per query
-        while chunks_iter.peek().is_some() {
-            let mut builder = QueryBuilder::new(
-                "INSERT INTO chunk_hashes (download_id, item_id, chunk_index, hash)"
-            );
-
-            builder.push_values(chunks_iter.by_ref().take(1000), |mut builder, chunk_index| {
-                builder.push_bind(*download_id as i64)
-                    .push_bind(file_id as i64)
-                    .push_bind(chunk_index as i64)
-                    .push_bind(None::<&[u8]>);  // null hash initially just for population purposes
-            });
-
-            builder.build().execute(&mut *transaction).await?;
-        }
-
-        transaction.commit().await?;
-        Ok(())
-    }
 }
 
 async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, download_id: DownloadId, file: &FileDownload) -> Result<(), sqlx::Error> {

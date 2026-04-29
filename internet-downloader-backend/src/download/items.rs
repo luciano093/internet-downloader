@@ -13,6 +13,7 @@ use crate::download::{DownloadFailureReason, DownloadId, FileFailureReason, File
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::{serialize_hash, serialize_chunks};
+use crate::download_task::HASH_CHUNK_SIZE;
 
 pub trait DownloadItem {
     fn parent_id(&self) -> Option<usize>;
@@ -533,7 +534,7 @@ impl FileDownload {
         }
     }
 
-    pub fn from_db(row: DownloadItemRow, chunk_hashes: Vec<Option<[u8; 16]>>) -> Self {
+    pub fn from_db(row: DownloadItemRow, mut chunk_hashes: Vec<Option<[u8; 16]>>) -> Self {
         // Reconstruct the FileSize
         let size = match row.size_type.as_deref() {
             Some("known") if let Some(size_bytes) = row.size_bytes => Some(FileSize::Known(size_bytes as u64)),
@@ -566,6 +567,12 @@ impl FileDownload {
             
                 PathBuf::new()
             });
+
+        if let Some(FileSize::Known(file_size)) = size {
+            let expected_chunks = (file_size as usize).div_ceil(HASH_CHUNK_SIZE);
+
+            chunk_hashes.resize(expected_chunks, None);
+        }
 
         Self {
             parent_id: row.parent_id.map(|id| id as usize),
