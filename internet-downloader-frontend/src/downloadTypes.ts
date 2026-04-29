@@ -37,8 +37,7 @@ export type DownloadStatus =
   | { state: "waiting"; value: number | null }
   | { state: "failed"; value: DownloadFailureReason };
 
-export type ActiveOperation =
-  | { active_operation: "verifying" };
+export type ActiveOperation = "verifying";
 
 export type FileItem = {
   type: "file";
@@ -77,7 +76,7 @@ export type FileItemDiff = {
   file_name?: string;
   relative_path?: string;
   status?: FileStatus;
-  active_operation?: ActiveOperation,
+  active_operation?: ActiveOperation | null,
   url?: string;
   hash?: string | null;
   size?: "unknown" | number;
@@ -88,7 +87,7 @@ export type FolderItemDiff = {
   folder_name?: string;
   children?: number[];
   status?: DownloadStatus;
-  active_operation?: ActiveOperation,
+  active_operation?: ActiveOperation | null,
 };
 
 export type DownloadNodeDiff = FileItemDiff | FolderItemDiff;
@@ -96,7 +95,7 @@ export type DownloadNodeDiff = FileItemDiff | FolderItemDiff;
 export interface DownloadItemDiff {
   url?: string,
   status?: DownloadStatus,
-  active_operation?: ActiveOperation,
+  active_operation?: ActiveOperation | null,
   host?: string,
   relative_path?: string,
   files?: Record<number, DownloadNodeDiff>;
