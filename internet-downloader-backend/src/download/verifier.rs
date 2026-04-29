@@ -30,24 +30,28 @@ struct FileVerificationDiff {
 pub enum VerifierMessage {
     VerifyDownload(Download),
     VerifyDownloads(IndexMap<DownloadId, Download>),
+    VerificationFinished(DownloadId),
     CancelVerification(DownloadId),
     PauseVerification(DownloadId),
 }
 
 struct DownloadGuard {
+    download_id: DownloadId,
     download: Option<Download>,
     ui_sender: UnboundedSender<UiStateEvent>,
+    verifier_sender: mpsc::Sender<VerifierMessage>,
 }
 
 impl Drop for DownloadGuard {
     fn drop(&mut self) {
         let download = self.download.take();
         let ui_sender = self.ui_sender.clone();
+        let verifier_sender = self.verifier_sender.clone();
+        let download_id = self.download_id;
 
         tokio::spawn(async move {
             if let Some(mut download) = download {
                 let changed_items = download.set_active_operation(None);
-                let download_id = download.id();
                 
                 // Send every change to ui
                 for item in changed_items {
@@ -79,12 +83,15 @@ impl Drop for DownloadGuard {
                     }
                 }
             }
+
+            let _ = verifier_sender.send(VerifierMessage::VerificationFinished(download_id)).await;
         });
     }
 }
 
 struct Verifier {
     receiver: mpsc::Receiver<VerifierMessage>,
+    sender: mpsc::Sender<VerifierMessage>,
     download_manager: UnboundedSender<ManagerCommand>,
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
@@ -95,13 +102,16 @@ struct Verifier {
 impl Verifier {
     fn new(
         receiver: mpsc::Receiver<VerifierMessage>,
+        sender: mpsc::Sender<VerifierMessage>,
         download_manager: UnboundedSender<ManagerCommand>,
         ui_sender: UnboundedSender<UiStateEvent>,
         db_manager: StateManager,
     ) -> Self
     {
+
         Self {
             receiver,
+            sender,
             download_manager,
             ui_sender,
             db_manager,
@@ -158,6 +168,9 @@ impl Verifier {
                         self.handle_download(download).await;
                     }
                 },
+                VerifierMessage::VerificationFinished(download_id) => {
+                    self.handles.remove(&download_id); 
+                },
             }
         }
     }
@@ -208,8 +221,10 @@ impl Verifier {
         let task_cancel_flag = cancel_flag.clone();
 
         let mut download_guard = DownloadGuard { 
+            download_id: download_id,
             download: Some(download),
-            ui_sender: self.ui_sender.clone()
+            ui_sender: self.ui_sender.clone(),
+            verifier_sender: self.sender.clone(),
         };
 
         let handle = tokio::spawn(async move {
@@ -494,7 +509,7 @@ impl VerifierHandle {
     {
         let (sender, receiver) = mpsc::channel(1000);
 
-        let verifier = Verifier::new(receiver, download_manager, ui_sender, db_manager);
+        let verifier = Verifier::new(receiver, sender.clone(), download_manager, ui_sender, db_manager);
 
         tokio::spawn(async move {
             verifier.run().await;
