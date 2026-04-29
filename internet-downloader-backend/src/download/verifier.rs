@@ -33,11 +33,6 @@ pub enum VerifierMessage {
     PauseVerification(DownloadId),
 }
 
-struct DownloadGuard {
-    download: Download,
-    sender: mpsc::Sender<VerifierMessage>,
-}
-
 struct Verifier {
     receiver: mpsc::Receiver<VerifierMessage>,
     download_manager: UnboundedSender<ManagerCommand>,
