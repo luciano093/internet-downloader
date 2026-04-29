@@ -580,7 +580,11 @@ impl DownloadManager {
                             ManagerCommand::DownloadVerified(download) => {
                                 let download_id = download.id();
 
-                                verifying_downloads.remove(&download_id);
+                                if !verifying_downloads.remove(&download_id) || removed_downloads.contains_key(&download_id) {
+                                    debug!("Ignoring stale verification completion for {}", download_id);
+                                    continue;
+                                }
+                                
                                 needs_verification.remove(&download_id); 
 
                                 let download_settings = app_settings.get_download_settings(download_id);
