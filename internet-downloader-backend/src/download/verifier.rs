@@ -10,7 +10,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::db::state_manager::StateManager;
@@ -81,6 +81,11 @@ impl Verifier {
                 VerifierMessage::VerifyDownload(download) => {
                     let download_name = download.name().clone();
 
+                        if self.handles.contains_key(&download.id()) {
+                            warn!("Download {} is already verifying. Ignoring duplicate request.", download.id());
+                            continue;
+                        }
+
                     info!("Queued {} for verification", download_name); 
 
                     let _ = self.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
@@ -89,6 +94,11 @@ impl Verifier {
                 VerifierMessage::VerifyDownloads(download_map) => {
                     for (_, download) in download_map {
                         let download_name = download.name().clone();
+
+                        if self.handles.contains_key(&download.id()) {
+                            warn!("Download {} is already verifying. Ignoring duplicate request.", download.id());
+                            continue;
+                        }
 
                         info!("Queued {} for verification", download_name); 
 
