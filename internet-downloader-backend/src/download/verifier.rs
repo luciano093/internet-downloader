@@ -461,7 +461,6 @@ impl Verifier {
                     ));
                 }
 
-
                 // We only want to check, if we know we have another hash to check against
                 // first, otherwise we skip it
                 if let Some(expected_hash) = expected {
@@ -491,6 +490,13 @@ impl Verifier {
             };
 
             for (index, expected) in chunks_to_check.iter().enumerate() {
+                if task_cancel_flag.load(Ordering::Relaxed) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted, 
+                        "Verification cancelled by user"
+                    ));
+                }
+                
                 // We only want to check, if we know we have another hash to check against
                 // first, otherwise we skip it
                 if let Some(expected_hash) = expected {
