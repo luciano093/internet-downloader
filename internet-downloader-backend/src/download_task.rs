@@ -20,7 +20,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
-use crate::download::items::{ChangedItem, Download, DownloadItem, DownloadType};
+use crate::download::items::{ChangedItemStatus, Download, DownloadItem, DownloadType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket};
 use crate::download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
 use crate::download_writer_manager::FileChunk;
@@ -1227,7 +1227,7 @@ impl DownloadSupervisor {
                                     
                                     for item in changed_items {
                                         let update = match item {
-                                            ChangedItem::File { id, status } => {
+                                            ChangedItemStatus::File { id, status } => {
                                                 DownloadUpdate::ItemUpdated {
                                                     id: download_id,
                                                     item_update: ItemUpdate::File(
@@ -1238,7 +1238,7 @@ impl DownloadSupervisor {
                                                     )
                                                 }
                                             },
-                                            ChangedItem::Folder { id, status } => {
+                                            ChangedItemStatus::Folder { id, status } => {
                                                 DownloadUpdate::ItemUpdated {
                                                     id: download_id,
                                                     item_update: ItemUpdate::Folder(
@@ -1249,7 +1249,7 @@ impl DownloadSupervisor {
                                                     )
                                                 }
                                             },
-                                            ChangedItem::Download(status) => {
+                                            ChangedItemStatus::Download(status) => {
                                                 DownloadUpdate::StatusChanged { 
                                                     id: download_id, 
                                                     status 
@@ -1369,7 +1369,7 @@ impl DownloadSupervisor {
         let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
     }
 
-    async fn process_status_changes(state: &mut SupervisorState, changed_items: Vec<ChangedItem>) {
+    async fn process_status_changes(state: &mut SupervisorState, changed_items: Vec<ChangedItemStatus>) {
         if changed_items.is_empty() {
             return;
         }
@@ -1382,7 +1382,7 @@ impl DownloadSupervisor {
         // Send every change to db
         for item in changed_items {
             match item {
-                ChangedItem::File { id, status } => {
+                ChangedItemStatus::File { id, status } => {
                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                         DownloadUpdate::ItemUpdated { 
                             id: download_id, 
@@ -1390,7 +1390,7 @@ impl DownloadSupervisor {
                         }
                     ));
                 },
-                ChangedItem::Folder { id, status } => {
+                ChangedItemStatus::Folder { id, status } => {
                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                         DownloadUpdate::ItemUpdated { 
                             id: download_id,
@@ -1398,7 +1398,7 @@ impl DownloadSupervisor {
                         }
                     ));
                 }
-                ChangedItem::Download(status) => {
+                ChangedItemStatus::Download(status) => {
                     let _ = state.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                         DownloadUpdate::StatusChanged { 
                             id: download_id,

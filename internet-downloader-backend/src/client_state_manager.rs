@@ -15,6 +15,7 @@ use crate::download::FileSize;
 use crate::download::DownloadUpdate;
 use crate::download::FolderUpdate;
 use crate::download::ItemUpdate;
+use crate::download::items::ActiveOperation;
 use crate::download::items::DownloadItem;
 use crate::download::items::FileDownload;
 use crate::download::items::FolderDownload;
@@ -142,6 +143,7 @@ impl UiStateManager {
                                 let update_id = match &download_update {
                                     DownloadUpdate::StatusChanged { id, .. } => *id,
                                     DownloadUpdate::ItemUpdated { id, .. } => *id,
+                                    DownloadUpdate::OperationChanged { id, .. } => *id,
                                 };
 
                                 if removed_ids.contains(&update_id) {
@@ -231,8 +233,13 @@ impl DeltaManager {
         match download_update {
             DownloadUpdate::StatusChanged { id, status } => {
                 let download_diff = self.deltas.entry(*id).or_default();
-            
+                
                 download_diff.status = Some(status);
+            },
+            DownloadUpdate::OperationChanged { id, operation } => {
+                let download_diff = self.deltas.entry(*id).or_default();
+                
+                download_diff.active_operation = Some(operation);
             },
             DownloadUpdate::ItemUpdated { id, item_update } => {
                 let download_diff = self.deltas.entry(*id).or_default();
@@ -241,6 +248,7 @@ impl DeltaManager {
                         ItemUpdate::File(file_update) => {
                             let file_id = match &file_update {
                                 FileUpdate::Status { id, .. } => *id,
+                                FileUpdate::Operation { id, .. } => *id,
                                 FileUpdate::Hash { id, .. } => *id,
                                 FileUpdate::FileSize { id, .. } => *id,
                                 FileUpdate::BytesDownloaded { id, .. } => *id,
@@ -257,6 +265,7 @@ impl DeltaManager {
                         ItemUpdate::Folder(folder_update) => {
                             let folder_id = match &folder_update {
                                 FolderUpdate::Status { id, .. } => *id,
+                                FolderUpdate::Operation { id, .. } => *id,
                             };
 
                             let item_diff = download_diff.files.entry(folder_id).or_insert_with(|| {
@@ -285,6 +294,7 @@ pub struct DownloadDiff {
     url: Option<String>,
     relative_path: Option<PathBuf>,
     status: Option<DownloadStatus>,
+    active_operation: Option<Option<ActiveOperation>>,
     files: HashMap<usize, ItemDiff>,
 }
 
@@ -297,6 +307,7 @@ impl DownloadDiff {
         DownloadDiff { url: Some(download.url().clone()),
             relative_path: Some(download.relative_path().clone()),
             status: Some(download.status()),
+            active_operation: Some(download.active_operation()),
             files: file_diffs,
         }
     }
@@ -326,6 +337,7 @@ impl ItemDiff {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileDiff {
     status: Option<FileStatus>,
+    active_operation: Option<Option<ActiveOperation>>,
     url: Option<String>,
     file_name: Option<String>,
     relative_path: Option<PathBuf>,
@@ -344,6 +356,9 @@ impl FileDiff {
             FileUpdate::Status { status, .. } => {
                 self.status = Some(status)
             },
+            FileUpdate::Operation { operation, .. } => {
+                self.active_operation = Some(operation)
+            },
             FileUpdate::Hash { hash, .. } => {
                 self.hash = Some(hash)
             },
@@ -359,6 +374,7 @@ impl FileDiff {
     fn from_file_download(file: &FileDownload, bytes_downloaded: u64) -> Self {
         FileDiff { 
             status: Some(file.status()),
+            active_operation: Some(file.active_operation()),
             url: Some(file.url().to_string()),
             file_name: Some(file.name().to_string()),
             relative_path: Some(file.relative_path().clone()),
@@ -373,6 +389,7 @@ impl FileDiff {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FolderDiff {
     status: Option<DownloadStatus>,
+    active_operation: Option<Option<ActiveOperation>>,
     folder_name: Option<String>,
     relative_path: Option<PathBuf>,
     children: Option<Vec<usize>>,
@@ -388,6 +405,9 @@ impl FolderDiff {
             FolderUpdate::Status { status, .. } => {
                 self.status = Some(status)
             },
+            FolderUpdate::Operation { operation, .. } => {
+                self.active_operation = Some(operation)
+            },
         }
     }
 }
@@ -396,9 +416,10 @@ impl From<&FolderDownload> for FolderDiff {
     fn from(folder: &FolderDownload) -> Self {
         Self {
             status: Some(folder.status()),
+            active_operation: Some(folder.active_operation()),
             folder_name: Some(folder.name().to_owned()),
             relative_path: Some(folder.relative_path().clone()),
-            children: Some(folder.children().to_owned())
+            children: Some(folder.children().to_owned()),
         }
     }
 }
@@ -452,6 +473,7 @@ pub fn download_to_json(download: &Download) -> serde_json::Value {
         "id": download.id(),
         "name": download.name(),
         "status": download.status(),
+        "active_operation": download.active_operation(),
         "url": download.url(),
         "files": files_json,
     })

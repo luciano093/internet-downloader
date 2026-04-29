@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand, items::{ChangedItem, Download}, status::DownloadStatus}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
+use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand, items::{ChangedItemStatus, Download}, status::DownloadStatus}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -248,7 +248,7 @@ impl HostManager {
 
                             for item in changed_items {
                                 match item {
-                                    ChangedItem::File { id, status } => {
+                                    ChangedItemStatus::File { id, status } => {
                                         let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                                             DownloadUpdate::ItemUpdated { 
                                                 id: download_id, 
@@ -261,7 +261,7 @@ impl HostManager {
                                             }
                                         ));
                                     },
-                                    ChangedItem::Folder { id, status } => {
+                                    ChangedItemStatus::Folder { id, status } => {
                                         let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                                             DownloadUpdate::ItemUpdated { 
                                                 id: download_id, 
@@ -274,7 +274,7 @@ impl HostManager {
                                             }
                                         ));
                                     },
-                                    ChangedItem::Download(status) => {
+                                    ChangedItemStatus::Download(status) => {
                                     let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(
                                             DownloadUpdate::StatusChanged { 
                                                 id: download_id, 

@@ -25,10 +25,17 @@ pub trait DownloadItem {
 }
 
 #[derive(Debug, Clone)]
-pub enum ChangedItem {
+pub enum ChangedItemStatus {
     File { id: usize, status: FileStatus },
     Folder { id: usize, status: DownloadStatus },
     Download(DownloadStatus), 
+}
+
+#[derive(Debug, Clone)]
+pub enum ChangedItemOperation {
+    File { id: usize, operation: Option<ActiveOperation> },
+    Folder { id: usize, operation: Option<ActiveOperation> },
+    Download(Option<ActiveOperation>), 
 }
 
 /// Has either a file or folder as the only item in root
@@ -38,6 +45,7 @@ pub struct Download {
     url: String,
     relative_path: PathBuf,
     status: DownloadStatus,
+    active_operation: Option<ActiveOperation>,
     pub(crate) files: IndexMap<usize, DownloadType>,
     name: String,
 }
@@ -68,6 +76,7 @@ impl Download {
             status: DownloadStatus::Queued,
             files,
             name,
+            active_operation: None,
         }
     }
 
@@ -98,6 +107,10 @@ impl Download {
         self.status
     }
 
+    pub const fn active_operation(&self) -> Option<ActiveOperation> {
+        self.active_operation
+    }
+
     pub const fn name(&self) -> &String {
         &self.name
     }
@@ -106,7 +119,7 @@ impl Download {
         self.status == DownloadStatus::Completed
     }
 
-    pub fn set_paused(&mut self) -> Vec<ChangedItem> {
+    pub fn set_paused(&mut self) -> Vec<ChangedItemStatus> {
         let mut files_to_pause = Vec::new();
 
         for (&id, item) in &self.files {
@@ -128,7 +141,7 @@ impl Download {
         all_changes
     }
 
-    pub fn set_queued(&mut self) -> Vec<ChangedItem> {
+    pub fn set_queued(&mut self) -> Vec<ChangedItemStatus> {
         let mut files_to_queue = Vec::new();
 
         for (&id, item) in &self.files {
@@ -150,13 +163,13 @@ impl Download {
         all_changes
     }
     
-    pub fn set_verifying(&mut self) -> Vec<ChangedItem> {
+    pub fn set_active_operation(&mut self, active_operation: Option<ActiveOperation>) -> Vec<ChangedItemOperation> {
         let ids: Vec<usize> = self.files.keys().copied().collect();
 
         let mut all_changes = Vec::new();
 
         for id in ids {
-            if let Some(changes) = self.set_file_status(id, FileStatus::Verifying) {
+            if let Some(changes) = self.set_file_active_operation(id, active_operation) {
                 all_changes.extend(changes);
             }
         }
@@ -164,7 +177,88 @@ impl Download {
         all_changes
     }
 
-    pub fn set_file_status(&mut self, id: usize, status: FileStatus) -> Option<Vec<ChangedItem>> {
+    pub fn set_file_active_operation(&mut self, id: usize, active_operation: Option<ActiveOperation>) -> Option<Vec<ChangedItemOperation>> {
+        let mut changed_items = Vec::new();
+
+        if let Some(DownloadType::File(file)) = self.files.get_mut(&id) {
+            if file.active_operation == active_operation {
+                return None; // No change happened at all
+            }
+
+            file.active_operation = active_operation;
+
+            changed_items.push(ChangedItemOperation::File {
+                id,
+                operation: active_operation,
+            });
+
+            let mut current_parent_id = file.parent_id;
+
+            while let Some(parent_id) = current_parent_id {
+
+                let new_folder_op = self.calculate_folder_operation(parent_id);
+
+                if let Some(DownloadType::Folder(folder)) = self.files.get_mut(&parent_id) {
+
+                    if folder.active_operation != new_folder_op {
+                        folder.active_operation = new_folder_op;
+                        
+                        changed_items.push(ChangedItemOperation::Folder {
+                            id: parent_id,
+                            operation: new_folder_op,
+                        });
+
+                        current_parent_id = folder.parent_id;
+                    } else {
+                        // If this folder didn't change, its parents won't either.
+                        break; 
+                    }
+                } else {
+                    break;
+                }
+            }
+        } else {
+            return None;
+        }
+
+        if let Some(root_item) = self.files.get(&0) {
+            let new_operation = match root_item {
+                DownloadType::File(file_download) => file_download.active_operation,
+                DownloadType::Folder(folder_download) => folder_download.active_operation,
+            };
+
+            if self.active_operation != new_operation {
+                self.active_operation = new_operation;
+                changed_items.push(ChangedItemOperation::Download(new_operation));
+            }
+        }
+
+        Some(changed_items)
+    }
+
+    fn calculate_folder_operation(&self, folder_id: usize) -> Option<ActiveOperation> {
+        if let Some(DownloadType::Folder(folder)) = self.files.get(&folder_id) {
+            for child_id in &folder.children {
+                match self.files.get(child_id) {
+                    Some(DownloadType::File(file)) => {
+                        if file.active_operation.is_some() {
+                            return file.active_operation;
+                        }
+                    }
+                    Some(DownloadType::Folder(child_folder)) => {
+                        if child_folder.active_operation.is_some() {
+                            return child_folder.active_operation;
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn set_file_status(&mut self, id: usize, status: FileStatus) -> Option<Vec<ChangedItemStatus>> {
         let mut changed_items = Vec::new();
 
         let (mut current_parent_id, mut previous_status_bucket, mut new_status_bucket) = {
@@ -177,7 +271,7 @@ impl Download {
                 let new_bucket = status.bucket();
 
                 file.status = status;
-                changed_items.push(ChangedItem::File {
+                changed_items.push(ChangedItemStatus::File {
                     id,
                     status,
                 });
@@ -219,7 +313,7 @@ impl Download {
             }
 
             if previous_folder_status != new_folder_status {
-                changed_items.push(ChangedItem::Folder {
+                changed_items.push(ChangedItemStatus::Folder {
                     id: parent_id,
                     status: new_folder_status,
                 });
@@ -243,7 +337,7 @@ impl Download {
 
             if self.status != new_root_status {
                 self.status = new_root_status;
-                changed_items.push(ChangedItem::Download(new_root_status));
+                changed_items.push(ChangedItemStatus::Download(new_root_status));
             }
         }
 
@@ -295,6 +389,7 @@ impl Download {
             status,
             files,
             name: row.name,
+            active_operation: None,
         }
     }
 }
@@ -319,7 +414,6 @@ impl DownloadType {
                 FileStatus::Paused => DownloadStatus::Paused,
                 FileStatus::NotFound => DownloadStatus::NotFound,
                 FileStatus::Retrying => DownloadStatus::Retrying,
-                FileStatus::Verifying => DownloadStatus::Verifying,
                 FileStatus::Waiting(_) => DownloadStatus::Waiting,
                 
                 FileStatus::Failed(reason) => {
@@ -360,6 +454,10 @@ impl DownloadItem for DownloadType {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ActiveOperation {
+    Verifying,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileDownload {
@@ -369,10 +467,13 @@ pub struct FileDownload {
     file_name: String,
     relative_path: PathBuf,
     status: FileStatus,
+    // Active operations are never saved to db. They only exist as transient operations in ram
+    active_operation: Option<ActiveOperation>,
     #[serde(serialize_with = "serialize_hash")] 
     hash: Option<u128>,
     #[serde(serialize_with = "serialize_chunks")]
     blocks: BitVec<u8, Msb0>,
+    #[serde(skip)]
     chunk_hashes: Vec<Option<[u8; 16]>>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     #[serde(skip)]
@@ -428,6 +529,7 @@ impl FileDownload {
             chunk_hashes: Vec::new(),
             size: None,
             retries: 0,
+            active_operation: None,
         }
     }
 
@@ -477,6 +579,7 @@ impl FileDownload {
             chunk_hashes,
             size,
             retries: row.retries as usize,
+            active_operation: None,
         }
     }
 
@@ -510,6 +613,10 @@ impl FileDownload {
 
     pub fn status(&self) -> FileStatus {
         self.status
+    }
+
+    pub fn active_operation(&self) -> Option<ActiveOperation> {
+        self.active_operation
     }
 
     pub fn size(&self) -> Option<FileSize> {
@@ -603,7 +710,6 @@ impl FileDownload {
             FileStatus::Queued |
             FileStatus::Initializing |
             FileStatus::FetchingMetadata |
-            FileStatus::Verifying |
             FileStatus::NotFound  => false,
         }
     }
@@ -615,6 +721,7 @@ pub struct FolderDownload {
     id: usize,
     folder_name: String,
     relative_path: PathBuf,
+    active_operation: Option<ActiveOperation>,
     status: DownloadStatus,
     children: Vec<usize>,
 
@@ -644,6 +751,7 @@ impl FolderDownload {
             children: children_ids,
 
             bucket_counters,
+            active_operation: None,
         }
     }
 
@@ -666,6 +774,7 @@ impl FolderDownload {
             status: DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_ref().map(|str| str.as_str())).unwrap_or_default(),
             children,
             bucket_counters,
+            active_operation: None,
         }
     }
 
@@ -846,6 +955,10 @@ impl FolderDownload {
 
     pub fn status(&self) -> DownloadStatus {
         self.status
+    }
+
+    pub fn active_operation(&self) -> Option<ActiveOperation> {
+        self.active_operation
     }
 }
 

@@ -15,7 +15,7 @@ use tracing::info;
 use crate::client_state_manager::UiStateEvent;
 use crate::db::state_manager::StateManager;
 use crate::download::{DownloadId, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
-use crate::download::items::{ChangedItem, Download, DownloadItem, DownloadType};
+use crate::download::items::{ActiveOperation, ChangedItemOperation, ChangedItemStatus, Download, DownloadItem, DownloadType};
 use crate::download::status::FileStatus;
 use crate::download_task::{BLOCKS_PER_HASH, HASH_CHUNK_SIZE};
 use crate::utils::file_utils::hash_file;
@@ -33,12 +33,17 @@ pub enum VerifierMessage {
     PauseVerification(DownloadId),
 }
 
+struct DownloadGuard {
+    download: Download,
+    sender: mpsc::Sender<VerifierMessage>,
+}
+
 struct Verifier {
     receiver: mpsc::Receiver<VerifierMessage>,
     download_manager: UnboundedSender<ManagerCommand>,
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
-    handles: HashMap<DownloadId, JoinHandle<()>>,
+    handles: HashMap<DownloadId, JoinHandle<()>>, // We save the original file statuses in case we need them
     semaphore: Arc<Semaphore>,
 }
 
@@ -112,39 +117,41 @@ impl Verifier {
             })
             .collect();
 
-        let changed_items = download.set_verifying();
-                    
+        
         let download_id = download.id();
+        let changed_items = download.set_active_operation(Some(ActiveOperation::Verifying));
         
         // Send every change to ui
         for item in changed_items {
             match item {
-                ChangedItem::File { id, status } => {
+                ChangedItemOperation::File { id, operation } => {
                     let _ = self.ui_sender.send(UiStateEvent::AddUpdate(
                         DownloadUpdate::ItemUpdated { 
                             id: download_id, 
-                            item_update: ItemUpdate::File(FileUpdate::Status { id, status }) 
+                            item_update: ItemUpdate::File(FileUpdate::Operation { id, operation }) 
                         }
                     ));
                 },
-                ChangedItem::Folder { id, status } => {
+                ChangedItemOperation::Folder { id, operation } => {
                     let _ = self.ui_sender.send(UiStateEvent::AddUpdate(
                         DownloadUpdate::ItemUpdated { 
                             id: download_id,
-                            item_update: ItemUpdate::Folder(FolderUpdate::Status { id, status, }) 
+                            item_update: ItemUpdate::Folder(FolderUpdate::Operation { id, operation }) 
                         }
                     ));
                 }
-                ChangedItem::Download(status) => {
+                ChangedItemOperation::Download(operation) => {
                     let _ = self.ui_sender.send(UiStateEvent::AddUpdate(
-                        DownloadUpdate::StatusChanged { 
+                        DownloadUpdate::OperationChanged { 
                             id: download_id,
-                            status,
+                            operation,
                         }
                     ));
                 },
             }
         }
+
+        self.db_manager.write_download(&download).await;
 
         let ui_sender = self.ui_sender.clone();
         let db_manager = self.db_manager.clone();
@@ -152,13 +159,15 @@ impl Verifier {
 
         let semaphore = self.semaphore.clone();
 
+        let original_statuses_clone = original_statuses.clone();
+
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
             info!("Started verifying {}.", download.name());
 
             let _permit = semaphore.acquire_owned().await.unwrap();
 
-            let diffs = Self::verify_download(&download, original_statuses).await;
+            let diffs = Self::verify_download(&download, &original_statuses_clone).await;
 
             for diff in diffs {
                 let file_id = diff.file_id;
@@ -167,7 +176,7 @@ impl Verifier {
                     if let Some(changed_items) = download.set_file_status(file_id, new_status) {
                         for item in changed_items {
                             match item {
-                                ChangedItem::File { id, status } => {
+                                ChangedItemStatus::File { id, status } => {
                                     let _ = ui_sender.send(UiStateEvent::AddUpdate(
                                         DownloadUpdate::ItemUpdated { 
                                             id: download_id, 
@@ -175,7 +184,7 @@ impl Verifier {
                                         }
                                     ));
                                 },
-                                ChangedItem::Folder { id, status } => {
+                                ChangedItemStatus::Folder { id, status } => {
                                     let _ = ui_sender.send(UiStateEvent::AddUpdate(
                                         DownloadUpdate::ItemUpdated { 
                                             id: download_id,
@@ -183,7 +192,7 @@ impl Verifier {
                                         }
                                     ));
                                 }
-                                ChangedItem::Download(status) => {
+                                ChangedItemStatus::Download(status) => {
                                     let _ = ui_sender.send(UiStateEvent::AddUpdate(
                                         DownloadUpdate::StatusChanged { 
                                             id: download_id,
@@ -213,7 +222,39 @@ impl Verifier {
                 }
             }
 
-            info!("Finished hashing {} in {:?}", download.name(), start_time.elapsed());
+            let changed_items = download.set_active_operation(None);
+            
+            // Send every change to ui
+            for item in changed_items {
+                match item {
+                    ChangedItemOperation::File { id, operation } => {
+                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                            DownloadUpdate::ItemUpdated { 
+                                id: download_id, 
+                                item_update: ItemUpdate::File(FileUpdate::Operation { id, operation }) 
+                            }
+                        ));
+                    },
+                    ChangedItemOperation::Folder { id, operation } => {
+                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                            DownloadUpdate::ItemUpdated { 
+                                id: download_id,
+                                item_update: ItemUpdate::Folder(FolderUpdate::Operation { id, operation }) 
+                            }
+                        ));
+                    }
+                    ChangedItemOperation::Download(operation) => {
+                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                            DownloadUpdate::OperationChanged { 
+                                id: download_id,
+                                operation,
+                            }
+                        ));
+                    },
+                }
+            }
+
+            info!("Finished verification {} in {:?}", download.name(), start_time.elapsed());
 
             db_manager.write_download(&download).await;
             let _ = download_manager.send(ManagerCommand::DownloadVerified(download));
@@ -222,7 +263,7 @@ impl Verifier {
         self.handles.insert(download_id, handle);
     }
 
-    async fn verify_download(download: &Download, original_statuses: HashMap<usize, FileStatus>) -> Vec<FileVerificationDiff> {
+    async fn verify_download(download: &Download, original_statuses: &HashMap<usize, FileStatus>) -> Vec<FileVerificationDiff> {
         let mut pending_changes = Vec::new();
 
         for (&id, download_item) in download.files() {

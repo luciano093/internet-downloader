@@ -19,7 +19,7 @@ use url::Host;
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
-use crate::download::items::{Download, DownloadItem, DownloadType};
+use crate::download::items::{ActiveOperation, Download, DownloadItem, DownloadType};
 use crate::download::status::{DownloadStatus, FileStatus};
 use crate::download::verifier::VerifierHandle;
 use crate::download_writer_manager::DownloadWriterManager;
@@ -33,6 +33,7 @@ use crate::utils::network_utils::BandwidthLimiter;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
     StatusChanged { id: DownloadId, status: DownloadStatus },
+    OperationChanged { id: DownloadId, operation: Option<ActiveOperation> },
     ItemUpdated { id: DownloadId, item_update: ItemUpdate }, 
 }
 
@@ -45,6 +46,7 @@ pub enum ItemUpdate {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FileUpdate {
     Status { id: usize, status: FileStatus },
+    Operation { id: usize, operation: Option<ActiveOperation> },
     Hash { id: usize, hash: u128 },
     FileSize { id: usize, len: u64 },
     BytesDownloaded { id: usize, len: u64 },
@@ -54,6 +56,7 @@ impl FileUpdate {
     pub fn id(&self) -> usize {
         match self {
             FileUpdate::Status { id, .. } => *id,
+            FileUpdate::Operation { id, .. } => *id,
             FileUpdate::Hash { id, .. } => *id,
             FileUpdate::FileSize { id, .. } => *id,
             FileUpdate::BytesDownloaded { id, .. } => *id,
@@ -63,7 +66,8 @@ impl FileUpdate {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FolderUpdate {
-    Status { id: usize, status: DownloadStatus }, 
+    Status { id: usize, status: DownloadStatus },
+    Operation { id: usize, operation: Option<ActiveOperation> },
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, sqlx::Type)]
