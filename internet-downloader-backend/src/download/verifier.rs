@@ -33,6 +33,55 @@ pub enum VerifierMessage {
     PauseVerification(DownloadId),
 }
 
+struct DownloadGuard {
+    download: Option<Download>,
+    ui_sender: UnboundedSender<UiStateEvent>,
+}
+
+impl Drop for DownloadGuard {
+    fn drop(&mut self) {
+        let download = self.download.take();
+        let ui_sender = self.ui_sender.clone();
+
+        tokio::spawn(async move {
+            if let Some(mut download) = download {
+                let changed_items = download.set_active_operation(None);
+                let download_id = download.id();
+                
+                // Send every change to ui
+                for item in changed_items {
+                    match item {
+                        ChangedItemOperation::File { id, operation } => {
+                            let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                                DownloadUpdate::ItemUpdated { 
+                                    id: download_id, 
+                                    item_update: ItemUpdate::File(FileUpdate::Operation { id, operation }) 
+                                }
+                            ));
+                        },
+                        ChangedItemOperation::Folder { id, operation } => {
+                            let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                                DownloadUpdate::ItemUpdated { 
+                                    id: download_id,
+                                    item_update: ItemUpdate::Folder(FolderUpdate::Operation { id, operation }) 
+                                }
+                            ));
+                        }
+                        ChangedItemOperation::Download(operation) => {
+                            let _ = ui_sender.send(UiStateEvent::AddUpdate(
+                                DownloadUpdate::OperationChanged { 
+                                    id: download_id,
+                                    operation,
+                                }
+                            ));
+                        },
+                    }
+                }
+            }
+        });
+    }
+}
+
 struct Verifier {
     receiver: mpsc::Receiver<VerifierMessage>,
     download_manager: UnboundedSender<ManagerCommand>,
@@ -152,19 +201,25 @@ impl Verifier {
 
         let semaphore = self.semaphore.clone();
 
+        let mut download_guard = DownloadGuard { 
+            download: Some(download),
+            ui_sender: self.ui_sender.clone()
+        };
+
         let handle = tokio::spawn(async move {
             let start_time = std::time::Instant::now();
-            info!("Started verifying {}.", download.name());
+            
+            info!("Started verifying {}.", download_guard.download.as_ref().unwrap().name());
 
             let _permit = semaphore.acquire_owned().await.unwrap();
 
-            let diffs = Self::verify_download(&download).await;
+            let diffs = Self::verify_download(download_guard.download.as_ref().unwrap()).await;
 
             for diff in diffs {
                 let file_id = diff.file_id;
 
                 if let Some(new_status) = diff.new_status {
-                    if let Some(changed_items) = download.set_file_status(file_id, new_status) {
+                    if let Some(changed_items) = download_guard.download.as_mut().unwrap().set_file_status(file_id, new_status) {
                         for item in changed_items {
                             match item {
                                 ChangedItemStatus::File { id, status } => {
@@ -197,7 +252,7 @@ impl Verifier {
                 }
 
                 if let Some(failed_chunks) = diff.failed_chunks {
-                    if let Some(file) = download.get_file_mut(&file_id) {
+                    if let Some(file) = download_guard.download.as_mut().unwrap().get_file_mut(&file_id) {
                         // set failed blocks back to false
                         let chunks = file.blocks_mut();
 
@@ -213,7 +268,7 @@ impl Verifier {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let mut download = download_guard.download.take().unwrap();
 
             let changed_items = download.set_active_operation(None);
             
