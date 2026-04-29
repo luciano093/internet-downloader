@@ -878,6 +878,7 @@ impl DownloadSupervisor {
                                     }
                                 },
                                 SupervisorMessage::RangeFailed(permit, file_id, range, url, file_map, expected_len, download_error, previously_downloaded) => {
+                                    state.active_downloads -= 1;
                                     let retry_kind = RetryKind::RangeDownload(RangeDownload { file_id, range, url: url.clone(), file_map, expected_len, previously_downloaded });
                                     let file_id = retry_kind.file_id();
                                     let download_name = state.download.name().clone();
