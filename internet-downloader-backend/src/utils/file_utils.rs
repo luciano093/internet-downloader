@@ -78,27 +78,27 @@ pub fn force_delete_file(path: &std::path::Path) {
     }
 }
 
-pub fn hash_file(path: &Path) -> u128 {
+pub fn hash_file(path: &Path) -> std::io::Result<u128> {
     let mut hasher = blake3::Hasher::new();
     
-    hasher.update_mmap_rayon(&path).expect("Failed to hash file");
+    hasher.update_mmap_rayon(&path)?;
 
     let mut output = [0u8; 16];
 
     hasher.finalize_xof().fill(&mut output);
 
-    u128::from_le_bytes(output)
+    Ok(u128::from_le_bytes(output))
 }
 
-pub fn hash_file_chunk(path: &Path, start: u64, length: usize) -> [u8; 16] {
-    let mut file = File::open(&path).expect("Failed to open file");
+pub fn hash_file_chunk(path: &Path, start: u64, length: usize) -> std::io::Result<[u8; 16]> {
+    let mut file = File::open(&path)?;
     let mut hasher = blake3::Hasher::new();
 
     // If the chunk is tiny, skip the mmap overhead and just read it.
     if length < 16 * 1024 {
         let mut buffer = vec![0u8; length];
-        file.seek(SeekFrom::Start(start)).expect("Failed to seek");
-        file.read_exact(&mut buffer).expect("Failed to read");
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buffer)?;
         
         hasher.update(&buffer);
     } else {
@@ -106,8 +106,7 @@ pub fn hash_file_chunk(path: &Path, start: u64, length: usize) -> [u8; 16] {
             MmapOptions::new()
                 .offset(start)
                 .len(length)
-                .map(&file)
-                .expect("Failed to map file chunk") 
+                .map(&file)?
         };
         
         hasher.update_rayon(&mmap);
@@ -116,5 +115,5 @@ pub fn hash_file_chunk(path: &Path, start: u64, length: usize) -> [u8; 16] {
     let mut output = [0u8; 16];
     hasher.finalize_xof().fill(&mut output);
 
-    output
+    Ok(output)
 }

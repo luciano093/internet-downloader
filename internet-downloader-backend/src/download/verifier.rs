@@ -278,8 +278,16 @@ impl Verifier {
                         hash_file(&path)
                     }).await.unwrap();
 
-                    if Some(hash) != file.hash() {
-                        new_status = Some(FileStatus::Failed(FileFailureReason::HashMismatch));
+                    match hash {
+                        Ok(hash) => {
+                            if Some(hash) != file.hash() {
+                                new_status = Some(FileStatus::Failed(FileFailureReason::HashMismatch));
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to read completed file during verification: {}", e);
+                            new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
+                        }
                     }
                 }
                 // Otherwise we check individual chunk hashes to see how much of the file we truly have 
