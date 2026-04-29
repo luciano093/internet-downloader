@@ -355,17 +355,28 @@ impl Verifier {
 
                     let hash = tokio::task::spawn_blocking(move || {
                         hash_file(&path, Some(task_cancel_flag))
-                    }).await.unwrap();
+                    }).await;
 
                     match hash {
-                        Ok(hash) => {
+                        Ok(Ok(hash)) => {
                             if Some(hash) != file.hash() {
                                 new_status = Some(FileStatus::Failed(FileFailureReason::HashMismatch));
                             }
-                        }
-                        Err(e) => {
-                            warn!("Failed to read completed file during verification: {}", e);
+                        }   
+                        // Hashing error
+                        Ok(Err(error)) => {
+                            warn!("Failed to read completed file during verification: {}", error);
                             new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
+                        }
+                        // Task error
+                        Err(error) => {
+                            if error.is_cancelled() {
+                                warn!("Hashing task was cancelled.");
+                                new_status = Some(FileStatus::Failed(FileFailureReason::ClientError));
+                            } else {
+                                warn!("Hashing task panicked: {}", error);
+                                new_status = Some(FileStatus::Failed(FileFailureReason::ClientError)); 
+                            }
                         }
                     }
                 }
@@ -383,15 +394,16 @@ impl Verifier {
 
                             let failed_indices = tokio::task::spawn_blocking(move || {
                                 Self::verify_file_chunks(&path, HASH_CHUNK_SIZE, size as usize, chunks_to_check, task_cancel_flag)
-                            }).await.unwrap();
+                            }).await;
 
                             match failed_indices {
-                                Ok(failed_indices) => {
+                                Ok(Ok(failed_indices)) => {
                                     if !failed_indices.is_empty() {
                                         failed_chunks = Some(failed_indices);
                                     }   
                                 },
-                                Err(error) => {
+                                // File chunk hashing error
+                                Ok(Err(error)) => {
                                     if error.kind() == std::io::ErrorKind::NotFound {
                                         warn!("Failed to find file {} during verification: {}", file.name(), error);
                                         new_status = Some(FileStatus::NotFound); 
@@ -400,6 +412,16 @@ impl Verifier {
                                         new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
                                     }
                                 },
+                                // Task error
+                                Err(error) => {
+                                    if error.is_cancelled() {
+                                        warn!("Hashing task was cancelled.");
+                                        new_status = Some(FileStatus::Failed(FileFailureReason::ClientError));
+                                    } else {
+                                        warn!("Hashing task panicked: {}", error);
+                                        new_status = Some(FileStatus::Failed(FileFailureReason::ClientError)); 
+                                    }
+                                }
                             }
                         }
                     }
