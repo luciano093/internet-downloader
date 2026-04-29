@@ -213,6 +213,8 @@ impl Verifier {
                 }
             }
 
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
             let changed_items = download.set_active_operation(None);
             
             // Send every change to ui

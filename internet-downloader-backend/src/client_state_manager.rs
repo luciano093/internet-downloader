@@ -473,7 +473,6 @@ pub fn download_to_json(download: &Download) -> serde_json::Value {
         "id": download.id(),
         "name": download.name(),
         "status": download.status(),
-        "active_operation": download.active_operation(),
         "url": download.url(),
         "files": files_json,
     })
