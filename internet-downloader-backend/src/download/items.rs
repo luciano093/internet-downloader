@@ -170,7 +170,7 @@ impl Download {
         let mut all_changes = Vec::new();
 
         for id in ids {
-            if let Some(changes) = self.set_file_active_operation(id, active_operation) {
+            if let Some(changes) = self.set_file_or_empty_folder_operation(id, active_operation) {
                 all_changes.extend(changes);
             }
         }
@@ -178,50 +178,70 @@ impl Download {
         all_changes
     }
 
-    pub fn set_file_active_operation(&mut self, id: usize, active_operation: Option<ActiveOperation>) -> Option<Vec<ChangedItemOperation>> {
+    pub fn set_file_or_empty_folder_operation(&mut self, id: usize, active_operation: Option<ActiveOperation>) -> Option<Vec<ChangedItemOperation>> {
         let mut changed_items = Vec::new();
+        let mut current_parent_id;
 
-        if let Some(DownloadType::File(file)) = self.files.get_mut(&id) {
-            if file.active_operation == active_operation {
-                return None; // No change happened at all
-            }
+        let item = self.files.get_mut(&id)?;
+        
+        // We can only directly modify files and empty folders, otherwise the item should calculate its
+        // status based on its childrens' status
+        let is_modifiable = match item {
+            DownloadType::File(_) => true,
+            DownloadType::Folder(folder) => folder.children.is_empty(), 
+        };
 
-            file.active_operation = active_operation;
-
-            changed_items.push(ChangedItemOperation::File {
-                id,
-                operation: active_operation,
-            });
-
-            let mut current_parent_id = file.parent_id;
-
-            while let Some(parent_id) = current_parent_id {
-
-                let new_folder_op = self.calculate_folder_operation(parent_id);
-
-                if let Some(DownloadType::Folder(folder)) = self.files.get_mut(&parent_id) {
-
-                    if folder.active_operation != new_folder_op {
-                        folder.active_operation = new_folder_op;
-                        
-                        changed_items.push(ChangedItemOperation::Folder {
-                            id: parent_id,
-                            operation: new_folder_op,
-                        });
-
-                        current_parent_id = folder.parent_id;
-                    } else {
-                        // If this folder didn't change, its parents won't either.
-                        break; 
-                    }
-                } else {
-                    break;
-                }
-            }
-        } else {
-            return None;
+        if !is_modifiable {
+            return None; 
         }
 
+        match item {
+            DownloadType::File(file) => {
+                if file.active_operation == active_operation { 
+                    return None; // No change happened at all
+                }
+
+                file.active_operation = active_operation;
+                current_parent_id = file.parent_id;
+                
+                changed_items.push(ChangedItemOperation::File { id, operation: active_operation });
+            },
+            DownloadType::Folder(folder) => {
+                if folder.active_operation == active_operation {
+                    return None; // No change happened at all
+                }
+
+                folder.active_operation = active_operation;
+                current_parent_id = folder.parent_id;
+                
+                changed_items.push(ChangedItemOperation::Folder { id, operation: active_operation });
+            }
+        }
+
+        while let Some(parent_id) = current_parent_id {
+
+            let new_folder_op = self.calculate_folder_operation(parent_id);
+
+            if let Some(DownloadType::Folder(folder)) = self.files.get_mut(&parent_id) {
+
+                if folder.active_operation != new_folder_op {
+                    folder.active_operation = new_folder_op;
+                    
+                    changed_items.push(ChangedItemOperation::Folder {
+                        id: parent_id,
+                        operation: new_folder_op,
+                    });
+
+                    current_parent_id = folder.parent_id;
+                } else {
+                    // If this folder didn't change, its parents won't either.
+                    break; 
+                }
+            } else {
+                break;
+            }
+        }
+    
         if let Some(root_item) = self.files.get(&0) {
             let new_operation = match root_item {
                 DownloadType::File(file_download) => file_download.active_operation,
