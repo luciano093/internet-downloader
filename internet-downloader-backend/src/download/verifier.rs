@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use indexmap::IndexMap;
 use memmap2::MmapOptions;
@@ -87,7 +88,7 @@ struct Verifier {
     download_manager: UnboundedSender<ManagerCommand>,
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
-    handles: HashMap<DownloadId, JoinHandle<()>>, // We save the original file statuses in case we need them
+    handles: HashMap<DownloadId, (JoinHandle<()>, Arc<AtomicBool>)>, // We save an atomic bool in case we need to kill nested handles
     semaphore: Arc<Semaphore>,
 }
 
@@ -113,7 +114,8 @@ impl Verifier {
         while let Some(message) = self.receiver.recv().await {
             match message {
                 VerifierMessage::CancelVerification(download_id) => {
-                    if let Some(handle) = self.handles.remove(&download_id) {
+                    if let Some((handle, cancel_flag)) = self.handles.remove(&download_id) {
+                        cancel_flag.store(true, Ordering::Relaxed);
                         handle.abort();
 
                         // We want to wait until the handle ends before sending the clean up message
@@ -123,17 +125,18 @@ impl Verifier {
                     let _ = self.download_manager.send(ManagerCommand::CleanUpDownload(download_id));
                 },
                 VerifierMessage::PauseVerification(download_id) => {
-                    if let Some(handle) = self.handles.remove(&download_id) {
+                    if let Some((handle, cancel_flag)) = self.handles.remove(&download_id) {
+                        cancel_flag.store(true, Ordering::Relaxed);
                         handle.abort();
                     }
                 },
                 VerifierMessage::VerifyDownload(download) => {
                     let download_name = download.name().clone();
 
-                        if self.handles.contains_key(&download.id()) {
-                            warn!("Download {} is already verifying. Ignoring duplicate request.", download.id());
-                            continue;
-                        }
+                    if self.handles.contains_key(&download.id()) {
+                        warn!("Download {} is already verifying. Ignoring duplicate request.", download.id());
+                        continue;
+                    }
 
                     info!("Queued {} for verification", download_name); 
 
@@ -200,6 +203,9 @@ impl Verifier {
         let download_manager = self.download_manager.clone();
 
         let semaphore = self.semaphore.clone();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let task_cancel_flag = cancel_flag.clone();
 
         let mut download_guard = DownloadGuard { 
             download: Some(download),
@@ -213,7 +219,7 @@ impl Verifier {
 
             let _permit = semaphore.acquire_owned().await.unwrap();
 
-            let diffs = Self::verify_download(download_guard.download.as_ref().unwrap()).await;
+            let diffs = Self::verify_download(download_guard.download.as_ref().unwrap(), task_cancel_flag).await;
 
             for diff in diffs {
                 let file_id = diff.file_id;
@@ -308,10 +314,10 @@ impl Verifier {
             let _ = download_manager.send(ManagerCommand::DownloadVerified(download));
         });
 
-        self.handles.insert(download_id, handle);
+        self.handles.insert(download_id, (handle, cancel_flag));
     }
 
-    async fn verify_download(download: &Download) -> Vec<FileVerificationDiff> {
+    async fn verify_download(download: &Download, task_cancel_flag: Arc<AtomicBool>) -> Vec<FileVerificationDiff> {
         let mut pending_changes = Vec::new();
 
         for (&id, download_item) in download.files() {
@@ -330,9 +336,10 @@ impl Verifier {
                 // against the hash of the file in disk
                 else if file.status() == FileStatus::Completed  {
                     let path = file.relative_path().to_path_buf();
+                    let task_cancel_flag = task_cancel_flag.clone();
 
                     let hash = tokio::task::spawn_blocking(move || {
-                        hash_file(&path)
+                        hash_file(&path, Some(task_cancel_flag))
                     }).await.unwrap();
 
                     match hash {
@@ -357,8 +364,10 @@ impl Verifier {
                         let chunks_to_check = file.chunk_hashes().to_owned();
 
                         if !chunks_to_check.is_empty() {
+                            let task_cancel_flag = task_cancel_flag.clone();
+
                             let failed_indices = tokio::task::spawn_blocking(move || {
-                                Self::verify_file_chunks(&path, HASH_CHUNK_SIZE, size as usize, chunks_to_check)
+                                Self::verify_file_chunks(&path, HASH_CHUNK_SIZE, size as usize, chunks_to_check, task_cancel_flag)
                             }).await.unwrap();
 
                             match failed_indices {
@@ -394,7 +403,7 @@ impl Verifier {
         pending_changes
     }
 
-    fn verify_file_chunks(path: &Path, chunk_size: usize, file_len: usize, chunks_to_check: Vec<Option<[u8; 16]>>) -> Result<Vec<usize>, std::io::Error> {
+    fn verify_file_chunks(path: &Path, chunk_size: usize, file_len: usize, chunks_to_check: Vec<Option<[u8; 16]>>, task_cancel_flag: Arc<AtomicBool>) -> Result<Vec<usize>, std::io::Error> {
         let mut failed_chunks = Vec::new();
 
         let mut file = File::open(&path)?;
@@ -408,6 +417,14 @@ impl Verifier {
             file.read_exact(&mut buffer)?;
 
             for (index, expected) in chunks_to_check.iter().enumerate() {
+                if task_cancel_flag.load(Ordering::Relaxed) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted, 
+                        "Verification cancelled by user"
+                    ));
+                }
+
+
                 // We only want to check, if we know we have another hash to check against
                 // first, otherwise we skip it
                 if let Some(expected_hash) = expected {

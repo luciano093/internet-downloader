@@ -1,4 +1,4 @@
-use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path};
+use std::{fs::File, io::{Read, Seek, SeekFrom}, path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 
 use memmap2::MmapOptions;
 
@@ -78,10 +78,23 @@ pub fn force_delete_file(path: &std::path::Path) {
     }
 }
 
-pub fn hash_file(path: &Path) -> std::io::Result<u128> {
+pub fn hash_file(path: &Path, cancel_flag: Option<Arc<AtomicBool>>) -> std::io::Result<u128> {
+    let file = File::open(path)?;
+    let mmap = unsafe { MmapOptions::new().map(&file)? };
     let mut hasher = blake3::Hasher::new();
+
+    // According to blake: `update_rayon` is
+    // _slower_ than `update` for inputs under 128 KiB.
+    let chunk_size = 16 * 1024 * 1024; 
     
-    hasher.update_mmap_rayon(&path)?;
+    for chunk in mmap.chunks(chunk_size) {
+
+        // If the cancel_flag is true, we return instantly
+        if cancel_flag.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Cancelled"));
+        }
+        hasher.update_rayon(chunk);
+    }
 
     let mut output = [0u8; 16];
 
