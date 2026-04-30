@@ -53,6 +53,7 @@ export const useDownloadStore = create<DownloadState>()(
 
                     if (change.url) download.url = change.url;
                     if (change.status) download.status = change.status;
+                    if (change.active_operation !== undefined) download.active_operation = change.active_operation;
                     if (change.host) download.host = change.host;
 
                     if (change.files) {
@@ -75,7 +76,6 @@ export const useDownloadStore = create<DownloadState>()(
         }),
 
         setSelectedId: (id) => set((state) => {
-            console.log("id: ", id);
             state.selectedId = id;
         }),
     }))

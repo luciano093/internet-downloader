@@ -15,7 +15,6 @@ The core download engine and real-time state synchronization are highly function
 * Build out the Settings page
 * Implement dynamic save directory selection
 * Hook up frontend sorting and filtering for the sidebar
-* Implement chunk hashing for strict integrity verification
 * Refine the JS plugin system for link scraping
 
 ## Features
@@ -25,6 +24,7 @@ The core download engine and real-time state synchronization are highly function
 * Downloads can be paused and resumed, and state is safely persisted to SQLite to survive crashes or restarts.
 * Disk writes are decoupled into a dedicated thread pool to keep the core engine unblocked.
 * The Rust backend can run independently of the React frontend.
+* Uses BLAKE3 chunk hashing to detect file corruption, truncation, or bit-rot, seamlessly re-downloading only the broken or missing pieces.
 
 ## Local Development Setup
 

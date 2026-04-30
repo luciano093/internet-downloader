@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use indexmap::IndexMap;
 
-use crate::download::{items::{Download, DownloadType, FileDownload, FolderDownload}, status::StateBucketCounters};
+use crate::{download::{items::{Download, DownloadType, FileDownload, FolderDownload}, status::StateBucketCounters}, download_task::HASH_CHUNK_SIZE};
 
 #[derive(sqlx::FromRow)]
 pub struct DownloadRow {
@@ -45,11 +47,27 @@ pub struct DownloadItemRow {
 }
 
 impl DownloadItemRow {
-    pub fn into_download_type(self, children: Vec<usize>, buckets: StateBucketCounters) -> DownloadType {
+    pub fn into_download_type(self, children: Vec<usize>, buckets: StateBucketCounters, chunk_hashes: &mut HashMap<usize, Vec<Option<[u8; 16]>>>) -> DownloadType {
         if self.item_type == "folder" {
             DownloadType::Folder(FolderDownload::from_db(self, children, buckets))
         } else {
-            DownloadType::File(FileDownload::from_db(self))
+            let file_id = self.item_id as usize;
+            let chunk_hashes = chunk_hashes.remove(&file_id).unwrap_or_else(|| {
+                // We have to reconstruct the vector of chunks with None values
+                // Otherwise we would have no space for chunk hashes
+
+                if let Some(size) = self.size_bytes {
+                    let size = size as u64;
+
+                    let num_chunk_hashes = size.div_ceil(HASH_CHUNK_SIZE as u64);
+    
+                    vec![None; num_chunk_hashes as usize]
+                } else {
+                    Vec::new()
+                }
+            });
+
+            DownloadType::File(FileDownload::from_db(self, chunk_hashes))
         }
     }
 }
@@ -87,4 +105,12 @@ pub struct JoinedDownloadSettingsRow {
     // File settings fields (wrapped in Option because of left join)
     pub item_id: Option<i64>,
     pub file_speed_limit: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+pub struct ChunkHashRow {
+    pub download_id: i64,
+    pub item_id: i64,
+    pub chunk_index: i64,
+    pub hash: Option<Vec<u8>>,
 }

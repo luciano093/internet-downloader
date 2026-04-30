@@ -19,10 +19,6 @@ const SpeedCellContent = ({ download }: { download: DownloadItem }) => {
         return () => console.log(`SpeedCell unmounted for ${download.name}`);
     },[]);
 
-
-    console.log(stats.downloadedSize);
-    console.log(speed);
-
     return <span>{formatBytes(speed)}/s</span>;
 };
 
@@ -140,7 +136,7 @@ const columns = [
         header: "Status",
         size: 120,
         cell: (download) => {
-            return <>{formatDownloadStatus(download.status)}</>;
+            return <>{download.active_operation ? download.active_operation : formatDownloadStatus(download.status)}</>;
         }
     }),
     createColumn({ 

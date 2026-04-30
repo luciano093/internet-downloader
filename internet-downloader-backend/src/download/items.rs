@@ -13,6 +13,7 @@ use crate::download::{DownloadFailureReason, DownloadId, FileFailureReason, File
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::{serialize_hash, serialize_chunks};
+use crate::download_task::HASH_CHUNK_SIZE;
 
 pub trait DownloadItem {
     fn parent_id(&self) -> Option<usize>;
@@ -25,10 +26,17 @@ pub trait DownloadItem {
 }
 
 #[derive(Debug, Clone)]
-pub enum ChangedItem {
+pub enum ChangedItemStatus {
     File { id: usize, status: FileStatus },
     Folder { id: usize, status: DownloadStatus },
     Download(DownloadStatus), 
+}
+
+#[derive(Debug, Clone)]
+pub enum ChangedItemOperation {
+    File { id: usize, operation: Option<ActiveOperation> },
+    Folder { id: usize, operation: Option<ActiveOperation> },
+    Download(Option<ActiveOperation>), 
 }
 
 /// Has either a file or folder as the only item in root
@@ -38,6 +46,7 @@ pub struct Download {
     url: String,
     relative_path: PathBuf,
     status: DownloadStatus,
+    active_operation: Option<ActiveOperation>,
     pub(crate) files: IndexMap<usize, DownloadType>,
     name: String,
 }
@@ -68,6 +77,7 @@ impl Download {
             status: DownloadStatus::Queued,
             files,
             name,
+            active_operation: None,
         }
     }
 
@@ -98,6 +108,10 @@ impl Download {
         self.status
     }
 
+    pub const fn active_operation(&self) -> Option<ActiveOperation> {
+        self.active_operation
+    }
+
     pub const fn name(&self) -> &String {
         &self.name
     }
@@ -106,12 +120,12 @@ impl Download {
         self.status == DownloadStatus::Completed
     }
 
-    pub fn set_paused(&mut self) -> Vec<ChangedItem> {
+    pub fn set_paused(&mut self) -> Vec<ChangedItemStatus> {
         let mut files_to_pause = Vec::new();
 
         for (&id, item) in &self.files {
             if let DownloadType::File(file) = item {
-                if file.status().is_active() {
+                if file.status().can_be_paused() {
                     files_to_pause.push(id);
                 }
             }
@@ -128,7 +142,7 @@ impl Download {
         all_changes
     }
 
-    pub fn set_queued(&mut self) -> Vec<ChangedItem> {
+    pub fn set_queued(&mut self) -> Vec<ChangedItemStatus> {
         let mut files_to_queue = Vec::new();
 
         for (&id, item) in &self.files {
@@ -149,8 +163,123 @@ impl Download {
 
         all_changes
     }
+    
+    pub fn set_active_operation(&mut self, active_operation: Option<ActiveOperation>) -> Vec<ChangedItemOperation> {
+        let ids: Vec<usize> = self.files.keys().copied().collect();
 
-    pub fn set_file_status(&mut self, id: usize, status: FileStatus) -> Option<Vec<ChangedItem>> {
+        let mut all_changes = Vec::new();
+
+        for id in ids {
+            if let Some(changes) = self.set_file_or_empty_folder_operation(id, active_operation) {
+                all_changes.extend(changes);
+            }
+        }
+
+        all_changes
+    }
+
+    pub fn set_file_or_empty_folder_operation(&mut self, id: usize, active_operation: Option<ActiveOperation>) -> Option<Vec<ChangedItemOperation>> {
+        let mut changed_items = Vec::new();
+        let mut current_parent_id;
+
+        let item = self.files.get_mut(&id)?;
+        
+        // We can only directly modify files and empty folders, otherwise the item should calculate its
+        // status based on its childrens' status
+        let is_modifiable = match item {
+            DownloadType::File(_) => true,
+            DownloadType::Folder(folder) => folder.children.is_empty(), 
+        };
+
+        if !is_modifiable {
+            return None; 
+        }
+
+        match item {
+            DownloadType::File(file) => {
+                if file.active_operation == active_operation { 
+                    return None; // No change happened at all
+                }
+
+                file.active_operation = active_operation;
+                current_parent_id = file.parent_id;
+                
+                changed_items.push(ChangedItemOperation::File { id, operation: active_operation });
+            },
+            DownloadType::Folder(folder) => {
+                if folder.active_operation == active_operation {
+                    return None; // No change happened at all
+                }
+
+                folder.active_operation = active_operation;
+                current_parent_id = folder.parent_id;
+                
+                changed_items.push(ChangedItemOperation::Folder { id, operation: active_operation });
+            }
+        }
+
+        while let Some(parent_id) = current_parent_id {
+
+            let new_folder_op = self.calculate_folder_operation(parent_id);
+
+            if let Some(DownloadType::Folder(folder)) = self.files.get_mut(&parent_id) {
+
+                if folder.active_operation != new_folder_op {
+                    folder.active_operation = new_folder_op;
+                    
+                    changed_items.push(ChangedItemOperation::Folder {
+                        id: parent_id,
+                        operation: new_folder_op,
+                    });
+
+                    current_parent_id = folder.parent_id;
+                } else {
+                    // If this folder didn't change, its parents won't either.
+                    break; 
+                }
+            } else {
+                break;
+            }
+        }
+    
+        if let Some(root_item) = self.files.get(&0) {
+            let new_operation = match root_item {
+                DownloadType::File(file_download) => file_download.active_operation,
+                DownloadType::Folder(folder_download) => folder_download.active_operation,
+            };
+
+            if self.active_operation != new_operation {
+                self.active_operation = new_operation;
+                changed_items.push(ChangedItemOperation::Download(new_operation));
+            }
+        }
+
+        Some(changed_items)
+    }
+
+    fn calculate_folder_operation(&self, folder_id: usize) -> Option<ActiveOperation> {
+        if let Some(DownloadType::Folder(folder)) = self.files.get(&folder_id) {
+            for child_id in &folder.children {
+                match self.files.get(child_id) {
+                    Some(DownloadType::File(file)) => {
+                        if file.active_operation.is_some() {
+                            return file.active_operation;
+                        }
+                    }
+                    Some(DownloadType::Folder(child_folder)) => {
+                        if child_folder.active_operation.is_some() {
+                            return child_folder.active_operation;
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn set_file_status(&mut self, id: usize, status: FileStatus) -> Option<Vec<ChangedItemStatus>> {
         let mut changed_items = Vec::new();
 
         let (mut current_parent_id, mut previous_status_bucket, mut new_status_bucket) = {
@@ -163,7 +292,7 @@ impl Download {
                 let new_bucket = status.bucket();
 
                 file.status = status;
-                changed_items.push(ChangedItem::File {
+                changed_items.push(ChangedItemStatus::File {
                     id,
                     status,
                 });
@@ -205,7 +334,7 @@ impl Download {
             }
 
             if previous_folder_status != new_folder_status {
-                changed_items.push(ChangedItem::Folder {
+                changed_items.push(ChangedItemStatus::Folder {
                     id: parent_id,
                     status: new_folder_status,
                 });
@@ -229,7 +358,7 @@ impl Download {
 
             if self.status != new_root_status {
                 self.status = new_root_status;
-                changed_items.push(ChangedItem::Download(new_root_status));
+                changed_items.push(ChangedItemStatus::Download(new_root_status));
             }
         }
 
@@ -281,6 +410,7 @@ impl Download {
             status,
             files,
             name: row.name,
+            active_operation: None,
         }
     }
 }
@@ -345,6 +475,10 @@ impl DownloadItem for DownloadType {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ActiveOperation {
+    Verifying,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileDownload {
@@ -354,10 +488,14 @@ pub struct FileDownload {
     file_name: String,
     relative_path: PathBuf,
     status: FileStatus,
+    // Active operations are never saved to db. They only exist as transient operations in ram
+    active_operation: Option<ActiveOperation>,
     #[serde(serialize_with = "serialize_hash")] 
     hash: Option<u128>,
     #[serde(serialize_with = "serialize_chunks")]
-    chunks: BitVec<u8, Msb0>,
+    blocks: BitVec<u8, Msb0>,
+    #[serde(skip)]
+    chunk_hashes: Vec<Option<[u8; 16]>>,
     size: Option<FileSize>, // None means we haven't gotten the size yet, unknown means the size can't be known until it
     #[serde(skip)]
     /// tracks consecutive retries
@@ -391,7 +529,7 @@ impl Debug for FileDownload {
             .field("relative_path", &self.relative_path)
             .field("status", &self.status)
             .field("hash", &self.hash)
-            .field("chunks", &self.chunks.len())
+            .field("chunks", &self.blocks.len())
             .finish()
     }
 }
@@ -408,13 +546,15 @@ impl FileDownload {
             relative_path,
             status: FileStatus::Queued,
             hash: None,
-            chunks: BitVec::new(),
+            blocks: BitVec::new(),
+            chunk_hashes: Vec::new(),
             size: None,
             retries: 0,
+            active_operation: None,
         }
     }
 
-    pub fn from_db(row: DownloadItemRow) -> Self {
+    pub fn from_db(row: DownloadItemRow, mut chunk_hashes: Vec<Option<[u8; 16]>>) -> Self {
         // Reconstruct the FileSize
         let size = match row.size_type.as_deref() {
             Some("known") if let Some(size_bytes) = row.size_bytes => Some(FileSize::Known(size_bytes as u64)),
@@ -448,6 +588,12 @@ impl FileDownload {
                 PathBuf::new()
             });
 
+        if let Some(FileSize::Known(file_size)) = size {
+            let expected_chunks = file_size.div_ceil(HASH_CHUNK_SIZE as u64);
+
+            chunk_hashes.resize(expected_chunks as usize, None);
+        }
+
         Self {
             parent_id: row.parent_id.map(|id| id as usize),
             id: row.item_id as usize,
@@ -456,18 +602,28 @@ impl FileDownload {
             relative_path,
             status,
             hash,
-            chunks,
+            blocks: chunks,
+            chunk_hashes,
             size,
             retries: row.retries as usize,
+            active_operation: None,
         }
     }
 
-    pub const fn chunks(&self) -> &BitVec<u8, Msb0> {
-        &self.chunks
+    pub const fn blocks(&self) -> &BitVec<u8, Msb0> {
+        &self.blocks
     }
 
-    pub fn chunks_mut(&mut self) -> &mut BitVec<u8, Msb0> {
-        &mut self.chunks
+    pub fn blocks_mut(&mut self) -> &mut BitVec<u8, Msb0> {
+        &mut self.blocks
+    }
+
+    pub const fn chunk_hashes(&self) -> &Vec<Option<[u8; 16]>> {
+        &self.chunk_hashes
+    }
+
+    pub fn chunk_hashes_mut(&mut self) -> &mut Vec<Option<[u8; 16]>> {
+        &mut self.chunk_hashes
     }
 
     pub const fn hash(&self) -> Option<u128> {
@@ -484,6 +640,10 @@ impl FileDownload {
 
     pub fn status(&self) -> FileStatus {
         self.status
+    }
+
+    pub fn active_operation(&self) -> Option<ActiveOperation> {
+        self.active_operation
     }
 
     pub fn size(&self) -> Option<FileSize> {
@@ -507,7 +667,7 @@ impl FileDownload {
     }
 
     pub fn calculate_initial_bytes(&self, chunk_size: u64) -> u64 {
-        let chunks = self.chunks();
+        let chunks = self.blocks();
 
         if chunks.is_empty() {
             return 0;
@@ -556,6 +716,30 @@ impl FileDownload {
         
         expected_len.min(file_size)
     }
+
+    pub fn must_exist_in_disk(&self) -> bool {
+        self.must_exist_with_status(&self.status)
+    }
+
+    // This and `must_exist_in_disk` are separate functions to allow the case where
+    // a file's status has to be modified but the original status is required to check
+    // if the file must have existed.
+    pub fn must_exist_with_status(&self, status: &FileStatus) -> bool {
+        match status {
+            FileStatus::Completed => true,
+
+            // A file should only exist on disk once metadata has been fetched (file size is not None).
+            FileStatus::Paused | FileStatus::InProgress | FileStatus::Waiting(_) | FileStatus::Retrying => {
+                self.size.is_some() 
+            },
+
+            FileStatus::Failed(_) |
+            FileStatus::Queued |
+            FileStatus::Initializing |
+            FileStatus::FetchingMetadata |
+            FileStatus::NotFound  => false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -564,6 +748,7 @@ pub struct FolderDownload {
     id: usize,
     folder_name: String,
     relative_path: PathBuf,
+    active_operation: Option<ActiveOperation>,
     status: DownloadStatus,
     children: Vec<usize>,
 
@@ -593,6 +778,7 @@ impl FolderDownload {
             children: children_ids,
 
             bucket_counters,
+            active_operation: None,
         }
     }
 
@@ -615,6 +801,7 @@ impl FolderDownload {
             status: DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_ref().map(|str| str.as_str())).unwrap_or_default(),
             children,
             bucket_counters,
+            active_operation: None,
         }
     }
 
@@ -622,6 +809,7 @@ impl FolderDownload {
         match self.dominant_status() {
             Some(StatusBucket::Queued) => DownloadStatus::Queued,
             Some(StatusBucket::Initializing) => DownloadStatus::Initializing,
+            Some(StatusBucket::Verifying) => DownloadStatus::Verifying,
             Some(StatusBucket::FetchingMetadata) => DownloadStatus::FetchingMetadata,
             Some(StatusBucket::InProgress) => DownloadStatus::InProgress,
             Some(StatusBucket::Retrying) => DownloadStatus::Retrying,
@@ -643,6 +831,22 @@ impl FolderDownload {
             return None; 
         }
 
+        // Compile time guard
+        // A reminder to update this function if a new StatusBucket gets added
+        let _assert_exhaustive = |status| match status {
+            StatusBucket::InProgress |
+            StatusBucket::FetchingMetadata |
+            StatusBucket::Initializing |
+            StatusBucket::Retrying |
+            StatusBucket::Verifying |
+            StatusBucket::Waiting |
+            StatusBucket::Queued |
+            StatusBucket::Paused |
+            StatusBucket::Error |
+            StatusBucket::Completed |
+            StatusBucket::CompletedWithErrors => (),
+        };
+
         // Active states, if any of any children has an active state, we adopt the state too
         // Order is important
         // If anything is downloading, the folder is downloading
@@ -660,6 +864,10 @@ impl FolderDownload {
         // If nothing is downloading, but we are retrying a download
         else if self.bucket_counters.get(StatusBucket::Retrying) > 0 {
             Some(StatusBucket::Retrying)
+        } 
+        // If at least some file is still being verified
+        else if self.bucket_counters.get(StatusBucket::Verifying) > 0 {
+            Some(StatusBucket::Verifying)
         } 
         // If everything is either waiting or queued
         else if self.bucket_counters.get(StatusBucket::Waiting) > 0 {
@@ -774,6 +982,10 @@ impl FolderDownload {
 
     pub fn status(&self) -> DownloadStatus {
         self.status
+    }
+
+    pub fn active_operation(&self) -> Option<ActiveOperation> {
+        self.active_operation
     }
 }
 

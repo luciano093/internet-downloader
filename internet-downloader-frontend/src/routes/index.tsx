@@ -31,10 +31,12 @@ function Index() {
       const newEventSource = new EventSource("http://localhost:3211/downloads");
 
       newEventSource.addEventListener("snapshot", (event) => {
+        console.log("snapshot:", JSON.parse(event.data));
         setSnapshot(JSON.parse(event.data));
       });
 
       newEventSource.addEventListener("delta", (event) => {
+        console.log("delta:", JSON.parse(event.data));
         applyDelta(JSON.parse(event.data));
       });
 

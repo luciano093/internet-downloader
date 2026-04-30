@@ -1,7 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::Deref;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,7 +11,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::{EnumDiscriminants, EnumString, IntoStaticStr};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{Semaphore, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
 use dashmap::DashMap;
 use url::Host;
@@ -20,8 +19,9 @@ use url::Host;
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
-use crate::download::items::{Download, DownloadItem, DownloadType};
+use crate::download::items::{ActiveOperation, Download, DownloadItem, DownloadType};
 use crate::download::status::{DownloadStatus, FileStatus};
+use crate::download::verifier::VerifierHandle;
 use crate::download_writer_manager::DownloadWriterManager;
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::utils::file_utils::force_delete_file;
@@ -33,6 +33,7 @@ use crate::utils::network_utils::BandwidthLimiter;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
     StatusChanged { id: DownloadId, status: DownloadStatus },
+    OperationChanged { id: DownloadId, operation: Option<ActiveOperation> },
     ItemUpdated { id: DownloadId, item_update: ItemUpdate }, 
 }
 
@@ -45,6 +46,7 @@ pub enum ItemUpdate {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FileUpdate {
     Status { id: usize, status: FileStatus },
+    Operation { id: usize, operation: Option<ActiveOperation> },
     Hash { id: usize, hash: u128 },
     FileSize { id: usize, len: u64 },
     BytesDownloaded { id: usize, len: u64 },
@@ -54,6 +56,7 @@ impl FileUpdate {
     pub fn id(&self) -> usize {
         match self {
             FileUpdate::Status { id, .. } => *id,
+            FileUpdate::Operation { id, .. } => *id,
             FileUpdate::Hash { id, .. } => *id,
             FileUpdate::FileSize { id, .. } => *id,
             FileUpdate::BytesDownloaded { id, .. } => *id,
@@ -63,7 +66,8 @@ impl FileUpdate {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FolderUpdate {
-    Status { id: usize, status: DownloadStatus }, 
+    Status { id: usize, status: DownloadStatus },
+    Operation { id: usize, operation: Option<ActiveOperation> },
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, sqlx::Type)]
@@ -108,6 +112,7 @@ pub enum DownloadCommand {
 // Set host max connections
 pub enum ManagerCommand {
     QueueDownload(String),
+    DownloadVerified(Download),
     RemoveDownload(DownloadId, bool), // true if we want to remove from disk too
     CleanUpDownload(DownloadId),
     PauseDownload(DownloadId),
@@ -282,7 +287,6 @@ pub struct DownloadManager {
     unprocessed_downloads: IndexMap<DownloadId, Download>,
     ui_state_handle: Option<UiStateHandle>,
     command_sender: Option<UnboundedSender<ManagerCommand>>,
-    concurrency_limit: Arc<Semaphore>,
 }
 
 impl DownloadManager {
@@ -293,7 +297,6 @@ impl DownloadManager {
             unprocessed_downloads: IndexMap::new(),
             ui_state_handle: None,
             command_sender: None,
-            concurrency_limit: Arc::new(Semaphore::const_new(10))
         }
     }
 
@@ -309,65 +312,6 @@ impl DownloadManager {
 
         for (id, download) in restored_downloads {
             self.unprocessed_downloads.insert(id, download.clone());
-        }
-    }
-
-    pub async fn verify_downloads(&mut self) {
-        for (_, download) in &mut self.unprocessed_downloads {
-            let mut pending_changes = Vec::new();
-
-            for (&id, download_item) in &mut download.files {
-
-                if let DownloadType::File(file) = download_item {
-                    let exists_physically = file.relative_path().exists();
-
-                    let should_exist  = match file.status() {
-                        FileStatus::Completed => true,
-
-                        // A file should only exist on disk once metadata has been fetched (file size is not None).
-                        FileStatus::Paused | FileStatus::InProgress | FileStatus::Waiting(_) | FileStatus::Retrying => {
-                            file.size().is_some() 
-                        },
-
-                        FileStatus::Failed(_) |
-                        FileStatus::Queued |
-                        FileStatus::Initializing |
-                        FileStatus::FetchingMetadata |
-                        FileStatus::NotFound  => false,
-                    };
-
-                    // Check if file is missing (not queued and doesn't exist)
-                    if should_exist && !exists_physically {
-                        pending_changes.push((id, FileStatus::NotFound));
-                    } 
-
-
-                    // We check the hash only if the download is completed
-                    else if file.status() == FileStatus::Completed  {
-                        let hash = hash_file(file.relative_path().to_path_buf()).await;
-
-                        if Some(hash) != file.hash() {
-                            pending_changes.push((id, FileStatus::Failed(FileFailureReason::HashMismatch)));
-                        }
-                    }
-                }
-            }
-
-            let mut state_changed = false;
-
-            // Apply all file status changes
-            for (id, new_status) in pending_changes {
-                if let Some(changed_items) = download.set_file_status(id, new_status) {
-                    if !changed_items.is_empty() {
-                        state_changed = true;
-                    }
-                }
-            }
-
-            if state_changed {
-                // We should always write the change to db when the state has changed
-                self.db_state_manager.write_download(download).await;
-            }
         }
     }
 
@@ -433,13 +377,11 @@ impl DownloadManager {
         
         // Clone shared resources
         let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
-        let concurrency_limit = self.concurrency_limit.clone();
         let db_manager = self.db_state_manager.clone();
 
-        let mut queue: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
+        let unprocessed_downloads: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
 
         let plugin_registry = PluginRegistryHandler::spawn().await;
-
         
         let network_config = NetworkConfig::default();
         let client = network_manager::build_global_client(&network_config);
@@ -471,7 +413,7 @@ impl DownloadManager {
         }
 
         // Add queued downloads to registry
-        for (id, download) in &queue {
+        for (id, download) in &unprocessed_downloads {
             url_registry.insert(download.url().to_string(), *id);
             id_registry.insert(*id, download.url().to_string());
         }
@@ -479,6 +421,24 @@ impl DownloadManager {
         let next_id = self.next_id.take().unwrap();
         
         let mut removed_downloads = HashMap::new();
+
+        // These two separate sets are needed to track two things:
+        // is the current download being handled by the verify manager? and
+        // does the current download already went through the verification process?
+        // Separating these two allows us to implement pausing verification by just dropping the handle,
+        // while allowing us to not have to save Verifying as a state to the db, which would be unnecessary
+        // as no download loaded at the start of the program should be in a Veriying state.
+        let mut verifying_downloads = HashSet::new();
+        let mut needs_verification = HashSet::new(); 
+
+        let verifier = VerifierHandle::spawn(command_sender.clone(), ui_event_sender.clone(), db_manager.clone());
+
+        for &download_id in unprocessed_downloads.keys() {
+            verifying_downloads.insert(download_id);
+            needs_verification.insert(download_id);
+        }
+
+        let _ = verifier.verify_downloads(unprocessed_downloads).await;
 
         tokio::spawn(async move {
             loop {
@@ -504,12 +464,11 @@ impl DownloadManager {
                                 // First, we set it as removed
                                 removed_downloads.insert(id, from_disk);
 
-                                 // Try to remove from Pending Queue
-                                if queue.shift_remove(&id).is_some() {
-                                    debug!("Removed pending download {}", id);
-                                    let _ = command_sender.send(ManagerCommand::CleanUpDownload(id));
-                                } 
-                                // If not in queue, it might be running. Send Cancel signal.
+                                 // Cancel the verification if there is any
+                                if verifying_downloads.contains(&id) {
+                                    let _ = verifier.cancel_verification(id).await;
+                                }
+                                // If it is running. Send Cancel signal.
                                 else if let Some(url) = id_registry.get(&id) {
                                     // In this case, we have to wait for the download to finish so it sends the clean up command
                                     network_manager.cancel_download(url.clone(), DownloadId(*id));
@@ -525,12 +484,15 @@ impl DownloadManager {
                                 if let Some(url) = id_registry.remove(&download_id) {
                                     url_registry.remove(&url);
                                 }
+
+                                verifying_downloads.remove(&download_id);
+                                needs_verification.remove(&download_id);
                                 
                                 // Finally, we clean it up from the set
                                 if let Some(from_disk) = removed_downloads.remove(&download_id) {
                                     if from_disk {
                                         match db_manager.load_download(download_id).await {
-                                            Ok(download) => {
+                                            Ok(Some(download)) => {
                                                 for file_type in download.files().values() {
                                                     if let DownloadType::File(file) = file_type {
                                                         let path = file.relative_path(); 
@@ -540,10 +502,11 @@ impl DownloadManager {
                                                     }
                                                 }
                                             }
+                                            Ok(None) => {
+                                                warn!("Tried to load download with id {} but it was not found in DB. Skipping file deletion.", download_id);
+                                            }
                                             Err(_) => {
-                                                // We couldn't load it the download from the db. 
-                                                // Maybe it was never saved to the db?
-                                                warn!("Could not load download {} from DB to delete physical files. Skipping file deletion.", download_id);
+                                                warn!("There was an error loading download {} from DB to delete physical files. Skipping file deletion.", download_id);
                                             }
                                         } 
                                     }
@@ -555,14 +518,24 @@ impl DownloadManager {
                                 info!("Download cleaned up");
                             },
                             ManagerCommand::PauseDownload(download_id) => {
+                                // Tell the Verifier to cancel if it's currently hashing
+                                verifying_downloads.remove(&download_id);
+                                let _ = verifier.pause_verification(download_id).await;
+
+                                // Otherwise the download is currently being managed by a host
                                 if let Some(url) = id_registry.get(&download_id) {
                                     network_manager.pause_download(url.to_string(), download_id);
                                 }
                             },
-                            ManagerCommand::ResumeDownload(download_id) => if let Ok(download) = db_manager.load_download(download_id).await {
-                                let download_settings = app_settings.get_download_settings(download_id);
+                            ManagerCommand::ResumeDownload(download_id) => if let Ok(Some(download)) = db_manager.load_download(download_id).await {
+                                if needs_verification.contains(&download_id) {
+                                    verifying_downloads.insert(download_id);
+                                    let _ = verifier.verify_download(download).await;
+                                } else {
+                                    let download_settings = app_settings.get_download_settings(download_id);
 
-                                network_manager.resume_download(download, download_settings);
+                                    network_manager.resume_download(download, download_settings);
+                                }
                             },
                             ManagerCommand::Shutdown => {
                                 break;
@@ -605,12 +578,19 @@ impl DownloadManager {
                                     warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
                                 }
                             },
-                        }
-                    }
+                            ManagerCommand::DownloadVerified(download) => {
+                                let download_id = download.id();
 
-                    Ok(_) = concurrency_limit.clone().acquire_owned(), if !queue.is_empty() => {
-                        if let Some((_, download)) = queue.shift_remove_index(0) {
-                            let _ = command_sender.send(ManagerCommand::QueueDownload(download.url().to_string()));
+                                if !verifying_downloads.remove(&download_id) || removed_downloads.contains_key(&download_id) {
+                                    debug!("Ignoring stale verification completion for {}", download_id);
+                                    continue;
+                                }
+                                
+                                needs_verification.remove(&download_id); 
+
+                                let download_settings = app_settings.get_download_settings(download_id);
+                                network_manager.resume_download(download, download_settings);
+                            },
                         }
                     }
                 }
@@ -625,20 +605,6 @@ impl DownloadManager {
     pub async fn get_snapshot(&self) -> DownloadSnapshot {
         get_snapshot(&self.db_state_manager).await
     }
-}
-
-async fn hash_file(path: PathBuf) -> u128 {
-    tokio::task::spawn_blocking(move || {
-        let mut hasher = blake3::Hasher::new();
-        
-        hasher.update_mmap_rayon(&path).expect("Failed to hash file");
-
-        let mut output = [0u8; 16];
-
-        hasher.finalize_xof().fill(&mut output);
-
-        u128::from_le_bytes(output)
-    }).await.expect("Hashing task panicked")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumString, Default)]
