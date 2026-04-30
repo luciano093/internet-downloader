@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use indexmap::IndexMap;
 use os_str_bytes::OsStrBytes;
-use sqlx::{QueryBuilder, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
+use sqlx::{QueryBuilder, Row, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
 use thiserror::Error;
-use tracing::warn;
+use tokio::time::sleep;
+use tracing::{debug, warn};
 
 use crate::{db::rows::{ChunkHashRow, DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, DownloadId, FileSize, items::{Download, DownloadItem, DownloadType, FileDownload}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
@@ -14,6 +15,152 @@ pub enum StateManagerError {
     ConnectionError(sqlx::Error),
     #[error("Error creating database tables: {0}")]
     TableCreationError(sqlx::Error),
+}
+
+#[derive(Debug, Error)]
+#[error("{message}: {kind}")]
+pub struct DownloadFetchError {
+    message: &'static str,
+    kind: DbFetchErrorKind,
+
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl DownloadFetchError {
+    pub fn new(message: &'static str, err: sqlx::Error) -> Self {
+        Self { 
+            message,
+            kind: (&err).into(),
+            source: Box::new(err),
+        }
+    }
+    
+    pub fn kind(&self) -> &DbFetchErrorKind {
+        &self.kind
+    }
+    
+    fn from_sqlx(err: sqlx::Error) -> Self {
+        Self {
+            message: "Failed to fetch download",
+            kind: DbFetchErrorKind::from(&err),
+            source: Box::new(err),
+        }
+    }
+}
+
+impl From<ChunkHashLoadError> for DownloadFetchError {
+    fn from(error: ChunkHashLoadError) -> Self {
+        Self {
+            message: "Failed to fetch chunk hashes for download",
+            kind: error.kind(),
+            source: Box::new(error),
+        }
+    }
+}
+
+impl From<sqlx::Error> for DownloadFetchError {
+    fn from(err: sqlx::Error) -> Self {
+        Self::from_sqlx(err)
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy)]
+pub enum DbFetchErrorKind {
+    #[error("Failed to acquire a database connection")]
+    ConnectionFailed,
+
+    #[error("Failed to execute database query")]
+    QueryFailed,
+
+    #[error("Item was not found")]
+    NotFound,
+
+    #[error("Database schema corrupted")]
+    SchemaCorrupted,
+
+    #[error("Failed to decode database row")]
+    DataCorrupted,
+
+    #[error("Unexpected database error")]
+    Unexpected,
+}
+
+impl From<&sqlx::Error> for DbFetchErrorKind {
+    fn from(err: &sqlx::Error) -> Self {
+        match &err {
+            // Connection pool issues
+            sqlx::Error::Io(_) 
+            | sqlx::Error::Protocol(_) 
+            | sqlx::Error::PoolTimedOut 
+            | sqlx::Error::PoolClosed
+            | sqlx::Error::WorkerCrashed 
+            | sqlx::Error::BeginFailed => {
+                DbFetchErrorKind::ConnectionFailed
+            }
+            // Actual SQL errors returned by the DB
+            sqlx::Error::Database(_) => {
+                DbFetchErrorKind::QueryFailed
+            }
+
+            // Schema issues (non recoverable)
+            sqlx::Error::ColumnNotFound(_) | sqlx::Error::TypeNotFound { .. } => {
+                DbFetchErrorKind::SchemaCorrupted
+            }
+
+            sqlx::Error::RowNotFound => {
+                DbFetchErrorKind::NotFound
+            }
+            
+            // Parsing and decoding errors
+            | sqlx::Error::Decode(_) 
+            | sqlx::Error::ColumnDecode { .. } 
+            | sqlx::Error::ColumnIndexOutOfBounds { .. } => {
+                DbFetchErrorKind::DataCorrupted
+            }
+            
+            // Catch-all
+            _ => DbFetchErrorKind::Unexpected
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("{message}: {kind}")]
+pub struct ChunkHashLoadError {
+    message: &'static str,
+    kind: DbFetchErrorKind,
+    
+    #[source]
+    source: sqlx::Error,
+}
+
+impl ChunkHashLoadError {
+    pub fn new(message: &'static str, err: sqlx::Error) -> Self {
+        Self { 
+            message,
+            kind: (&err).into(),
+            source: err,
+        }
+    }
+    
+    pub fn kind(&self) -> DbFetchErrorKind {
+        self.kind
+    }
+    
+    fn from_sqlx(err: sqlx::Error) -> Self {
+        Self {
+            message: "Failed to load chunk hashes",
+            kind: DbFetchErrorKind::from(&err),
+            source: err,
+        }
+    }
+}
+
+impl From<sqlx::Error> for ChunkHashLoadError {
+    fn from(err: sqlx::Error) -> Self {
+        Self::from_sqlx(err)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -335,18 +482,18 @@ impl StateManager {
         Ok(download)
     }
 
-    pub async fn load_downloads(&self) -> Result<IndexMap<DownloadId, Download>, ()> {
+    pub async fn load_downloads(&self) -> Result<IndexMap<DownloadId, Download>, DownloadFetchError> {
         let download_rows = sqlx::query_as::<_, DownloadRow>("SELECT * FROM downloads ORDER BY id ASC")
             .fetch_all(&self.pool)
             .await
-            .unwrap();
+            .map_err(|err| DownloadFetchError::new("Failed to fetch all downloads from db", err))?;
 
         let item_rows = sqlx::query_as::<_, DownloadItemRow>(
             "SELECT * FROM download_items ORDER BY download_id ASC, item_id ASC"
         )
         .fetch_all(&self.pool)
         .await
-        .unwrap();
+        .map_err(|err| DownloadFetchError::new("Failed to fetch all download items from db", err))?;
 
         let mut items_by_download: HashMap<i64, Vec<DownloadItemRow>> = HashMap::new();
 
@@ -358,7 +505,126 @@ impl StateManager {
         }
 
         let mut downloads = IndexMap::with_capacity(download_rows.len());
-        let mut chunk_hashes = self.load_chunk_hashes().await.unwrap();
+
+        let mut chunk_hashes = match self.load_chunk_hashes().await {
+            Ok(chunk_hashes) => chunk_hashes,
+            Err(err) => match err.kind() {
+                // We failed to load all the chunks at once due to a corruption somewhere, 
+                // we should isolate where the corruption came from first.
+                // We treat NoFound as corrupted as there shouldn't be an error in the first place
+                // if the chunk hashes were not found.
+                DbFetchErrorKind::DataCorrupted | DbFetchErrorKind::NotFound => {
+                    warn!(error = &err as &dyn std::error::Error, "Chunk hashes are corrupted, recovery process started.");
+                    let mut recovered_chunk_hashes = HashMap::new();
+                    
+                    for download_row in &download_rows {
+                        let download_id = DownloadId(download_row.id as usize);
+
+                        // We request hashes download by download instead of all at once
+                        let download_chunk_hashes = match self.load_download_chunk_hashes(download_id).await {
+                            Ok(download_chunk_hashes) => download_chunk_hashes,
+                            Err(err) => match err.kind() {
+
+                                // When one fails again with one of these, it means we found which download was failing
+                                // and can start looking more deeply into the specific failing chunk hash(es)
+                                DbFetchErrorKind::DataCorrupted | DbFetchErrorKind::NotFound => {
+                                    warn!("Isolating corrupted chunk hash for download_id {}", *download_id);
+
+                                    let mut recovered_chunk_hashes: HashMap<usize, Vec<Option<[u8; 16]>>> = HashMap::new();
+
+                                    let keys_query = sqlx::query(
+                                            "SELECT item_id, chunk_index FROM chunk_hashes WHERE download_id = ?"
+                                        )
+                                        .bind(*download_id as i64)
+                                        .fetch_all(&self.pool)
+                                        .await;
+
+                                    match keys_query {
+                                            Ok(keys) => {
+                                                let mut transaction = self.pool.begin().await.map_err(|err| {
+                                                        ChunkHashLoadError::new("Failed to start recovery transaction", err)
+                                                    })?;
+                                                
+                                                for key_row in keys {
+                                                    let item_id: i64 = key_row.get("item_id");
+                                                    let chunk_index: i64 = key_row.get("chunk_index");
+
+                                                    let chunk_row_result = sqlx::query_as::<_, ChunkHashRow>(
+                                                            "SELECT * FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                                                        )
+                                                        .bind(*download_id as i64)
+                                                        .bind(item_id)
+                                                        .bind(chunk_index)
+                                                        .fetch_one(&mut *transaction)
+                                                        .await;
+
+                                                    match chunk_row_result {
+                                                        Ok(row) => {
+                                                            // Row is healthy! We insert it into our map
+                                                            let hashes = recovered_chunk_hashes.entry(item_id as usize).or_default();
+                                                            let index = chunk_index as usize;
+                                    
+                                                            if hashes.len() <= index {
+                                                                hashes.resize(index + 1, None);
+                                                            }
+                                    
+                                                            if let Some(hash_vec) = row.hash {
+                                                                if let Ok(arr) = hash_vec.try_into() {
+                                                                    hashes[index] = Some(arr);
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(err) => {
+                                                            // We found the corrupted row, delete it
+                                                            warn!(
+                                                                "Corrupted chunk hash found (item_id: {}, chunk_index: {}). Deleting it from DB. Err: {}", 
+                                                                item_id, chunk_index, err
+                                                            );
+
+                                                            let _ = sqlx::query(
+                                                                "DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                                                            )
+                                                            .bind(*download_id as i64)
+                                                            .bind(item_id)
+                                                            .bind(chunk_index)
+                                                            .execute(&mut *transaction)
+                                                            .await;
+                                                        }
+                                                    }
+                                                }
+
+                                                transaction.commit().await.map_err(|err| {
+                                                    ChunkHashLoadError::new("Failed to commit recovery transaction", err)
+                                                })?;
+                                                
+                                                recovered_chunk_hashes
+                                            }
+                                            Err(err) => {
+                                                // If we can't even run `SELECT item_id, chunk_index`, the SQLite table is broken.
+                                                warn!("Wasn't able to get any rows for download {}. Schema is corrupted.", *download_id);
+                                                
+                                                return Err(ChunkHashLoadError::new("Schema corrupted: unable to query chunk hash keys", err).into());
+                                            }
+                                    }
+                                }
+                                DbFetchErrorKind::ConnectionFailed |
+                                DbFetchErrorKind::QueryFailed |
+                                DbFetchErrorKind::SchemaCorrupted |
+                                DbFetchErrorKind::Unexpected => return Err(err.into()),
+                            }
+                        };
+
+                        recovered_chunk_hashes.insert(download_id, download_chunk_hashes);
+                    }
+                    
+                    recovered_chunk_hashes
+                }
+                DbFetchErrorKind::ConnectionFailed |
+                DbFetchErrorKind::QueryFailed |
+                DbFetchErrorKind::SchemaCorrupted |
+                DbFetchErrorKind::Unexpected => return Err(err.into()),
+            }
+        };
 
         for download_row in download_rows {
             let download_id_val = download_row.id;
@@ -375,13 +641,14 @@ impl StateManager {
         Ok(downloads)
     }
 
-    async fn load_download_chunk_hashes(&self, download_id: DownloadId) -> Result<HashMap<usize, Vec<Option<[u8; 16]>>>, sqlx::Error> {
+    async fn load_download_chunk_hashes(&self, download_id: DownloadId) -> Result<HashMap<usize, Vec<Option<[u8; 16]>>>, ChunkHashLoadError> {
         let rows = sqlx::query_as::<_, ChunkHashRow>(
             "SELECT * FROM chunk_hashes WHERE download_id = ? ORDER BY item_id, chunk_index"
         )
         .bind(*download_id as i64)
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(|err| ChunkHashLoadError::new("Failed to query chunk hash rows", err))?;
 
         let mut map = HashMap::new();
 
@@ -405,12 +672,13 @@ impl StateManager {
         Ok(map)
     }
 
-    async fn load_chunk_hashes(&self) -> Result<HashMap<DownloadId, HashMap<usize, Vec<Option<[u8; 16]>>>>, sqlx::Error> {
+    async fn load_chunk_hashes(&self) -> Result<HashMap<DownloadId, HashMap<usize, Vec<Option<[u8; 16]>>>>, ChunkHashLoadError> {
         let rows = sqlx::query_as::<_, ChunkHashRow>(
             "SELECT * FROM chunk_hashes ORDER BY download_id ASC, item_id, chunk_index"
         )
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(ChunkHashLoadError::from_sqlx)?;
 
         let mut map = HashMap::new();
 
@@ -653,4 +921,29 @@ fn reconstruct_file_tree(item_rows: Vec<DownloadItemRow>, mut chunk_hashes: Hash
     }
 
     files
+}
+
+async fn with_retry<F, Fut, T, E>(mut retries: usize, delay: Duration, mut action: F, mut is_retriable: impl FnMut(&E) -> bool) -> Result<T, E>
+    where F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, E>>
+{
+    loop {
+        match action().await {
+            Ok(val) => return Ok(val),
+            Err(err) => {
+                // If we have retries left and the caller says this specific error is retriable
+                if retries > 0 && is_retriable(&err) {
+                    debug!(
+                        "Operation failed, retrying in {:?}... ({} attempts left)", 
+                        delay, retries
+                    );
+                    retries -= 1;
+                    sleep(delay).await;
+                    continue;
+                }
+                // Otherwise, we are out of retries or the error is fatal
+                return Err(err);
+            }
+        }
+    }
 }
