@@ -448,7 +448,7 @@ impl Verifier {
 
         // If the file is tiny, skip the mmap overhead and just read it.
         if file_len < 16 * 1024 {
-            let mut buffer = vec![0u8; file_len];
+            let mut buffer = Vec::with_capacity(file_len);
 
             file.seek(SeekFrom::Start(0))?;
             file.take(file_len as u64).read_to_end(&mut buffer)?;
