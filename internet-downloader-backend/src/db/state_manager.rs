@@ -458,28 +458,32 @@ impl StateManager {
             .unwrap();
     }
 
-    pub async fn load_download(&self, id: DownloadId) -> Result<Download, ()> {
+    pub async fn load_download(&self, id: DownloadId) -> Result<Option<Download>, DownloadFetchError> {
         let download_row = sqlx::query_as::<_, DownloadRow>("SELECT * FROM downloads WHERE id = ?")
             .bind(*id as i64)
             .fetch_optional(&self.pool)
             .await
-            .unwrap()
-            .ok_or(())?;
+            .map_err(|err| DownloadFetchError::new("Failed to fetch download row", err))?;
+
+        let download_row = match download_row {
+            Some(download_row) => download_row,
+            None => return Ok(None),
+        };
 
         let item_rows = sqlx::query_as::<_, DownloadItemRow>(
             "SELECT * FROM download_items WHERE download_id = ? ORDER BY item_id ASC"
         ).bind(*id as i64)
             .fetch_all(&self.pool)
             .await
-            .unwrap();
+            .map_err(|err| DownloadFetchError::new("Failed to fetch item rows", err))?;
 
         
-        let chunk_hashes_map = self.load_download_chunk_hashes(id).await.unwrap();
+        let chunk_hashes_map = self.load_download_chunk_hashes_with_recovery(id).await?;
         let files = reconstruct_file_tree(item_rows, chunk_hashes_map);
 
         let download = Download::from_db(download_row, files);
 
-        Ok(download)
+        Ok(Some(download))
     }
 
     pub async fn load_downloads(&self) -> Result<IndexMap<DownloadId, Download>, DownloadFetchError> {
@@ -521,116 +525,7 @@ impl StateManager {
                         let download_id = DownloadId(download_row.id as usize);
 
                         // We request hashes download by download instead of all at once
-                        let download_chunk_hashes = match self.load_download_chunk_hashes(download_id).await {
-                            Ok(download_chunk_hashes) => download_chunk_hashes,
-                            Err(err) => match err.kind() {
-
-                                // When one fails again with one of these, it means we found which download was failing
-                                // and can start looking more deeply into the specific failing chunk hash(es)
-                                DbFetchErrorKind::DataCorrupted | DbFetchErrorKind::NotFound => {
-                                    warn!("Isolating corrupted chunk hash for download_id {}", *download_id);
-
-                                    let mut recovered_chunk_hashes: HashMap<usize, Vec<Option<[u8; 16]>>> = HashMap::new();
-
-                                    let keys_query = sqlx::query(
-                                            "SELECT item_id, chunk_index FROM chunk_hashes WHERE download_id = ?"
-                                        )
-                                        .bind(*download_id as i64)
-                                        .fetch_all(&self.pool)
-                                        .await;
-
-                                    match keys_query {
-                                            Ok(keys) => {
-                                                let mut transaction = self.pool.begin().await.map_err(|err| {
-                                                    ChunkHashLoadError::new("Failed to start recovery transaction", err)
-                                                })?;
-                                                
-                                                for key_row in keys {
-                                                let item_id: i64 = key_row.get("item_id");
-                                                let chunk_index: i64 = key_row.get("chunk_index");
-
-                                                if chunk_index < 0 {
-                                                    warn!(
-                                                        "Corrupted negative keys found (item_id: {}, chunk_index: {}). Deleting it from DB.", 
-                                                        item_id, chunk_index
-                                                    );
-                                            
-                                                    let _ = sqlx::query(
-                                                        "DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
-                                                    )
-                                                    .bind(*download_id as i64)
-                                                    .bind(item_id)
-                                                    .bind(chunk_index)
-                                                    .execute(&mut *transaction)
-                                                    .await;
-                                                    
-                                                    continue;
-                                                }
-
-                                                let chunk_row_result = sqlx::query_as::<_, ChunkHashRow>(
-                                                        "SELECT * FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
-                                                    )
-                                                    .bind(*download_id as i64)
-                                                    .bind(item_id)
-                                                    .bind(chunk_index)
-                                                    .fetch_one(&mut *transaction)
-                                                    .await;
-
-                                                match chunk_row_result {
-                                                    Ok(row) => {
-                                                        // Row is healthy! We insert it into our map
-                                                        let hashes = recovered_chunk_hashes.entry(item_id as usize).or_default();
-                                                        let index = chunk_index as usize;
-                                
-                                                        if hashes.len() <= index {
-                                                            hashes.resize(index + 1, None);
-                                                        }
-                                
-                                                        if let Some(hash_vec) = row.hash {
-                                                            if let Ok(arr) = hash_vec.try_into() {
-                                                                hashes[index] = Some(arr);
-                                                            }
-                                                        }
-                                                    }
-                                                    Err(err) => {
-                                                        // We found the corrupted row, delete it
-                                                        warn!(
-                                                            "Corrupted chunk hash found (item_id: {}, chunk_index: {}). Deleting it from DB. Err: {}", 
-                                                            item_id, chunk_index, err
-                                                        );
-
-                                                        let _ = sqlx::query(
-                                                            "DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
-                                                        )
-                                                        .bind(*download_id as i64)
-                                                        .bind(item_id)
-                                                        .bind(chunk_index)
-                                                        .execute(&mut *transaction)
-                                                        .await;
-                                                    }
-                                                }
-                                            }
-
-                                            transaction.commit().await.map_err(|err| {
-                                                ChunkHashLoadError::new("Failed to commit recovery transaction", err)
-                                            })?;
-                                            
-                                            recovered_chunk_hashes
-                                        }
-                                        Err(err) => {
-                                            // If we can't even run `SELECT item_id, chunk_index`, the SQLite table is broken.
-                                            warn!("Wasn't able to get any rows for download {}. Schema is corrupted.", *download_id);
-                                            
-                                            return Err(ChunkHashLoadError::new("Schema corrupted: unable to query chunk hash keys", err).into());
-                                        }
-                                    }
-                                }
-                                DbFetchErrorKind::ConnectionFailed |
-                                DbFetchErrorKind::QueryFailed |
-                                DbFetchErrorKind::SchemaCorrupted |
-                                DbFetchErrorKind::Unexpected => return Err(err.into()),
-                            }
-                        };
+                        let download_chunk_hashes = self.load_download_chunk_hashes_with_recovery(download_id).await?;
 
                         recovered_chunk_hashes.insert(download_id, download_chunk_hashes);
                     }
@@ -881,6 +776,119 @@ impl StateManager {
         }
 
         transaction.commit().await.unwrap();
+    }
+
+    async fn load_download_chunk_hashes_with_recovery(&self, download_id: DownloadId) -> Result<HashMap<usize, Vec<Option<[u8; 16]>>>, ChunkHashLoadError> {
+        match self.load_download_chunk_hashes(download_id).await {
+            Ok(download_chunk_hashes) => Ok(download_chunk_hashes),
+            Err(err) => match err.kind() {
+    
+                // When one fails again with one of these, it means we found which download was failing
+                // and can start looking more deeply into the specific failing chunk hash(es)
+                DbFetchErrorKind::DataCorrupted | DbFetchErrorKind::NotFound => {
+                    warn!("Isolating corrupted chunk hash for download_id {}", *download_id);
+    
+                    let mut recovered_chunk_hashes: HashMap<usize, Vec<Option<[u8; 16]>>> = HashMap::new();
+    
+                    let keys_query = sqlx::query(
+                            "SELECT item_id, chunk_index FROM chunk_hashes WHERE download_id = ?"
+                        )
+                        .bind(*download_id as i64)
+                        .fetch_all(&self.pool)
+                        .await;
+    
+                    match keys_query {
+                            Ok(keys) => {
+                                let mut transaction = self.pool.begin().await.map_err(|err| {
+                                    ChunkHashLoadError::new("Failed to start recovery transaction", err)
+                                })?;
+                                
+                                for key_row in keys {
+                                let item_id: i64 = key_row.get("item_id");
+                                let chunk_index: i64 = key_row.get("chunk_index");
+    
+                                if chunk_index < 0 {
+                                    warn!(
+                                        "Corrupted negative keys found (item_id: {}, chunk_index: {}). Deleting it from DB.", 
+                                        item_id, chunk_index
+                                    );
+                            
+                                    let _ = sqlx::query(
+                                        "DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                                    )
+                                    .bind(*download_id as i64)
+                                    .bind(item_id)
+                                    .bind(chunk_index)
+                                    .execute(&mut *transaction)
+                                    .await;
+                                    
+                                    continue;
+                                }
+    
+                                let chunk_row_result = sqlx::query_as::<_, ChunkHashRow>(
+                                        "SELECT * FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                                    )
+                                    .bind(*download_id as i64)
+                                    .bind(item_id)
+                                    .bind(chunk_index)
+                                    .fetch_one(&mut *transaction)
+                                    .await;
+    
+                                match chunk_row_result {
+                                    Ok(row) => {
+                                        // Row is healthy! We insert it into our map
+                                        let hashes = recovered_chunk_hashes.entry(item_id as usize).or_default();
+                                        let index = chunk_index as usize;
+                
+                                        if hashes.len() <= index {
+                                            hashes.resize(index + 1, None);
+                                        }
+                
+                                        if let Some(hash_vec) = row.hash {
+                                            if let Ok(arr) = hash_vec.try_into() {
+                                                hashes[index] = Some(arr);
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        // We found the corrupted row, delete it
+                                        warn!(
+                                            "Corrupted chunk hash found (item_id: {}, chunk_index: {}). Deleting it from DB. Err: {}", 
+                                            item_id, chunk_index, err
+                                        );
+    
+                                        let _ = sqlx::query(
+                                            "DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                                        )
+                                        .bind(*download_id as i64)
+                                        .bind(item_id)
+                                        .bind(chunk_index)
+                                        .execute(&mut *transaction)
+                                        .await;
+                                    }
+                                }
+                            }
+    
+                            transaction.commit().await.map_err(|err| {
+                                ChunkHashLoadError::new("Failed to commit recovery transaction", err)
+                            })?;
+                            
+                            Ok(recovered_chunk_hashes)
+                        }
+                        Err(err) => {
+                            // If we can't even run `SELECT item_id, chunk_index`, the SQLite table is broken.
+                            warn!("Wasn't able to get any rows for download {}. Schema is corrupted.", *download_id);
+                            
+                            return Err(ChunkHashLoadError::new("Schema corrupted: unable to query chunk hash keys", err).into());
+                        }
+                    }
+                }
+                DbFetchErrorKind::ConnectionFailed |
+                DbFetchErrorKind::QueryFailed |
+                DbFetchErrorKind::SchemaCorrupted |
+                DbFetchErrorKind::Unexpected => return Err(err.into()),
+            }
+        }
     }
 }
 

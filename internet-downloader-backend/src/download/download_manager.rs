@@ -492,7 +492,7 @@ impl DownloadManager {
                                 if let Some(from_disk) = removed_downloads.remove(&download_id) {
                                     if from_disk {
                                         match db_manager.load_download(download_id).await {
-                                            Ok(download) => {
+                                            Ok(Some(download)) => {
                                                 for file_type in download.files().values() {
                                                     if let DownloadType::File(file) = file_type {
                                                         let path = file.relative_path(); 
@@ -502,10 +502,11 @@ impl DownloadManager {
                                                     }
                                                 }
                                             }
+                                            Ok(None) => {
+                                                warn!("Tried to load download with id {} but it was not found in DB. Skipping file deletion.", download_id);
+                                            }
                                             Err(_) => {
-                                                // We couldn't load it the download from the db. 
-                                                // Maybe it was never saved to the db?
-                                                warn!("Could not load download {} from DB to delete physical files. Skipping file deletion.", download_id);
+                                                warn!("There was an error loading download {} from DB to delete physical files. Skipping file deletion.", download_id);
                                             }
                                         } 
                                     }
