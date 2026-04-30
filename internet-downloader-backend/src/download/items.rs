@@ -589,9 +589,9 @@ impl FileDownload {
             });
 
         if let Some(FileSize::Known(file_size)) = size {
-            let expected_chunks = (file_size as usize).div_ceil(HASH_CHUNK_SIZE);
+            let expected_chunks = file_size.div_ceil(HASH_CHUNK_SIZE as u64);
 
-            chunk_hashes.resize(expected_chunks, None);
+            chunk_hashes.resize(expected_chunks as usize, None);
         }
 
         Self {
