@@ -42,7 +42,7 @@ impl DownloadFetchError {
     
     fn from_sqlx(err: sqlx::Error) -> Self {
         Self {
-            message: "Failed to fetch download",
+            message: "Failed to fetch download".into(),
             kind: DbFetchErrorKind::from(&err),
             source: Box::new(err),
         }
@@ -52,7 +52,7 @@ impl DownloadFetchError {
 impl From<ChunkHashLoadError> for DownloadFetchError {
     fn from(error: ChunkHashLoadError) -> Self {
         Self {
-            message: "Failed to fetch chunk hashes for download",
+            message: "Failed to fetch chunk hashes for download".into(),
             kind: error.kind(),
             source: Box::new(error),
         }
@@ -150,7 +150,7 @@ impl ChunkHashLoadError {
     
     fn from_sqlx(err: sqlx::Error) -> Self {
         Self {
-            message: "Failed to load chunk hashes",
+            message: "Failed to load chunk hashes".into(),
             kind: DbFetchErrorKind::from(&err),
             source: err,
         }
