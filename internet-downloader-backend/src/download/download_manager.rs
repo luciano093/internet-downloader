@@ -527,7 +527,7 @@ impl DownloadManager {
                                     network_manager.pause_download(url.to_string(), download_id);
                                 }
                             },
-                            ManagerCommand::ResumeDownload(download_id) => if let Ok(download) = db_manager.load_download(download_id).await {
+                            ManagerCommand::ResumeDownload(download_id) => if let Ok(Some(download)) = db_manager.load_download(download_id).await {
                                 if needs_verification.contains(&download_id) {
                                     verifying_downloads.insert(download_id);
                                     let _ = verifier.verify_download(download).await;
