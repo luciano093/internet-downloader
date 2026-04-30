@@ -451,7 +451,7 @@ impl Verifier {
             let mut buffer = vec![0u8; file_len];
 
             file.seek(SeekFrom::Start(0))?;
-            file.read_exact(&mut buffer)?;
+            file.take(file_len as u64).read_to_end(&mut buffer)?;
 
             for (index, expected) in chunks_to_check.iter().enumerate() {
                 if task_cancel_flag.load(Ordering::Relaxed) {
