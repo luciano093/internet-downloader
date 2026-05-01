@@ -59,6 +59,50 @@ impl Display for DownloadId {
     }
 }
 
+#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize)]
+pub enum NodeId {
+    Folder(FolderId),
+    File(FileId),
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, sqlx::Type)]
+#[serde(transparent)]
+#[sqlx(transparent)]
+pub struct FileId(pub usize);
+
+impl Deref for FileId {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Display for FileId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, sqlx::Type)]
+#[serde(transparent)]
+#[sqlx(transparent)]
+pub struct FolderId(pub usize);
+
+impl Deref for FolderId {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Display for FolderId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Has either a file or folder as the only item in root
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Download {
