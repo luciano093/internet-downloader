@@ -1,6 +1,7 @@
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
@@ -9,7 +10,7 @@ use os_str_bytes::OsStringBytes;
 use serde::{Deserialize, Serialize};
 
 use crate::db::rows::{DownloadItemRow, DownloadRow};
-use crate::download::{DownloadFailureReason, DownloadId, FileFailureReason, FileSize};
+use crate::download::{DownloadFailureReason, FileFailureReason, FileSize};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::{serialize_hash, serialize_chunks};
@@ -37,6 +38,25 @@ pub enum ChangedItemOperation {
     File { id: usize, operation: Option<ActiveOperation> },
     Folder { id: usize, operation: Option<ActiveOperation> },
     Download(Option<ActiveOperation>), 
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, sqlx::Type)]
+#[serde(transparent)]
+#[sqlx(transparent)]
+pub struct DownloadId(pub usize);
+
+impl Deref for DownloadId {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Display for DownloadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 /// Has either a file or folder as the only item in root

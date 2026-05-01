@@ -19,7 +19,7 @@ use url::Host;
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
-use crate::download::items::{ActiveOperation, Download, DownloadItem, DownloadType};
+use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, DownloadType};
 use crate::download::status::{DownloadStatus, FileStatus};
 use crate::download::verifier::VerifierHandle;
 use crate::download_writer_manager::DownloadWriterManager;
@@ -68,25 +68,6 @@ impl FileUpdate {
 pub enum FolderUpdate {
     Status { id: usize, status: DownloadStatus },
     Operation { id: usize, operation: Option<ActiveOperation> },
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, sqlx::Type)]
-#[serde(transparent)]
-#[sqlx(transparent)]
-pub struct DownloadId(pub usize);
-
-impl Deref for DownloadId {
-    type Target = usize;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Display for DownloadId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]

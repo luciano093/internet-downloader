@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
-use crate::{db::rows::{ChunkHashRow, DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, DownloadId, FileSize, items::{Download, DownloadItem, DownloadType, FileDownload}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
+use crate::{db::rows::{ChunkHashRow, DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, FileSize, items::{Download, DownloadId, DownloadItem, DownloadType, FileDownload}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {

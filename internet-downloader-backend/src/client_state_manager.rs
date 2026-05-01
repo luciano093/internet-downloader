@@ -10,12 +10,12 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::info;
 
-use crate::download::DownloadId;
 use crate::download::FileSize;
 use crate::download::DownloadUpdate;
 use crate::download::FolderUpdate;
 use crate::download::ItemUpdate;
 use crate::download::items::ActiveOperation;
+use crate::download::items::DownloadId;
 use crate::download::items::DownloadItem;
 use crate::download::items::FileDownload;
 use crate::download::items::FolderDownload;

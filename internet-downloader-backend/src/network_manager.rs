@@ -5,7 +5,7 @@ use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 use tracing::{debug, warn};
 use url::{Host, Url};
 
-use crate::{context::AppContext, download::{DownloadId, DownloadLimiterGroup, DownloadSettings, LimiterRegistry, ManagerCommand, items::Download}, host_manager::HostHandle, utils::network_utils::BandwidthLimiter};
+use crate::{context::AppContext, download::{DownloadLimiterGroup, DownloadSettings, LimiterRegistry, ManagerCommand, items::{Download, DownloadId}}, host_manager::HostHandle, utils::network_utils::BandwidthLimiter};
 
 pub enum NetworkMessage {
     QueueDownload(String, DownloadId),
