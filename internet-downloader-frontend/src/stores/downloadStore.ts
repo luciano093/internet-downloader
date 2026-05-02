@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { DeltaEvent, DownloadItem, DownloadNode } from '../downloadTypes';
+import type { DeltaEvent, DownloadItem } from '../downloadTypes';
 
 export type DownloadState = {
     downloads: Record<number, DownloadItem>;
@@ -19,15 +19,17 @@ export const useDownloadStore = create<DownloadState>()(
         selectedId: null,
 
         setSnapshot: (items) => set((state) => {
-            state.downloadIds = items.map(i => i.id);
-            state.downloads = {};
-            items.forEach(item => {
-                if (!item.files) {
-                    item.files = {};
-                }
+          console.log("items: ", items);
+          state.downloadIds = items.map(i => i.id);
+          state.downloads = {};
+          
+          items.forEach(item => {
+              if (!item.files) {
+                  item.files = {};
+              }
 
-                state.downloads[item.id] = item;
-            })
+              state.downloads[item.id] = item;
+          })
         }),
 
         applyDelta: (delta) => set((state) => {
@@ -57,19 +59,35 @@ export const useDownloadStore = create<DownloadState>()(
                     if (change.host) download.host = change.host;
 
                     if (change.files) {
-                        Object.entries(change.files).forEach(([fileIdString, fileChanges]) => {
-                            const fileId = Number(fileIdString);
-                            const file = download.files[fileId];
+                      Object.entries(change.files).forEach(([fileIdString, fileChanges]) => {
+                        const fileId = Number(fileIdString);
+                        const file = download.files[fileId];
 
-                            if (file) {
-                                Object.assign(file, fileChanges);
-                            } 
+                        if (file) {
+                          Object.assign(file, fileChanges);
+                        }
 
-                            // If it's new (and the update contains the full object), add it
-                            else if (fileChanges.type) {
-                                download.files[fileId] = fileChanges as DownloadNode;
-                            }
-                        })
+                        // If it's new (and the update contains the full object), add it
+                        else if (fileChanges.file_name) {
+                          download.files[fileId] = fileChanges;
+                        }
+                      });
+                    }
+
+                    if (change.folders) {
+                      Object.entries(change.folders).forEach(([folderIdString, folderChanges]) => {
+                        const folderId = Number(folderIdString);
+                        const folder = download.folders[folderId];
+
+                        if (folder) {
+                          Object.assign(folder, folderChanges);
+                        } 
+
+                        // If it's new (and the update contains the full object), add it
+                        else if (folderChanges.folder_name !== undefined) {
+                          download.folders[folderId] = folderChanges;
+                        }
+                      });
                     }
                 });
             }

@@ -1,5 +1,5 @@
 export type FileFailureReason = 
-  | { state: "network_error" } // Replace with your actual FileFailureReason variants
+  | { state: "network_error" }
   | { state: "disk_error" }
   | { state: "hash_mismatch" }; 
 
@@ -40,21 +40,25 @@ export type DownloadStatus =
 export type ActiveOperation = "verifying";
 
 export type FileItem = {
-  type: "file";
+  id: number;
+  parent_id: number | null;
   file_name: string;
   relative_path: string;
   status: FileStatus;
   active_operation: ActiveOperation | null,
   url: string;
-  hash: string;
+  hash: string | null;
   size: "unknown" | number;
   bytes_downloaded: number;
 };
 
 export type FolderItem = {
-  type: "folder";
+  id: number;
+  parent_id: number | null;
   folder_name: string;
-  children: number[];
+  relative_path: string;
+  child_files: number[];
+  child_folders: number[];
   status: DownloadStatus;
   active_operation: ActiveOperation | null,
 };
@@ -62,17 +66,18 @@ export type FolderItem = {
 export type DownloadNode = FileItem | FolderItem;
 
 export interface DownloadItem {
+  id: number,
+  name: string,
   url: string;
+  host: string;
   status: DownloadStatus;
   active_operation: ActiveOperation | null,
-  host: string;
-  name: string,
-  files: Record<number, DownloadNode>;
-  id: number,
+  
+  files: Record<number, FileItem>;
+  folders: Record<number, FolderItem>;
 }
 
-export type FileItemDiff = {
-  type: "file"; 
+export type FileItemDiff = { 
   file_name?: string;
   relative_path?: string;
   status?: FileStatus;
@@ -80,26 +85,28 @@ export type FileItemDiff = {
   url?: string;
   hash?: string | null;
   size?: "unknown" | number;
+  bytes_downloaded?: number;
 };
 
 export type FolderItemDiff = {
-  type: "folder";
   folder_name?: string;
-  children?: number[];
   status?: DownloadStatus;
   active_operation?: ActiveOperation | null,
+  child_files?: number[];
+  child_folders?: number[];
 };
 
 export type DownloadNodeDiff = FileItemDiff | FolderItemDiff;
 
 export interface DownloadItemDiff {
+  id: number,
   url?: string,
   status?: DownloadStatus,
   active_operation?: ActiveOperation | null,
   host?: string,
   relative_path?: string,
-  files?: Record<number, DownloadNodeDiff>;
-  id: number,
+  files: Record<number, FileItem>;
+  folders: Record<number, FolderItem>;
 }
 
 export type DeltaEvent = {
