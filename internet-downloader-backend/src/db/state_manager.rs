@@ -199,7 +199,7 @@ impl StateManager {
             );
 
             -- Folders table
-            CREATE TABLE IF NOT EXISTS download_folders {
+            CREATE TABLE IF NOT EXISTS download_folders (
                 download_id INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
                 folder_id INTEGER NOT NULL,        
                 parent_folder_id INTEGER,
@@ -214,7 +214,7 @@ impl StateManager {
 
                 FOREIGN KEY (download_id, parent_folder_id) 
                     REFERENCES download_folders(download_id, folder_id) ON DELETE CASCADE
-            }
+            );
 
             -- Files table
             CREATE TABLE IF NOT EXISTS download_files (
