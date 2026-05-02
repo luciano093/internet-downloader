@@ -15,7 +15,7 @@ use tracing::{debug, info, trace, warn};
 use dashmap::DashMap;
 use url::Host;
 
-use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
+use crate::client_state_manager::{FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
 use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, FileId, FolderId};
@@ -580,7 +580,7 @@ impl DownloadManager {
         self.ui_state_handle.as_ref().unwrap().subscribe()
     }
 
-    pub async fn get_snapshot(&self) -> DownloadSnapshot {
+    pub async fn get_snapshot(&self) -> IndexMap<DownloadId, Download> {
         get_snapshot(&self.db_state_manager).await
     }
 }

@@ -28,7 +28,7 @@ use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit
 use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
-const BLOCK_SIZE: usize = 16384; // 16 KB
+pub const BLOCK_SIZE: usize = 16384; // 16 KB
 pub const HASH_CHUNK_SIZE: usize = 1048576; // 1 MB 
 pub const BLOCKS_PER_HASH: usize = HASH_CHUNK_SIZE / BLOCK_SIZE; // (1 MB / 16 KB) or 64 blocks
 const TARGET_RANGE_SIZE: usize = 5242880 / BLOCK_SIZE; // 320 ranges of chunks

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -190,8 +191,8 @@ impl Default for UiStateManager {
     }
 }
 
-pub async fn get_snapshot(db_state_manager: &StateManager) -> DownloadSnapshot {
-    DownloadSnapshot(db_state_manager.load_downloads().await.unwrap())
+pub async fn get_snapshot(db_state_manager: &StateManager) -> IndexMap<DownloadId, Download> {
+    db_state_manager.load_downloads().await.unwrap()
 }
 
 #[derive(Debug, Clone)]
@@ -383,56 +384,26 @@ impl From<&FolderDownload> for FolderDiff {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DownloadSnapshot(pub IndexMap<DownloadId, Download>);
-
-impl Serialize for DownloadSnapshot {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer {
-        self.build_tree().serialize(serializer)
-    }
+#[derive(Serialize)]
+pub struct DownloadSnapshot {
+    pub id: DownloadId,
+    pub name: String,
+    pub url: String,
+    pub status: DownloadStatus,
+    pub active_operation: Option<ActiveOperation>,
+    pub files: IndexMap<FileId, FileSnapshot>,
+    pub folders: IndexMap<FolderId, FolderDownload>,
 }
 
-impl DownloadSnapshot {
-    fn build_tree(&self) -> serde_json::Value {
-        let downloads = self.0.iter().map(|(_url, download)| {
-            download_to_json(download)
-        }).collect::<Vec<_>>();
-
-        downloads.into()
-    }
-}
-
-pub fn download_to_json(download: &Download) -> serde_json::Value {
-    let mut files_json = serde_json::to_value(download.files()).unwrap();
-
-    if let Some(files_map) = files_json.as_object_mut() {
-        for (id, file_value) in files_map.iter_mut() {
-            if let Some(file_obj) = file_value.as_object_mut() {
-                file_obj.remove("chunks"); 
-
-                if let Ok(id) = id.parse::<usize>() {
-                    // Assuming you have a way to access the FileDownload here
-                    if let Some(file) = download.files().get(&FileId(id)) {
-                        // Calculate safe, committed bytes from the BitVec
-                        let committed_bytes = file.calculate_initial_bytes(16384 as u64);
-                        
-                        file_obj.insert(
-                            "bytes_downloaded".to_string(), 
-                            serde_json::json!(committed_bytes)
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    serde_json::json!({
-        "id": download.id(),
-        "name": download.name(),
-        "status": download.status(),
-        "url": download.url(),
-        "files": files_json,
-    })
+#[derive(Serialize)]
+pub struct FileSnapshot {
+    pub id: FileId,
+    pub parent_id: Option<FolderId>,
+    pub file_name: String,
+    pub relative_path: PathBuf,
+    pub size: Option<FileSize>,
+    pub bytes_downloaded: u64,
+    pub status: FileStatus,
+    pub active_operation: Option<ActiveOperation>,
+    pub url: Arc<String>,
 }

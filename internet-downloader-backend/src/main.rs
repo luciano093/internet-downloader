@@ -9,6 +9,8 @@ use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, put};
+use indexmap::IndexMap;
+use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
 use internet_downloader_backend::download::DownloadManager;
 
@@ -128,7 +130,14 @@ async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Json(j
 async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> impl IntoResponse  {
     let manager_guard = manager.lock().await;
     let receiver = manager_guard.download_subscribe();
-    let snapshot = manager_guard.get_snapshot().await;
+    let downloads = manager_guard.get_snapshot().await;
+
+    let snapshot: Vec<DownloadSnapshot> = downloads
+        .into_iter()
+        .map(|(_id, download)| {
+            DownloadSnapshot::from(download)
+        })
+        .collect();
 
     drop(manager_guard);
 

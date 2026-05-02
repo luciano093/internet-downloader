@@ -9,12 +9,13 @@ use indexmap::IndexMap;
 use os_str_bytes::OsStringBytes;
 use serde::{Deserialize, Serialize};
 
+use crate::client_state_manager::{DownloadSnapshot, FileSnapshot};
 use crate::db::rows::{DownloadFileRow, DownloadFolderRow, DownloadRow};
 use crate::download::{DownloadFailureReason, FileFailureReason, FileSize};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::{serialize_hash, serialize_chunks};
-use crate::download_task::HASH_CHUNK_SIZE;
+use crate::download_task::{BLOCK_SIZE, HASH_CHUNK_SIZE};
 
 pub trait DownloadItem {
     type Id;
@@ -647,6 +648,24 @@ impl Download {
     }
 }
 
+impl From<Download> for DownloadSnapshot {
+        fn from(download: Download) -> DownloadSnapshot {
+            let files: IndexMap<FileId, FileSnapshot> = download.files.into_iter().map(|(id, file)| {
+                (id, file.into())
+            }).collect();
+        
+            DownloadSnapshot {
+                id: download.id,
+                name: download.name,
+                url: download.url,
+                status: download.status,
+                active_operation: download.active_operation,
+                files,
+                folders: download.folders,
+            }
+        }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DownloadType {
@@ -1077,6 +1096,25 @@ impl FileDownload {
             FileStatus::Initializing |
             FileStatus::FetchingMetadata |
             FileStatus::NotFound  => false,
+        }
+    }
+}
+
+impl From<FileDownload> for FileSnapshot {
+    fn from(file: FileDownload) -> Self {
+        let bytes_downloaded = file.calculate_initial_bytes(BLOCK_SIZE as u64);
+        
+        FileSnapshot {
+            id: file.id,
+            parent_id:
+            file.parent_id,
+            file_name: file.file_name,
+            relative_path: file.relative_path,
+            size: file.size,
+            bytes_downloaded,
+            status: file.status,
+            active_operation: file.active_operation,
+            url: file.url
         }
     }
 }
