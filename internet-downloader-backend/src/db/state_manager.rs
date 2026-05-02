@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
-use crate::{db::rows::{ChunkHashRow, DownloadItemRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, FileSize, items::{Download, DownloadId, DownloadItem, DownloadType, FileDownload}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
+use crate::{db::rows::{ChunkHashRow, DownloadFileRow, DownloadFolderRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, FileSize, items::{Download, DownloadId, DownloadItem, FileDownload, FileId, FolderDownload, FolderId}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
@@ -198,22 +198,37 @@ impl StateManager {
                 failure_reason TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS download_items (
+            -- Folders table
+            CREATE TABLE IF NOT EXISTS download_folders {
                 download_id INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
-                
-                item_id INTEGER NOT NULL,        
-                parent_id INTEGER,
-                
-                item_type TEXT NOT NULL, -- 'file' or 'folder'
-                
-                -- Shared fields
+                folder_id INTEGER NOT NULL,        
+                parent_folder_id INTEGER,
+
                 name TEXT NOT NULL,
                 relative_path_raw BLOB NOT NULL,
                 relative_path TEXT NOT NULL,
                 status TEXT NOT NULL,
                 failure_reason TEXT,
                 
-                -- File-specific fields (These will be NULL for Folders)
+                PRIMARY KEY (download_id, folder_id),
+
+                FOREIGN KEY (download_id, parent_folder_id) 
+                    REFERENCES download_folders(download_id, folder_id) ON DELETE CASCADE
+            }
+
+            -- Files table
+            CREATE TABLE IF NOT EXISTS download_files (
+                download_id INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+                file_id INTEGER NOT NULL,        
+                parent_folder_id INTEGER,
+                
+                name TEXT NOT NULL,
+                relative_path_raw BLOB NOT NULL,
+                relative_path TEXT NOT NULL,
+                status TEXT NOT NULL,
+                failure_reason TEXT,
+                
+                -- File-specific fields
                 url TEXT,
                 hash BLOB,
                 chunks_raw BLOB,
@@ -223,37 +238,35 @@ impl StateManager {
                 retries INTEGER DEFAULT 0,
                 wait_time INTEGER,
                 
-                -- Ensure item_id is unique per download
-                PRIMARY KEY (download_id, item_id),
-
-                -- Ensures every parent id exists in the download_id we are referencing
-                FOREIGN KEY (download_id, parent_id) REFERENCES download_items(download_id, item_id) ON DELETE CASCADE
-
-                -- Size constraints
+                PRIMARY KEY (download_id, file_id),
+    
+                FOREIGN KEY (download_id, parent_folder_id) 
+                    REFERENCES download_folders(download_id, folder_id) ON DELETE CASCADE,
+    
+                -- Constraints
                 CONSTRAINT check_size_logic CHECK (
                     (size_type = 'known' AND size_bytes IS NOT NULL) OR 
                     (size_type = 'unknown' AND size_bytes IS NULL) OR
                     (size_type IS NULL AND size_bytes IS NULL)
                 ), 
-
-                -- Hash constraints
                 CONSTRAINT check_hash_length CHECK (hash IS NULL OR length(hash) = 16)
-
-                -- Item type constraint
-                CONSTRAINT check_item_type CHECK (item_type IN ('file', 'folder'))
             );
 
-            CREATE INDEX IF NOT EXISTS idx_download_items_parent ON download_items(download_id, parent_id);
+            CREATE INDEX IF NOT EXISTS idx_download_folders_parent ON download_folders(download_id, parent_folder_id);
+            CREATE INDEX IF NOT EXISTS idx_download_files_parent ON download_files(download_id, parent_folder_id);
 
+            -- Chunk hashes
             CREATE TABLE IF NOT EXISTS chunk_hashes (
                 download_id INTEGER NOT NULL,
-                item_id     INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
                 chunk_index   INTEGER NOT NULL,
                 hash        BLOB(16),
-                PRIMARY KEY (download_id, item_id, chunk_index),
-                FOREIGN KEY (download_id, item_id)
-                    REFERENCES download_items(download_id, item_id)
+                
+                PRIMARY KEY (download_id, file_id, chunk_index),
+                FOREIGN KEY (download_id, file_id)
+                    REFERENCES download_files(download_id, file_id)
                     ON DELETE CASCADE,
+                    
                 CONSTRAINT check_hash_length CHECK (hash IS NULL OR length(hash) = 16)
             );
 
@@ -278,11 +291,11 @@ impl StateManager {
             -- FileSettings
             CREATE TABLE IF NOT EXISTS file_settings (
                 download_id INTEGER NOT NULL,
-                item_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
                 speed_limit INTEGER,
                 
-                PRIMARY KEY (download_id, item_id),
-                FOREIGN KEY (download_id, item_id) REFERENCES download_items(download_id, item_id) ON DELETE CASCADE
+                PRIMARY KEY (download_id, file_id),
+                FOREIGN KEY (download_id, file_id) REFERENCES download_files(download_id, file_id) ON DELETE CASCADE
             );
             "#
         )
@@ -341,93 +354,101 @@ impl StateManager {
         .execute(&mut *transaction)
         .await
         .unwrap();
-
+        
         // We chunk querys to be 1000 files at a time due to a few reasons:
         // Doing one big query with more files will probably be slower
         // SQLITE_MAX_VARIABLE_NUMBER allows up to 32766 placeholders in a single query
         // and here every file query uses more than a dozen at a time, this might accumulate
         // and pass the max limit if we aren't careful
-        let mut files_iter = download.files.iter().peekable();
+        let mut folders_iter = download.folders().iter().peekable();
+
+        while folders_iter.peek().is_some() {
+            let mut builder = QueryBuilder::new(
+                "INSERT INTO download_folders (
+                    download_id, folder_id, parent_folder_id,
+                    name, relative_path_raw, relative_path, 
+                    status, failure_reason
+                ) "
+            );
+
+            let batch: Vec<_> = folders_iter.by_ref().take(1000).collect();
+
+            builder.push_values(batch, |mut builder, (&folder_id, folder)| {
+                let (status, reason) = folder.status().to_db_columns(); 
+                let path_bytes = folder.relative_path().to_io_bytes_lossy();
+
+                builder
+                    .push_bind(*download.id() as i64)
+                    .push_bind(*folder_id as i64)
+                    .push_bind(folder.parent_id().map(|id| *id as i64))
+                    .push_bind(folder.name())
+                    .push_bind(path_bytes)
+                    .push_bind(folder.relative_path().to_string_lossy())
+                    .push_bind(status)
+                    .push_bind(reason);
+            });
+
+            builder.push(
+            r#" ON CONFLICT(download_id, folder_id) DO UPDATE SET 
+                name = excluded.name, 
+                relative_path_raw = excluded.relative_path_raw,
+                relative_path = excluded.relative_path, 
+                status = excluded.status, 
+                failure_reason = excluded.failure_reason"#
+            );
+
+            let query = builder.build();
+            query.execute(&mut *transaction).await.unwrap();
+        }
+
+        
+        let mut files_iter = download.files().iter().peekable();
 
         while files_iter.peek().is_some() {
             let mut builder = QueryBuilder::new(
-                "INSERT INTO download_items (
-                    download_id, item_id, parent_id, item_type, 
+                "INSERT INTO download_files (
+                    download_id, file_id, parent_folder_id,
                     name, relative_path_raw, relative_path, 
-                    status, failure_reason, wait_time,
-                    url, hash, chunks_raw, chunks_len, size_type, size_bytes, retries
+                    status, failure_reason, 
+                    url, hash, chunks_raw, chunks_len, size_type, size_bytes, retries, wait_time
                 ) "
             );
 
             let batch: Vec<_> = files_iter.by_ref().take(1000).collect();
 
-            builder.push_values(&batch, |mut builder, (item_id, item_type)| {
-                match item_type {
-                    DownloadType::File(file) => {
-                        let (status, reason, wait_time) = file.status().to_db_columns();
-                        let path_bytes = file.relative_path().to_io_bytes_lossy();
-                        
-                        let hash = file.hash().map(|hash| hash.to_be_bytes().to_vec());
+            builder.push_values(&batch, |mut builder, (file_id, file)| {
+                let (status, reason, wait_time) = file.status().to_db_columns();
+                let path_bytes = file.relative_path().to_io_bytes_lossy();
+                
+                let hash = file.hash().map(|hash| hash.to_be_bytes().to_vec());
 
-                        let (size_type, size_bytes) = match file.size() {
-                            None => (None, None),
-                            Some(FileSize::Unknown) => (Some("unknown"), None),
-                            Some(FileSize::Known(size)) => (Some("known"), Some(size as i64)),
-                        };
+                let (size_type, size_bytes) = match file.size() {
+                    None => (None, None),
+                    Some(FileSize::Unknown) => (Some("unknown"), None),
+                    Some(FileSize::Known(size)) => (Some("known"), Some(size as i64)),
+                };
 
-                        builder.push_bind(*download.id() as i64)
-                            .push_bind(**item_id as i64)
-                            .push_bind(file.parent_id().map(|id| id as i64))
-                            .push_bind("file")
-                            .push_bind(file.name())
-                            .push_bind(path_bytes)
-                            .push_bind(file.relative_path().to_string_lossy())
-                            .push_bind(status)
-                            .push_bind(reason)
-                            .push_bind(wait_time)
-                            .push_bind(file.url_ref()) 
-                            .push_bind(hash)
-                            .push_bind(file.blocks().as_raw_slice())   
-                            .push_bind(file.blocks().len() as i64)   
-                            .push_bind(size_type)
-                            .push_bind(size_bytes)
-                            .push_bind(file.retries() as i64);
-                    }
-                    DownloadType::Folder(folder) => {
-                        let (status, reason) = folder.status().to_db_columns(); 
-                        let path_bytes = folder.relative_path().to_io_bytes_lossy();
-
-                        builder.push_bind(*download.id() as i64)
-                        .push_bind(**item_id as i64)
-                        .push_bind(folder.parent_id().map(|id| id as i64))
-                        .push_bind("folder")
-                        .push_bind(folder.name())
-                        .push_bind(path_bytes)
-                        .push_bind(folder.relative_path().to_string_lossy())
-                        .push_bind(status)
-                        .push_bind(reason)
-                        .push_bind(None::<i64>)
-                        .push_bind(None::<&str>) 
-                        .push_bind(None::<Vec<u8>>)
-                        .push_bind(None::<&[u8]>)
-                        .push_bind(None::<i64>) 
-                        .push_bind(None::<&str>)
-                        .push_bind(None::<i64>) 
-                        .push_bind(None::<i64>);
-                    },
-                }
+                builder
+                    .push_bind(*download.id() as i64)
+                    .push_bind(***file_id as i64)
+                    .push_bind(file.parent_id().map(|id| *id as i64))
+                    .push_bind(file.name())
+                    .push_bind(path_bytes)
+                    .push_bind(file.relative_path().to_string_lossy())
+                    .push_bind(status)
+                    .push_bind(reason)
+                    .push_bind(file.url_ref()) 
+                    .push_bind(hash)
+                    .push_bind(file.blocks().as_raw_slice())   
+                    .push_bind(file.blocks().len() as i64)   
+                    .push_bind(size_type)
+                    .push_bind(size_bytes)
+                    .push_bind(file.retries() as i64)
+                    .push_bind(wait_time);
             });
-
-            for (_, item_type) in &batch {
-                if let DownloadType::File(file) = item_type {
-                    write_chunk_hashes(&mut transaction, download.id(), file)
-                        .await
-                        .unwrap();
-                }
-            }
-
+            
             builder.push(
-            " ON CONFLICT(download_id, item_id) DO UPDATE SET 
+            r#" ON CONFLICT(download_id, file_id) DO UPDATE SET 
                 name = excluded.name, 
                 relative_path_raw = excluded.relative_path_raw,
                 relative_path = excluded.relative_path, 
@@ -440,11 +461,17 @@ impl StateManager {
                 chunks_len = excluded.chunks_len,
                 size_type = excluded.size_type,
                 size_bytes = excluded.size_bytes,
-                retries = excluded.retries"
+                retries = excluded.retries"#
             );
 
             let query = builder.build();
             query.execute(&mut *transaction).await.unwrap();
+
+            for (_, file) in batch {
+                write_chunk_hashes(&mut transaction, download.id(), file)
+                    .await
+                    .unwrap();
+            }
         }
 
         transaction.commit().await.unwrap();
@@ -470,18 +497,25 @@ impl StateManager {
             None => return Ok(None),
         };
 
-        let item_rows = sqlx::query_as::<_, DownloadItemRow>(
-            "SELECT * FROM download_items WHERE download_id = ? ORDER BY item_id ASC"
+        let files_rows = sqlx::query_as::<_, DownloadFileRow>(
+            "SELECT * FROM download_files WHERE download_id = ? ORDER BY file_id ASC"
         ).bind(*id as i64)
             .fetch_all(&self.pool)
             .await
-            .map_err(|err| DownloadFetchError::new("Failed to fetch item rows", err))?;
+            .map_err(|err| DownloadFetchError::new("Failed to fetch files rows", err))?;
+        
+        let folders_rows = sqlx::query_as::<_, DownloadFolderRow>(
+            "SELECT * FROM download_folders WHERE download_id = ? ORDER BY folder_id ASC"
+        ).bind(*id as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| DownloadFetchError::new("Failed to fetch folders rows", err))?;
 
         
         let chunk_hashes_map = self.load_download_chunk_hashes_with_recovery(id).await?;
-        let files = reconstruct_file_tree(item_rows, chunk_hashes_map);
+        let (files, folders) = reconstruct_file_tree(files_rows, folders_rows, chunk_hashes_map);
 
-        let download = Download::from_db(download_row, files);
+        let download = Download::from_db(download_row, files, folders);
 
         Ok(Some(download))
     }
@@ -492,17 +526,33 @@ impl StateManager {
             .await
             .map_err(|err| DownloadFetchError::new("Failed to fetch all downloads from db", err))?;
 
-        let item_rows = sqlx::query_as::<_, DownloadItemRow>(
-            "SELECT * FROM download_items ORDER BY download_id ASC, item_id ASC"
+        let file_rows = sqlx::query_as::<_, DownloadFileRow>(
+            "SELECT * FROM download_files ORDER BY download_id ASC, file_id ASC"
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|err| DownloadFetchError::new("Failed to fetch all download items from db", err))?;
+        .map_err(|err| DownloadFetchError::new("Failed to fetch all download files from db", err))?;
 
-        let mut items_by_download: HashMap<i64, Vec<DownloadItemRow>> = HashMap::new();
+        let mut files_by_download: HashMap<i64, Vec<DownloadFileRow>> = HashMap::new();
 
-        for row in item_rows {
-            items_by_download
+        for row in file_rows {
+            files_by_download
+                .entry(row.download_id)
+                .or_default()
+                .push(row);
+        }
+
+        let folder_rows = sqlx::query_as::<_, DownloadFolderRow>(
+            "SELECT * FROM download_folders ORDER BY download_id ASC, folder_id ASC"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| DownloadFetchError::new("Failed to fetch all download folders from db", err))?;
+
+        let mut folders_by_download: HashMap<i64, Vec<DownloadFolderRow>> = HashMap::new();
+
+        for row in folder_rows {
+            folders_by_download
                 .entry(row.download_id)
                 .or_default()
                 .push(row);
@@ -543,20 +593,23 @@ impl StateManager {
             let download_id_val = download_row.id;
             let download_id = DownloadId(download_id_val as usize);
             
-            let current_item_rows = items_by_download.remove(&download_id_val).unwrap_or_default();
+            let current_file_rows = files_by_download.remove(&download_id_val).unwrap_or_default();
+            let current_folder_rows = folders_by_download.remove(&download_id_val).unwrap_or_default();
+            
             let chunk_hashes_map = chunk_hashes.remove(&download_id).unwrap_or_default();
-            let files = reconstruct_file_tree(current_item_rows, chunk_hashes_map);
+            
+            let (files, folders) = reconstruct_file_tree(current_file_rows, current_folder_rows, chunk_hashes_map);
 
-            let download = Download::from_db(download_row, files);
+            let download = Download::from_db(download_row, files, folders);
             downloads.insert(download_id, download);
         }
 
         Ok(downloads)
     }
 
-    async fn load_download_chunk_hashes(&self, download_id: DownloadId) -> Result<HashMap<usize, Vec<Option<[u8; 16]>>>, ChunkHashLoadError> {
+    async fn load_download_chunk_hashes(&self, download_id: DownloadId) -> Result<HashMap<FileId, Vec<Option<[u8; 16]>>>, ChunkHashLoadError> {
         let rows = sqlx::query_as::<_, ChunkHashRow>(
-            "SELECT * FROM chunk_hashes WHERE download_id = ? ORDER BY item_id, chunk_index"
+            "SELECT * FROM chunk_hashes WHERE download_id = ? ORDER BY file_id, chunk_index"
         )
         .bind(*download_id as i64)
         .fetch_all(&self.pool)
@@ -566,17 +619,17 @@ impl StateManager {
         let mut map = HashMap::new();
 
         for row in rows { 
-            let hashes: &mut Vec<Option<[u8; 16]>> = map.entry(row.item_id as usize).or_default();
+            let hashes: &mut Vec<Option<[u8; 16]>> = map.entry(FileId(row.file_id as usize)).or_default();
             let index = row.chunk_index as usize;
 
             if row.chunk_index < 0 {
-                warn!("Corrupted chunk index {} for item {}. Deleting from DB.", row.chunk_index, row.item_id);
+                warn!("Corrupted chunk index {} for file {}. Deleting from DB.", row.chunk_index, row.file_id);
                 
                 let _ = sqlx::query(
-                        "DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                        "DELETE FROM chunk_hashes WHERE download_id = ? AND file_id = ? AND chunk_index = ?"
                     )
                     .bind(*download_id as i64) 
-                    .bind(row.item_id)           
+                    .bind(row.file_id)           
                     .bind(row.chunk_index)       
                     .execute(&self.pool)      
                     .await;
@@ -600,9 +653,9 @@ impl StateManager {
         Ok(map)
     }
 
-    async fn load_chunk_hashes(&self) -> Result<HashMap<DownloadId, HashMap<usize, Vec<Option<[u8; 16]>>>>, ChunkHashLoadError> {
+    async fn load_chunk_hashes(&self) -> Result<HashMap<DownloadId, HashMap<FileId, Vec<Option<[u8; 16]>>>>, ChunkHashLoadError> {
         let rows = sqlx::query_as::<_, ChunkHashRow>(
-            "SELECT * FROM chunk_hashes ORDER BY download_id ASC, item_id, chunk_index"
+            "SELECT * FROM chunk_hashes ORDER BY download_id ASC, file_id, chunk_index"
         )
         .fetch_all(&self.pool)
         .await
@@ -611,9 +664,9 @@ impl StateManager {
         let mut map = HashMap::new();
 
         for row in rows {
-            let chunk_hash_map: &mut HashMap<usize, Vec<Option<[u8; 16]>>> = map.entry(DownloadId(row.download_id as usize)).or_default();
+            let chunk_hash_map: &mut HashMap<FileId, Vec<Option<[u8; 16]>>> = map.entry(DownloadId(row.download_id as usize)).or_default();
 
-            let hashes: &mut Vec<Option<[u8; 16]>> = chunk_hash_map.entry(row.item_id as usize).or_default();
+            let hashes: &mut Vec<Option<[u8; 16]>> = chunk_hash_map.entry(FileId(row.file_id as usize)).or_default();
 
             if row.chunk_index < 0 {
                 warn!("Negative chunk_index found in bulk load: {}", row.chunk_index);
@@ -648,12 +701,12 @@ impl StateManager {
             .collect()
     }
 
-    pub async fn file_exists(&self, download_id: DownloadId, file_id: usize) -> bool {
+    pub async fn file_exists(&self, download_id: DownloadId, file_id: FileId) -> bool {
         let result: Result<bool, sqlx::Error> = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM download_items WHERE download_id = ? AND item_id = ?)"
+            "SELECT EXISTS(SELECT 1 FROM download_files WHERE download_id = ? AND file_id = ?)"
         )
         .bind(*download_id as i64)
-        .bind(file_id as i64)
+        .bind(*file_id as i64)
         .fetch_one(&self.pool)
         .await;
 
@@ -677,7 +730,7 @@ impl StateManager {
             SELECT 
                 download.download_id, 
                 download.speed_limit AS download_speed_limit,
-                file.item_id, 
+                file.file_id, 
                 file.speed_limit AS file_speed_limit
             FROM download_settings download
             LEFT JOIN file_settings file ON download.download_id = file.download_id
@@ -751,7 +804,7 @@ impl StateManager {
 
         if has_any_files {
             let mut files_builder = QueryBuilder::new(r#"
-                INSERT INTO file_settings (download_id, item_id, speed_limit)
+                INSERT INTO file_settings (download_id, file_id, speed_limit)
             "#);
 
             let all_files_iterator = app_settings.download_settings.iter().flat_map(|(download_id, download_settings)| {
@@ -762,12 +815,12 @@ impl StateManager {
 
             files_builder.push_values(all_files_iterator, |mut builder, (download_id, file_id, file_settings)| {
                 builder.push_bind(**download_id as i64)
-                .push_bind(*file_id as i64)
+                .push_bind(**file_id as i64)
                 .push_bind(file_settings.speed_limit.map(|speed_limit| speed_limit as i64));
             });
 
             files_builder.push(r#"
-                ON CONFLICT(download_id, item_id) DO UPDATE SET
+                ON CONFLICT(download_id, file_id) DO UPDATE SET
                     speed_limit = excluded.speed_limit
             "#);
 
@@ -778,7 +831,7 @@ impl StateManager {
         transaction.commit().await.unwrap();
     }
 
-    async fn load_download_chunk_hashes_with_recovery(&self, download_id: DownloadId) -> Result<HashMap<usize, Vec<Option<[u8; 16]>>>, ChunkHashLoadError> {
+    async fn load_download_chunk_hashes_with_recovery(&self, download_id: DownloadId) -> Result<HashMap<FileId, Vec<Option<[u8; 16]>>>, ChunkHashLoadError> {
         match self.load_download_chunk_hashes(download_id).await {
             Ok(download_chunk_hashes) => Ok(download_chunk_hashes),
             Err(err) => match err.kind() {
@@ -788,10 +841,10 @@ impl StateManager {
                 DbFetchErrorKind::DataCorrupted | DbFetchErrorKind::NotFound => {
                     warn!("Isolating corrupted chunk hash for download_id {}", *download_id);
     
-                    let mut recovered_chunk_hashes: HashMap<usize, Vec<Option<[u8; 16]>>> = HashMap::new();
+                    let mut recovered_chunk_hashes: HashMap<FileId, Vec<Option<[u8; 16]>>> = HashMap::new();
     
                     let keys_query = sqlx::query(
-                            "SELECT item_id, chunk_index FROM chunk_hashes WHERE download_id = ?"
+                            "SELECT file_id, chunk_index FROM chunk_hashes WHERE download_id = ?"
                         )
                         .bind(*download_id as i64)
                         .fetch_all(&self.pool)
@@ -804,20 +857,20 @@ impl StateManager {
                                 })?;
                                 
                                 for key_row in keys {
-                                let item_id: i64 = key_row.get("item_id");
+                                let file_id: i64 = key_row.get("file_id");
                                 let chunk_index: i64 = key_row.get("chunk_index");
     
                                 if chunk_index < 0 {
                                     warn!(
-                                        "Corrupted negative keys found (item_id: {}, chunk_index: {}). Deleting it from DB.", 
-                                        item_id, chunk_index
+                                        "Corrupted negative keys found (file_id: {}, chunk_index: {}). Deleting it from DB.", 
+                                        file_id, chunk_index
                                     );
                             
                                     let _ = sqlx::query(
-                                        "DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                                        "DELETE FROM chunk_hashes WHERE download_id = ? AND file_id = ? AND chunk_index = ?"
                                     )
                                     .bind(*download_id as i64)
-                                    .bind(item_id)
+                                    .bind(file_id)
                                     .bind(chunk_index)
                                     .execute(&mut *transaction)
                                     .await;
@@ -826,10 +879,10 @@ impl StateManager {
                                 }
     
                                 let chunk_row_result = sqlx::query_as::<_, ChunkHashRow>(
-                                        "SELECT * FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                                        "SELECT * FROM chunk_hashes WHERE download_id = ? AND file_id = ? AND chunk_index = ?"
                                     )
                                     .bind(*download_id as i64)
-                                    .bind(item_id)
+                                    .bind(file_id)
                                     .bind(chunk_index)
                                     .fetch_one(&mut *transaction)
                                     .await;
@@ -837,7 +890,7 @@ impl StateManager {
                                 match chunk_row_result {
                                     Ok(row) => {
                                         // Row is healthy! We insert it into our map
-                                        let hashes = recovered_chunk_hashes.entry(item_id as usize).or_default();
+                                        let hashes = recovered_chunk_hashes.entry(FileId(file_id as usize)).or_default();
                                         let index = chunk_index as usize;
                 
                                         if hashes.len() <= index {
@@ -853,15 +906,15 @@ impl StateManager {
                                     Err(err) => {
                                         // We found the corrupted row, delete it
                                         warn!(
-                                            "Corrupted chunk hash found (item_id: {}, chunk_index: {}). Deleting it from DB. Err: {}", 
-                                            item_id, chunk_index, err
+                                            "Corrupted chunk hash found (file_id: {}, chunk_index: {}). Deleting it from DB. Err: {}", 
+                                            file_id, chunk_index, err
                                         );
     
                                         let _ = sqlx::query(
-                                            "DELETE FROM chunk_hashes WHERE download_id = ? AND item_id = ? AND chunk_index = ?"
+                                            "DELETE FROM chunk_hashes WHERE download_id = ? AND file_id = ? AND chunk_index = ?"
                                         )
                                         .bind(*download_id as i64)
-                                        .bind(item_id)
+                                        .bind(file_id)
                                         .bind(chunk_index)
                                         .execute(&mut *transaction)
                                         .await;
@@ -876,7 +929,7 @@ impl StateManager {
                             Ok(recovered_chunk_hashes)
                         }
                         Err(err) => {
-                            // If we can't even run `SELECT item_id, chunk_index`, the SQLite table is broken.
+                            // If we can't even run `SELECT file_id, chunk_index`, the SQLite table is broken.
                             warn!("Wasn't able to get any rows for download {}. Schema is corrupted.", *download_id);
                             
                             return Err(ChunkHashLoadError::new("Schema corrupted: unable to query chunk hash keys", err).into());
@@ -908,18 +961,18 @@ async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, dow
 
     while range.peek().is_some() {
         let mut builder = QueryBuilder::new(
-            "INSERT INTO chunk_hashes (download_id, item_id, chunk_index, hash)"
+            "INSERT INTO chunk_hashes (download_id, file_id, chunk_index, hash)"
         );
 
         builder.push_values(range.by_ref().take(1000), |mut builder, (chunk_index, hash)| {
             builder.push_bind(*download_id as i64)
-                .push_bind(file.id() as i64)
+                .push_bind(*file.id() as i64)
                 .push_bind(chunk_index as i64)
                 .push_bind(&hash[..]);
         });
 
         builder.push(r#"
-            ON CONFLICT(download_id, item_id, chunk_index) DO UPDATE SET 
+            ON CONFLICT(download_id, file_id, chunk_index) DO UPDATE SET 
                 hash = excluded.hash
                     WHERE chunk_hashes.hash IS DISTINCT FROM excluded.hash
         "#);
@@ -930,24 +983,25 @@ async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, dow
     Ok(())
 }
 
-fn reconstruct_file_tree(item_rows: Vec<DownloadItemRow>, mut chunk_hashes: HashMap<usize, Vec<Option<[u8; 16]>>>) -> IndexMap<usize, DownloadType> {
-    let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+fn reconstruct_file_tree(file_rows: Vec<DownloadFileRow>, folder_rows: Vec<DownloadFolderRow>, mut chunk_hashes: HashMap<FileId, Vec<Option<[u8; 16]>>>) -> (IndexMap<FileId, FileDownload>, IndexMap<FolderId, FolderDownload>) {
+
+    // We keep track of what children belong to which parents to create the parents later
+    let mut child_files: HashMap<FolderId, Vec<FileId>> = HashMap::new();
+    let mut child_folders: HashMap<FolderId, Vec<FolderId>> = HashMap::new();
+
+    // We keep track of the state buckets that will be needed to reconstruct parents
     let mut folder_buckets = std::collections::HashMap::new();
 
-    for row in &item_rows {
-        if let Some(parent_id) = row.parent_id {
-            let parent_id = parent_id as usize;
-            
-            children
+    for file_row in &file_rows {
+        if let Some(parent_id) = file_row.parent_folder_id {
+            let parent_id = FolderId(parent_id as usize);
+
+            child_files
                 .entry(parent_id)
                 .or_default()
-                .push(row.item_id as usize);
+                .push(FileId(file_row.file_id as usize));
 
-            let bucket = if row.item_type == "file" {
-                FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time).unwrap_or_default().bucket()
-            } else {
-                DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref()).unwrap_or_default().bucket()
-            };
+            let bucket = FileStatus::from_db_columns(&file_row.status, file_row.failure_reason.as_deref(), file_row.wait_time).unwrap_or_default().bucket();
 
             folder_buckets
                 .entry(parent_id)
@@ -956,18 +1010,45 @@ fn reconstruct_file_tree(item_rows: Vec<DownloadItemRow>, mut chunk_hashes: Hash
         }
     }
 
-    let mut files = IndexMap::with_capacity(item_rows.len());
+    for folder_row in &folder_rows {
+        if let Some(parent_id) = folder_row.parent_folder_id {
+            let parent_id = FolderId(parent_id as usize);
 
-    for row in item_rows {
-        let item_id = row.item_id as usize;
+            child_folders
+                .entry(parent_id)
+                .or_default()
+                .push(FolderId(folder_row.folder_id as usize));
 
-        let children = children.remove(&item_id).unwrap_or_default();
-        let counters = folder_buckets.remove(&item_id).unwrap_or_else(StateBucketCounters::new);
+            let bucket = DownloadStatus::from_db_columns(&folder_row.status, folder_row.failure_reason.as_deref()).unwrap_or_default().bucket();
 
-        files.insert(item_id, row.into_download_type(children, counters, &mut chunk_hashes));
+            folder_buckets
+                .entry(parent_id)
+                .or_insert_with(StateBucketCounters::new)
+                .increment(bucket);
+        }
     }
 
-    files
+    let mut files = IndexMap::with_capacity(file_rows.len());
+    let mut folders = IndexMap::with_capacity(folder_rows.len());
+
+    for file_row in file_rows {
+        let file_id = FileId(file_row.file_id as usize);
+
+        files.insert(file_id, file_row.into_download_type(&mut chunk_hashes));
+    }
+    
+    for folder_row in folder_rows {
+        let folder_id = FolderId(folder_row.folder_id as usize);
+
+        let child_files = child_files.remove(&folder_id).unwrap_or_default();
+        let child_folders = child_folders.remove(&folder_id).unwrap_or_default();
+        
+        let counters = folder_buckets.remove(&folder_id).unwrap_or_default();
+
+        folders.insert(folder_id, folder_row.into_download_type(child_files, child_folders, counters));
+    }
+
+    (files, folders)
 }
 
 async fn with_retry<F, Fut, T, E>(mut retries: usize, delay: Duration, mut action: F, mut is_retriable: impl FnMut(&E) -> bool) -> Result<T, E>

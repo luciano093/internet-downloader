@@ -301,4 +301,22 @@ impl FileStatus {
             FileStatus::Completed => (status_str, None, None),
         }
     }
+
+    pub fn as_download_status(&self) -> DownloadStatus {
+        match self {
+            FileStatus::Queued => DownloadStatus::Queued,
+            FileStatus::Initializing => DownloadStatus::Initializing,
+            FileStatus::FetchingMetadata => DownloadStatus::FetchingMetadata,
+            FileStatus::InProgress => DownloadStatus::InProgress,
+            FileStatus::Completed => DownloadStatus::Completed,
+            FileStatus::Paused => DownloadStatus::Paused,
+            FileStatus::NotFound => DownloadStatus::NotFound,
+            FileStatus::Retrying => DownloadStatus::Retrying,
+            FileStatus::Waiting(_) => DownloadStatus::Waiting,
+            
+            FileStatus::Failed(reason) => {
+                DownloadStatus::Failed(DownloadFailureReason::AllFilesFailed(*reason))
+            }
+        }
+    }
 }

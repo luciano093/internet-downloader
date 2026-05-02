@@ -12,7 +12,7 @@ use axum::routing::{delete, get, put};
 use internet_downloader_backend::db::state_manager::StateManager;
 use internet_downloader_backend::download::DownloadManager;
 
-use internet_downloader_backend::download::items::DownloadId;
+use internet_downloader_backend::download::items::{DownloadId, FileId};
 use reqwest::Method;
 use serde::Deserialize;
 use tokio_stream::wrappers::BroadcastStream;
@@ -242,7 +242,7 @@ async fn limit_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Path
 #[derive(Deserialize, Debug)]
 struct FilePath {
     download_id: DownloadId,
-    file_id: usize,
+    file_id: FileId,
 }
 
 #[derive(Deserialize, Debug)]
@@ -252,7 +252,7 @@ struct LimitFileSettings {
 
 #[axum::debug_handler] 
 async fn limit_file(State(manager): State<Arc<Mutex<DownloadManager>>>, Path(path): Path<FilePath>, Json(json): Json<LimitFileSettings>) -> impl IntoResponse {
-    debug!(bandwidth_limit = ?json.bandwidth_limit, download = *path.download_id, file_id = path.file_id, "Received network limit");
+    debug!(bandwidth_limit = ?json.bandwidth_limit, download = *path.download_id, file_id = *path.file_id, "Received network limit");
 
     manager.lock().await.set_file_limit(path.download_id, path.file_id, json.bandwidth_limit);
 }

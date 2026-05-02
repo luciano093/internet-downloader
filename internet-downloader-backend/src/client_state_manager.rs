@@ -18,7 +18,9 @@ use crate::download::items::ActiveOperation;
 use crate::download::items::DownloadId;
 use crate::download::items::DownloadItem;
 use crate::download::items::FileDownload;
+use crate::download::items::FileId;
 use crate::download::items::FolderDownload;
+use crate::download::items::FolderId;
 use crate::download::items::{DownloadType, Download};
 use crate::download::FileUpdate;
 use crate::download::status::DownloadStatus;
@@ -254,13 +256,11 @@ impl DeltaManager {
                                 FileUpdate::BytesDownloaded { id, .. } => *id,
                             };
 
-                            let item_diff = download_diff.files.entry(file_id).or_insert_with(|| {
-                                ItemDiff::File(FileDiff::new())
+                            let file_diff = download_diff.files.entry(file_id).or_insert_with(|| {
+                                FileDiff::new()
                             });
 
-                            if let ItemDiff::File(file_diff) = item_diff {
-                                file_diff.update(file_update);
-                            }
+                            file_diff.update(file_update);
                         },
                         ItemUpdate::Folder(folder_update) => {
                             let folder_id = match &folder_update {
@@ -268,13 +268,11 @@ impl DeltaManager {
                                 FolderUpdate::Operation { id, .. } => *id,
                             };
 
-                            let item_diff = download_diff.files.entry(folder_id).or_insert_with(|| {
-                                ItemDiff::Folder(FolderDiff::new())
+                            let folder_diff = download_diff.folders.entry(folder_id).or_insert_with(|| {
+                                FolderDiff::new()
                             });
 
-                            if let ItemDiff::Folder(folder_diff) = item_diff {
-                                folder_diff.update(folder_update);
-                            }
+                            folder_diff.update(folder_update);
                         }
                     }
             }
@@ -295,22 +293,8 @@ pub struct DownloadDiff {
     relative_path: Option<PathBuf>,
     status: Option<DownloadStatus>,
     active_operation: Option<Option<ActiveOperation>>,
-    files: HashMap<usize, ItemDiff>,
-}
-
-impl DownloadDiff {
-    fn from(download: &Download, bytes_downloaded: u64) -> Self {
-        let file_diffs = download.files().into_iter().map(|(&id, download_type)| {
-            (id, ItemDiff::from_download_type(download_type, bytes_downloaded))
-        }).collect();
-
-        DownloadDiff { url: Some(download.url().clone()),
-            relative_path: Some(download.relative_path().clone()),
-            status: Some(download.status()),
-            active_operation: Some(download.active_operation()),
-            files: file_diffs,
-        }
-    }
+    files: HashMap<FileId, FileDiff>,
+    folders: HashMap<FolderId, FolderDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -392,7 +376,8 @@ pub struct FolderDiff {
     active_operation: Option<Option<ActiveOperation>>,
     folder_name: Option<String>,
     relative_path: Option<PathBuf>,
-    children: Option<Vec<usize>>,
+    child_files: Option<Vec<FileId>>,
+    child_folders: Option<Vec<FolderId>>,
 }
 
 impl FolderDiff {
@@ -419,7 +404,8 @@ impl From<&FolderDownload> for FolderDiff {
             active_operation: Some(folder.active_operation()),
             folder_name: Some(folder.name().to_owned()),
             relative_path: Some(folder.relative_path().clone()),
-            children: Some(folder.children().to_owned()),
+            child_files: Some(folder.child_files().to_owned()),
+            child_folders: Some(folder.child_folders().to_owned()),
         }
     }
 }
@@ -455,7 +441,7 @@ pub fn download_to_json(download: &Download) -> serde_json::Value {
 
                 if let Ok(id) = id.parse::<usize>() {
                     // Assuming you have a way to access the FileDownload here
-                    if let Some(DownloadType::File(file)) = download.files().get(&id) {
+                    if let Some(file) = download.files().get(&FileId(id)) {
                         // Calculate safe, committed bytes from the BitVec
                         let committed_bytes = file.calculate_initial_bytes(16384 as u64);
                         
