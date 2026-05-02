@@ -17,11 +17,10 @@ use crate::download::ItemUpdate;
 use crate::download::items::ActiveOperation;
 use crate::download::items::DownloadId;
 use crate::download::items::DownloadItem;
-use crate::download::items::FileDownload;
 use crate::download::items::FileId;
 use crate::download::items::FolderDownload;
 use crate::download::items::FolderId;
-use crate::download::items::{DownloadType, Download};
+use crate::download::items::Download;
 use crate::download::FileUpdate;
 use crate::download::status::DownloadStatus;
 use crate::download::status::FileStatus;
@@ -304,19 +303,6 @@ pub enum ItemDiff {
     Folder(FolderDiff),
 }
 
-impl ItemDiff {
-    fn from_download_type(download_type: &DownloadType, bytes_downloaded: u64) -> Self {
-        match download_type {
-            DownloadType::File(file_download) => {
-                ItemDiff::File(FileDiff::from_file_download(file_download, bytes_downloaded))
-            },
-            DownloadType::Folder(folder_download) => {
-                ItemDiff::Folder(FolderDiff::from(folder_download))
-            },
-        }
-    }
-}
-
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileDiff {
@@ -352,19 +338,6 @@ impl FileDiff {
             FileUpdate::BytesDownloaded { len, .. } => {
                 self.bytes_downloaded = Some(len)
             },
-        }
-    }
-
-    fn from_file_download(file: &FileDownload, bytes_downloaded: u64) -> Self {
-        FileDiff { 
-            status: Some(file.status()),
-            active_operation: Some(file.active_operation()),
-            url: Some(file.url().to_string()),
-            file_name: Some(file.name().to_string()),
-            relative_path: Some(file.relative_path().clone()),
-            hash: file.hash(),
-            size: file.size(),
-            bytes_downloaded: Some(bytes_downloaded),
         }
     }
 }
