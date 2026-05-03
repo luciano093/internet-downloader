@@ -69,7 +69,7 @@ impl DownloadFileRow {
             // We have to reconstruct the vector of chunks with None values
             // Otherwise we would have no space for chunk hashes
 
-            if let Some(size) = self.size_bytes {
+            if let Some(size) = self.size_bytes.and_then(|v| u64::try_from(v).ok()) {
                 let size = size as u64;
 
                 let num_chunk_hashes = size.div_ceil(HASH_CHUNK_SIZE as u64);
