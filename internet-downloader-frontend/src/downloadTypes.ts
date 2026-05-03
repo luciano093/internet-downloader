@@ -78,6 +78,7 @@ export interface DownloadItem {
 }
 
 export type FileItemDiff = { 
+  parent_id?: number | null; 
   file_name?: string;
   relative_path?: string;
   status?: FileStatus;
@@ -89,6 +90,7 @@ export type FileItemDiff = {
 };
 
 export type FolderItemDiff = {
+  parent_id?: number | null; 
   folder_name?: string;
   status?: DownloadStatus;
   active_operation?: ActiveOperation | null,

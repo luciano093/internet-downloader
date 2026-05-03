@@ -307,6 +307,7 @@ pub enum ItemDiff {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileDiff {
+    parent_id: Option<Option<FolderId>>, 
     status: Option<FileStatus>,
     active_operation: Option<Option<ActiveOperation>>,
     url: Option<String>,
@@ -346,6 +347,7 @@ impl FileDiff {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FolderDiff {
+    parent_id: Option<Option<FolderId>>, 
     status: Option<DownloadStatus>,
     active_operation: Option<Option<ActiveOperation>>,
     folder_name: Option<String>,
@@ -374,6 +376,7 @@ impl FolderDiff {
 impl From<&FolderDownload> for FolderDiff {
     fn from(folder: &FolderDownload) -> Self {
         Self {
+            parent_id: Some(folder.parent_id()),
             status: Some(folder.status()),
             active_operation: Some(folder.active_operation()),
             folder_name: Some(folder.name().to_owned()),
