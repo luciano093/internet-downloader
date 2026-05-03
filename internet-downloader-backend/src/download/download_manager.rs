@@ -545,8 +545,8 @@ impl DownloadManager {
                                 network_manager.set_download_limit(download_id, limit);
                             },
                             ManagerCommand::SetFileSpeedLimit(download_id, file_id, limit) => {
-                                if let Some(download_settings) = app_settings.download_settings.get_mut(&download_id)
-                                    && app_context.db_manager.file_exists(download_id, file_id).await {
+                                if app_context.db_manager.file_exists(download_id, file_id).await {
+                                        let download_settings = app_settings.download_settings.entry(download_id).or_default();
                                         let file_settings = download_settings.file_settings.entry(file_id).or_default();
                                         file_settings.speed_limit = limit;
 
