@@ -228,7 +228,7 @@ impl StateManager {
                 failure_reason TEXT,
                 
                 -- File-specific fields
-                url TEXT,
+                url TEXT NOT NULL,
                 hash BLOB,
                 chunks_raw BLOB,
                 chunks_len INTEGER,
