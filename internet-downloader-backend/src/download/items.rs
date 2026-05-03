@@ -1191,7 +1191,7 @@ impl FolderDownload {
             id: FolderId(row.folder_id as usize),
             folder_name: row.name,
             relative_path,
-            status: DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_ref().map(|str| str.as_str())).unwrap_or_default(),
+            status,
             child_files,
             child_folders,
             bucket_counters,
