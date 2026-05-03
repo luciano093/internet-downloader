@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { DeltaEvent, DownloadItem } from '../downloadTypes';
+import type { DeltaEvent, DownloadItem, FileItem, FolderItem } from '../downloadTypes';
 
 export type DownloadState = {
     downloads: Record<number, DownloadItem>;
@@ -76,7 +76,10 @@ export const useDownloadStore = create<DownloadState>()(
 
                         // If it's new (and the update contains the full object), add it
                         else if (fileChanges.file_name) {
-                          download.files[fileId] = fileChanges;
+                          download.files[fileId] = {
+                            id: fileId,
+                            ...fileChanges
+                          } as FileItem;
                         }
                       });
                     }
@@ -96,7 +99,10 @@ export const useDownloadStore = create<DownloadState>()(
 
                         // If it's new (and the update contains the full object), add it
                         else if (folderChanges.folder_name !== undefined) {
-                          download.folders[folderId] = folderChanges;
+                          download.folders[folderId] = {
+                            id: folderId,
+                            ...folderChanges
+                          } as FolderItem;
                         }
                       });
                     }
