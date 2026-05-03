@@ -915,11 +915,14 @@ impl FileDownload {
     pub fn from_db(row: DownloadFileRow, mut chunk_hashes: Vec<Option<[u8; 16]>>) -> Self {
         // Reconstruct the FileSize
         let size = match row.size_type.as_deref() {
-            Some("known") if let Some(size_bytes) = row.size_bytes => Some(FileSize::Known(size_bytes as u64)),
+            Some("known") => row
+                .size_bytes
+                .and_then(|value| u64::try_from(value).ok())
+                .map(FileSize::Known),
             Some("unknown") => Some(FileSize::Unknown),
 
-            // If we have a known size, but the size was corrupted from the db, set it as None to fetch it again
-            Some("known") | Some(_) | None => None,
+            // If we have anything other than a know or unknown file, it means something corrupted, set it as None to fetch it again
+            Some(_) | None => None,
         };
 
         // Reconstruct the Hash
