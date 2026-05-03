@@ -1,11 +1,10 @@
-use std::{borrow::Cow, collections::HashMap, time::Duration};
+use std::{borrow::Cow, collections::HashMap};
 
 use indexmap::IndexMap;
 use os_str_bytes::OsStrBytes;
 use sqlx::{QueryBuilder, Row, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
 use thiserror::Error;
-use tokio::time::sleep;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::{db::rows::{ChunkHashRow, DownloadFileRow, DownloadFolderRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, FileSize, items::{Download, DownloadId, DownloadItem, FileDownload, FileId, FolderDownload, FolderId}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
@@ -1051,29 +1050,4 @@ fn reconstruct_file_tree(file_rows: Vec<DownloadFileRow>, folder_rows: Vec<Downl
     }
 
     (files, folders)
-}
-
-async fn with_retry<F, Fut, T, E>(mut retries: usize, delay: Duration, mut action: F, mut is_retriable: impl FnMut(&E) -> bool) -> Result<T, E>
-    where F: FnMut() -> Fut,
-        Fut: Future<Output = Result<T, E>>
-{
-    loop {
-        match action().await {
-            Ok(val) => return Ok(val),
-            Err(err) => {
-                // If we have retries left and the caller says this specific error is retriable
-                if retries > 0 && is_retriable(&err) {
-                    debug!(
-                        "Operation failed, retrying in {:?}... ({} attempts left)", 
-                        delay, retries
-                    );
-                    retries -= 1;
-                    sleep(delay).await;
-                    continue;
-                }
-                // Otherwise, we are out of retries or the error is fatal
-                return Err(err);
-            }
-        }
-    }
 }
