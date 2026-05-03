@@ -338,9 +338,9 @@ impl SupervisorState {
         
         let cursor = self.streams_cursor;
 
-        for (&file_id, file) in self.download.files()[cursor..].iter() {
+        for (offset, (&file_id, file)) in self.download.files()[cursor..].iter().enumerate() {
             if file.size() == Some(FileSize::Unknown) {
-                self.streams_cursor += 1;
+                self.streams_cursor = cursor + offset + 1;
 
                 return Some(Job::DownloadStream(file_id, file.url(), file.relative_path().to_owned()));
             }
