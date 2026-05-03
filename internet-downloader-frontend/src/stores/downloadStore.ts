@@ -19,7 +19,6 @@ export const useDownloadStore = create<DownloadState>()(
         selectedId: null,
 
         setSnapshot: (items) => set((state) => {
-          console.log("items: ", items);
           state.downloadIds = items.map(i => i.id);
           state.downloads = {};
           
