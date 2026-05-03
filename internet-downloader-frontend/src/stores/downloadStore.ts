@@ -24,7 +24,11 @@ export const useDownloadStore = create<DownloadState>()(
           
           items.forEach(item => {
               if (!item.files) {
-                  item.files = {};
+                item.files = {};
+              }
+
+              if (!item.folders) {
+                item.files = {};
               }
 
               state.downloads[item.id] = item;
@@ -57,8 +61,12 @@ export const useDownloadStore = create<DownloadState>()(
                     if (change.active_operation !== undefined) download.active_operation = change.active_operation;
                     if (change.host) download.host = change.host;
 
-                    if (change.files) {
-                      Object.entries(change.files).forEach(([fileIdString, fileChanges]) => {
+                  if (change.files) {
+                    if (!download.files) {
+                      download.files = {};
+                    }
+                    
+                    Object.entries(change.files).forEach(([fileIdString, fileChanges]) => {
                         const fileId = Number(fileIdString);
                         const file = download.files[fileId];
 
@@ -73,8 +81,12 @@ export const useDownloadStore = create<DownloadState>()(
                       });
                     }
 
-                    if (change.folders) {
-                      Object.entries(change.folders).forEach(([folderIdString, folderChanges]) => {
+                  if (change.folders) {
+                    if (!download.folders) {
+                      download.folders = {};
+                    }
+                    
+                    Object.entries(change.folders).forEach(([folderIdString, folderChanges]) => {
                         const folderId = Number(folderIdString);
                         const folder = download.folders[folderId];
 
