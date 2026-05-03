@@ -105,8 +105,8 @@ export interface DownloadItemDiff {
   active_operation?: ActiveOperation | null,
   host?: string,
   relative_path?: string,
-  files: Record<number, FileItem>;
-  folders: Record<number, FolderItem>;
+  files: Record<number, FileItemDiff>;
+  folders: Record<number, FolderItemDiff>;
 }
 
 export type DeltaEvent = {
