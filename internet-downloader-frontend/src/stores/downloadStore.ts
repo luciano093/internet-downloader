@@ -28,7 +28,7 @@ export const useDownloadStore = create<DownloadState>()(
               }
 
               if (!item.folders) {
-                item.files = {};
+                item.folders = {};
               }
 
               state.downloads[item.id] = item;
