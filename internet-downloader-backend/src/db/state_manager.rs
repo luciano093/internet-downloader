@@ -389,7 +389,8 @@ impl StateManager {
             });
 
             builder.push(
-            r#" ON CONFLICT(download_id, folder_id) DO UPDATE SET 
+            r#" ON CONFLICT(download_id, folder_id) DO UPDATE SET
+                parent_folder_id = excluded.parent_folder_id,
                 name = excluded.name, 
                 relative_path_raw = excluded.relative_path_raw,
                 relative_path = excluded.relative_path, 
@@ -448,7 +449,8 @@ impl StateManager {
             });
             
             builder.push(
-            r#" ON CONFLICT(download_id, file_id) DO UPDATE SET 
+            r#" ON CONFLICT(download_id, file_id) DO UPDATE SET
+                parent_folder_id = excluded.parent_folder_id,
                 name = excluded.name, 
                 relative_path_raw = excluded.relative_path_raw,
                 relative_path = excluded.relative_path, 
