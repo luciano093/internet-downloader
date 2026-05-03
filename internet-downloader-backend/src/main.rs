@@ -166,7 +166,11 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                     }
                 }
                 _ = snapshot_interval.tick() => {
-                    let snapshot = manager.lock().await.get_snapshot().await;
+                    let downloads = manager.lock().await.get_snapshot().await;
+                    let snapshot: Vec<DownloadSnapshot> = downloads
+                        .into_iter()
+                        .map(|(_id, download)| DownloadSnapshot::from(download))
+                        .collect();
 
                     let snapshot_json = serde_json::to_string(&snapshot).unwrap();
 
