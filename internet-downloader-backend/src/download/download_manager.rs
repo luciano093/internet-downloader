@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display};
-use std::ops::Deref;
+use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,10 +15,10 @@ use tracing::{debug, info, trace, warn};
 use dashmap::DashMap;
 use url::Host;
 
-use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
+use crate::client_state_manager::{FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
 use crate::context::AppContext;
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
-use crate::download::items::{ActiveOperation, Download, DownloadItem, DownloadType};
+use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, FileId, FolderId};
 use crate::download::status::{DownloadStatus, FileStatus};
 use crate::download::verifier::VerifierHandle;
 use crate::download_writer_manager::DownloadWriterManager;
@@ -45,15 +44,15 @@ pub enum ItemUpdate {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FileUpdate {
-    Status { id: usize, status: FileStatus },
-    Operation { id: usize, operation: Option<ActiveOperation> },
-    Hash { id: usize, hash: u128 },
-    FileSize { id: usize, len: u64 },
-    BytesDownloaded { id: usize, len: u64 },
+    Status { id: FileId, status: FileStatus },
+    Operation { id: FileId, operation: Option<ActiveOperation> },
+    Hash { id: FileId, hash: u128 },
+    FileSize { id: FileId, len: u64 },
+    BytesDownloaded { id: FileId, len: u64 },
 }
 
 impl FileUpdate {
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> FileId {
         match self {
             FileUpdate::Status { id, .. } => *id,
             FileUpdate::Operation { id, .. } => *id,
@@ -66,27 +65,8 @@ impl FileUpdate {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum FolderUpdate {
-    Status { id: usize, status: DownloadStatus },
-    Operation { id: usize, operation: Option<ActiveOperation> },
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq, Serialize, Deserialize, Ord, sqlx::Type)]
-#[serde(transparent)]
-#[sqlx(transparent)]
-pub struct DownloadId(pub usize);
-
-impl Deref for DownloadId {
-    type Target = usize;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Display for DownloadId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
+    Status { id: FolderId, status: DownloadStatus },
+    Operation { id: FolderId, operation: Option<ActiveOperation> },
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
@@ -121,12 +101,12 @@ pub enum ManagerCommand {
     SetGlobalSpeedLimit(Option<u64>),
     SetHostSpeedLimit(String, Option<u64>), // String can be a hostname or url
     SetDownloadSpeedLimit(DownloadId, Option<u64>),
-    SetFileSpeedLimit(DownloadId, usize, Option<u64>),
+    SetFileSpeedLimit(DownloadId, FileId, Option<u64>),
 }
 
 pub struct DownloadLimiterGroup {
     download_limiter: Arc<BandwidthLimiter>,
-    file_limiters: DashMap<usize, Arc<BandwidthLimiter>>,
+    file_limiters: DashMap<FileId, Arc<BandwidthLimiter>>,
 }
 
 impl DownloadLimiterGroup {
@@ -165,7 +145,7 @@ impl DownloadLimiterGroup {
         self.download_limiter.clone()
     }
 
-    pub fn file_limiters(&self) -> &DashMap<usize, Arc<BandwidthLimiter>> {
+    pub fn file_limiters(&self) -> &DashMap<FileId, Arc<BandwidthLimiter>> {
         &self.file_limiters
     }
 }
@@ -209,7 +189,7 @@ pub struct FileSettings {
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct DownloadSettings {
     pub speed_limit: Option<u64>,
-    pub file_settings: HashMap<usize, FileSettings>, 
+    pub file_settings: HashMap<FileId, FileSettings>, 
 }
 
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -265,8 +245,8 @@ impl AppSettings {
                     file_settings: HashMap::new()
                 });
 
-            if let Some(item_id) = row.item_id {
-                download_settings_object.file_settings.insert(item_id as usize, 
+            if let Some(item_id) = row.file_id {
+                download_settings_object.file_settings.insert(FileId(item_id as usize), 
                     FileSettings { speed_limit: row.file_speed_limit.map(|speed_limit| speed_limit as u64) }
                 );
             }
@@ -359,7 +339,7 @@ impl DownloadManager {
         }
     }
 
-    pub fn set_file_limit(&self, download_id: DownloadId, file_id: usize, limit: Option<u64>) {
+    pub fn set_file_limit(&self, download_id: DownloadId, file_id: FileId, limit: Option<u64>) {
         if let Some(sender) = &self.command_sender {
             let _ = sender.send(ManagerCommand::SetFileSpeedLimit(download_id, file_id, limit));
         }
@@ -404,7 +384,7 @@ impl DownloadManager {
         let mut url_registry: HashMap<String, DownloadId> = HashMap::new();
         let mut id_registry: HashMap<DownloadId, String> = HashMap::new();
 
-        let existing_downloads = db_manager.get_all_download_urls().await; 
+        let existing_downloads = db_manager.get_all_download_urls().await.unwrap(); 
 
         // Add existing downloads to registry
         for (id, url) in existing_downloads {
@@ -493,12 +473,10 @@ impl DownloadManager {
                                     if from_disk {
                                         match db_manager.load_download(download_id).await {
                                             Ok(Some(download)) => {
-                                                for file_type in download.files().values() {
-                                                    if let DownloadType::File(file) = file_type {
-                                                        let path = file.relative_path(); 
-                                                        if path.exists() {
-                                                            force_delete_file(&path); 
-                                                        }
+                                                for file in download.files().values() {
+                                                    let path = file.relative_path(); 
+                                                    if path.exists() {
+                                                        force_delete_file(&path); 
                                                     }
                                                 }
                                             }
@@ -511,7 +489,7 @@ impl DownloadManager {
                                         } 
                                     }
 
-                                    db_manager.delete_download(download_id).await;
+                                    db_manager.delete_download(download_id).await.unwrap();
                                     let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*download_id));
                                 }
 
@@ -543,7 +521,7 @@ impl DownloadManager {
                             ManagerCommand::SetGlobalSpeedLimit(limit) => {
                                 app_settings.set_global_speed_limit(limit);
 
-                                app_context.db_manager.write_app_settings(&app_settings).await;
+                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                                 network_manager.set_global_limit(limit);
                             },
@@ -553,7 +531,7 @@ impl DownloadManager {
                                     .or_default()
                                     .speed_limit = limit;
 
-                                app_context.db_manager.write_app_settings(&app_settings).await;
+                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                                 network_manager.set_host_limit(host, limit);
                             },
@@ -562,17 +540,17 @@ impl DownloadManager {
                                     download_settings.speed_limit = limit;
                                 }
 
-                                app_context.db_manager.write_app_settings(&app_settings).await;
+                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                                 network_manager.set_download_limit(download_id, limit);
                             },
                             ManagerCommand::SetFileSpeedLimit(download_id, file_id, limit) => {
-                                if let Some(download_settings) = app_settings.download_settings.get_mut(&download_id)
-                                    && app_context.db_manager.file_exists(download_id, file_id).await {
+                                if app_context.db_manager.file_exists(download_id, file_id).await {
+                                        let download_settings = app_settings.download_settings.entry(download_id).or_default();
                                         let file_settings = download_settings.file_settings.entry(file_id).or_default();
                                         file_settings.speed_limit = limit;
 
-                                        app_context.db_manager.write_app_settings(&app_settings).await;
+                                        app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
                                         network_manager.set_file_limit(download_id, file_id, limit);
                                 } else {
                                     warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
@@ -602,7 +580,7 @@ impl DownloadManager {
         self.ui_state_handle.as_ref().unwrap().subscribe()
     }
 
-    pub async fn get_snapshot(&self) -> DownloadSnapshot {
+    pub async fn get_snapshot(&self) -> IndexMap<DownloadId, Download> {
         get_snapshot(&self.db_state_manager).await
     }
 }

@@ -5,7 +5,7 @@ import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useDownloadStore } from "@/stores/downloadStore";
-import type { DownloadItem, DownloadNode, FileItem } from "@/downloadTypes";
+import type { DownloadItem, FileItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import useDownloadSpeed from "../hooks/useDownloadSpeed";
 import { formatDownloadStatus } from "@/lib/status_utils";
@@ -42,18 +42,17 @@ function formatBytes(bytes: number, decimals = 2) {
 }
 
     
-function getFolderStats(files: Record<number, DownloadNode>) {
-    const allItems = Object.values(files);
-    const activeFiles = allItems.filter((item): item is FileItem => item.type === 'file');
+function getFolderStats(files: Record<number, FileItem>) {
+    const allFiles = Object.values(files);
 
-    if (activeFiles.length === 0) {
+    if (allFiles.length === 0) {
         return { progress: 0, totalSize: 0, downloadedSize: 0 };
     }
 
     let totalBytes = 0;
     let downloadedBytes = 0;
 
-    activeFiles.forEach(file => {
+    allFiles.forEach(file => {
         const size = typeof file.size === 'number' ? file.size : 0;
         const downloaded = file.bytes_downloaded || 0;
 

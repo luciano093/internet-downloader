@@ -15,14 +15,14 @@ use tracing::{info, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::db::state_manager::StateManager;
-use crate::download::{DownloadId, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
-use crate::download::items::{ActiveOperation, ChangedItemOperation, ChangedItemStatus, Download, DownloadItem, DownloadType};
+use crate::download::{DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
+use crate::download::items::{ActiveOperation, ChangedItemOperation, ChangedItemStatus, Download, DownloadId, DownloadItem, FileId};
 use crate::download::status::FileStatus;
 use crate::download_task::{BLOCKS_PER_HASH, HASH_CHUNK_SIZE};
 use crate::utils::file_utils::hash_file;
 
 struct FileVerificationDiff {
-    pub file_id: usize,
+    pub file_id: FileId,
     pub new_status: Option<FileStatus>,
     pub failed_chunks: Option<Vec<usize>>,
 }
@@ -209,7 +209,7 @@ impl Verifier {
             }
         }
 
-        self.db_manager.write_download(&download).await;
+        self.db_manager.write_download(&download).await.unwrap();
 
         let ui_sender = self.ui_sender.clone();
         let db_manager = self.db_manager.clone();
@@ -325,7 +325,7 @@ impl Verifier {
 
             info!("Finished verification {} in {:?}", download.name(), start_time.elapsed());
 
-            db_manager.write_download(&download).await;
+            db_manager.write_download(&download).await.unwrap();
             let _ = download_manager.send(ManagerCommand::DownloadVerified(download));
         });
 
@@ -335,105 +335,103 @@ impl Verifier {
     async fn verify_download(download: &Download, task_cancel_flag: Arc<AtomicBool>) -> Vec<FileVerificationDiff> {
         let mut pending_changes = Vec::new();
 
-        for (&id, download_item) in download.files() {
-            if let DownloadType::File(file) = download_item {
-                let mut new_status = None;
-                let mut failed_chunks = None;
+        for (&id, file) in download.files() {
+            let mut new_status = None;
+            let mut failed_chunks = None;
 
-                // We first check if the file exists in disk
-                let exists_physically = tokio::fs::try_exists(file.relative_path()).await.unwrap_or(false);
+            // We first check if the file exists in disk
+            let exists_physically = tokio::fs::try_exists(file.relative_path()).await.unwrap_or(false);
 
-                if file.must_exist_in_disk() && !exists_physically {
-                    new_status = Some(FileStatus::NotFound);
-                }
+            if file.must_exist_in_disk() && !exists_physically {
+                new_status = Some(FileStatus::NotFound);
+            }
 
-                // Then we check if the download is completed, and if so, we check the stored hash
-                // against the hash of the file in disk
-                else if file.status() == FileStatus::Completed  {
-                    let path = file.relative_path().to_path_buf();
-                    let task_cancel_flag = task_cancel_flag.clone();
+            // Then we check if the download is completed, and if so, we check the stored hash
+            // against the hash of the file in disk
+            else if file.status() == FileStatus::Completed  {
+                let path = file.relative_path().to_path_buf();
+                let task_cancel_flag = task_cancel_flag.clone();
 
-                    let hash = tokio::task::spawn_blocking(move || {
-                        hash_file(&path, Some(task_cancel_flag))
-                    }).await;
+                let hash = tokio::task::spawn_blocking(move || {
+                    hash_file(&path, Some(task_cancel_flag))
+                }).await;
 
-                    match hash {
-                        Ok(Ok(hash)) => {
-                            if Some(hash) != file.hash() {
-                                new_status = Some(FileStatus::Failed(FileFailureReason::HashMismatch));
-                            }
-                        }   
-                        // Hashing error
-                        Ok(Err(error)) => {
-                            warn!("Failed to read completed file during verification: {}", error);
-                            new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
+                match hash {
+                    Ok(Ok(hash)) => {
+                        if Some(hash) != file.hash() {
+                            new_status = Some(FileStatus::Failed(FileFailureReason::HashMismatch));
                         }
-                        // Task error
-                        Err(error) => {
-                            if error.is_cancelled() {
-                                warn!("Hashing task was cancelled.");
-                                new_status = Some(FileStatus::Failed(FileFailureReason::ClientError));
-                            } else {
-                                warn!("Hashing task panicked: {}", error);
-                                new_status = Some(FileStatus::Failed(FileFailureReason::ClientError)); 
-                            }
+                    }   
+                    // Hashing error
+                    Ok(Err(error)) => {
+                        warn!("Failed to read completed file during verification: {}", error);
+                        new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
+                    }
+                    // Task error
+                    Err(error) => {
+                        if error.is_cancelled() {
+                            warn!("Hashing task was cancelled.");
+                            new_status = Some(FileStatus::Failed(FileFailureReason::ClientError));
+                        } else {
+                            warn!("Hashing task panicked: {}", error);
+                            new_status = Some(FileStatus::Failed(FileFailureReason::ClientError)); 
                         }
                     }
                 }
-                // Otherwise we check individual chunk hashes to see how much of the file we truly have 
-                else {
-                    if let Some(FileSize::Known(size)) = file.size() {
-                        // either we should be able to pass a vector of ranges
-                        // or we should have a function where we can pass a file size, chunk size,
-                        // and returns a vector of hashes
-                        let path = file.relative_path().to_path_buf();
-                        let chunks_to_check = file.chunk_hashes().to_owned();
+            }
+            // Otherwise we check individual chunk hashes to see how much of the file we truly have 
+            else {
+                if let Some(FileSize::Known(size)) = file.size() {
+                    // either we should be able to pass a vector of ranges
+                    // or we should have a function where we can pass a file size, chunk size,
+                    // and returns a vector of hashes
+                    let path = file.relative_path().to_path_buf();
+                    let chunks_to_check = file.chunk_hashes().to_owned();
 
-                        if !chunks_to_check.is_empty() {
-                            let task_cancel_flag = task_cancel_flag.clone();
+                    if !chunks_to_check.is_empty() {
+                        let task_cancel_flag = task_cancel_flag.clone();
 
-                            let failed_indices = tokio::task::spawn_blocking(move || {
-                                Self::verify_file_chunks(&path, HASH_CHUNK_SIZE, size as usize, chunks_to_check, task_cancel_flag)
-                            }).await;
+                        let failed_indices = tokio::task::spawn_blocking(move || {
+                            Self::verify_file_chunks(&path, HASH_CHUNK_SIZE, size as usize, chunks_to_check, task_cancel_flag)
+                        }).await;
 
-                            match failed_indices {
-                                Ok(Ok(failed_indices)) => {
-                                    if !failed_indices.is_empty() {
-                                        failed_chunks = Some(failed_indices);
-                                    }   
-                                },
-                                // File chunk hashing error
-                                Ok(Err(error)) => {
-                                    if error.kind() == std::io::ErrorKind::NotFound {
-                                        warn!("Failed to find file {} during verification: {}", file.name(), error);
-                                        new_status = Some(FileStatus::NotFound); 
-                                    } else {
-                                        warn!("Failed to read file {} during verification: {}", file.name(), error);
-                                        new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
-                                    }
-                                },
-                                // Task error
-                                Err(error) => {
-                                    if error.is_cancelled() {
-                                        warn!("Hashing task was cancelled.");
-                                        new_status = Some(FileStatus::Failed(FileFailureReason::ClientError));
-                                    } else {
-                                        warn!("Hashing task panicked: {}", error);
-                                        new_status = Some(FileStatus::Failed(FileFailureReason::ClientError)); 
-                                    }
+                        match failed_indices {
+                            Ok(Ok(failed_indices)) => {
+                                if !failed_indices.is_empty() {
+                                    failed_chunks = Some(failed_indices);
+                                }   
+                            },
+                            // File chunk hashing error
+                            Ok(Err(error)) => {
+                                if error.kind() == std::io::ErrorKind::NotFound {
+                                    warn!("Failed to find file {} during verification: {}", file.name(), error);
+                                    new_status = Some(FileStatus::NotFound); 
+                                } else {
+                                    warn!("Failed to read file {} during verification: {}", file.name(), error);
+                                    new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
+                                }
+                            },
+                            // Task error
+                            Err(error) => {
+                                if error.is_cancelled() {
+                                    warn!("Hashing task was cancelled.");
+                                    new_status = Some(FileStatus::Failed(FileFailureReason::ClientError));
+                                } else {
+                                    warn!("Hashing task panicked: {}", error);
+                                    new_status = Some(FileStatus::Failed(FileFailureReason::ClientError)); 
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                if new_status.is_some() || failed_chunks.is_some() {
-                    pending_changes.push(FileVerificationDiff {
-                        file_id: id,
-                        new_status,
-                        failed_chunks,
-                    });
-                }
+            if new_status.is_some() || failed_chunks.is_some() {
+                pending_changes.push(FileVerificationDiff {
+                    file_id: id,
+                    new_status,
+                    failed_chunks,
+                });
             }
         }
 

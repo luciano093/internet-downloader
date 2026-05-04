@@ -20,15 +20,15 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
-use crate::download::items::{ChangedItemStatus, Download, DownloadItem, DownloadType};
+use crate::download::items::{ChangedItemStatus, Download, DownloadId, DownloadItem, DownloadTypeRef, FileId};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket};
-use crate::download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
+use crate::download::{DownloadLimiterGroup, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
 use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
-const BLOCK_SIZE: usize = 16384; // 16 KB
+pub const BLOCK_SIZE: usize = 16384; // 16 KB
 pub const HASH_CHUNK_SIZE: usize = 1048576; // 1 MB 
 pub const BLOCKS_PER_HASH: usize = HASH_CHUNK_SIZE / BLOCK_SIZE; // (1 MB / 16 KB) or 64 blocks
 const TARGET_RANGE_SIZE: usize = 5242880 / BLOCK_SIZE; // 320 ranges of chunks
@@ -69,7 +69,7 @@ pub enum RangeDownloadError {
 }
 
 trait FileDownloadRetry {
-    fn file_id(&self) -> usize;
+    fn file_id(&self) -> FileId;
     fn url(&self) -> Arc<String>;
 }
 
@@ -80,7 +80,7 @@ enum RetryKind {
 }
 
 impl FileDownloadRetry for RetryKind {
-    fn file_id(&self) -> usize {
+    fn file_id(&self) -> FileId {
         match self {
             RetryKind::Metadata(metadata_retry) => metadata_retry.file_id(),
             RetryKind::StreamDownload(stream_retry) => stream_retry.file_id(),
@@ -137,12 +137,12 @@ impl Drop for RangeProgress {
 }
 
 struct MetadataRetry {
-    file_id: usize,
+    file_id: FileId,
     url: Arc<String>,
 }
 
 impl FileDownloadRetry for MetadataRetry {
-    fn file_id(&self) -> usize {
+    fn file_id(&self) -> FileId {
         self.file_id
     }
 
@@ -152,13 +152,13 @@ impl FileDownloadRetry for MetadataRetry {
 }
 
 struct StreamRetry {
-    file_id: usize,
+    file_id: FileId,
     url: Arc<String>,
     path: PathBuf,
 }
 
 impl FileDownloadRetry for StreamRetry {
-    fn file_id(&self) -> usize {
+    fn file_id(&self) -> FileId {
         self.file_id
     }
 
@@ -168,7 +168,7 @@ impl FileDownloadRetry for StreamRetry {
 }
 
 struct RangeDownload {
-    file_id: usize,
+    file_id: FileId,
     range: (usize, usize),
     url: Arc<String>,
     file_map: Arc<SharedFileMap>,
@@ -177,7 +177,7 @@ struct RangeDownload {
 }
 
 impl FileDownloadRetry for RangeDownload {
-    fn file_id(&self) -> usize {
+    fn file_id(&self) -> FileId {
         self.file_id
     }
 
@@ -197,11 +197,11 @@ enum SupervisorMessage {
     ProcessPermit(ActiveDownloadPermit),
     Pause,
     SpawnWorker(ValidDownloadPermit),
-    RangeSuccess(ActiveDownloadPermit, usize, (usize, usize), Vec<[u8; 16]>), // permit, id, range, chunk hashes
-    RangeFailed(ActiveDownloadPermit, usize, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, RangeDownloadError, u64), // permit, id, range, url
-    StreamSuccess(ActiveDownloadPermit, usize, usize), // permit, id, size of file
-    StreamFailed(ActiveDownloadPermit, usize, Arc<String>, PathBuf, DownloadError), // permit, id, url, path, error
-    MetadataFetched(ActiveDownloadPermit, usize, Arc<String>, SizeResult), 
+    RangeSuccess(ActiveDownloadPermit, FileId, (usize, usize), Vec<[u8; 16]>), // permit, id, range, chunk hashes
+    RangeFailed(ActiveDownloadPermit, FileId, (usize, usize), Arc<String>, Arc<SharedFileMap>, u64, RangeDownloadError, u64), // permit, id, range, url
+    StreamSuccess(ActiveDownloadPermit, FileId, usize), // permit, id, size of file
+    StreamFailed(ActiveDownloadPermit, FileId, Arc<String>, PathBuf, DownloadError), // permit, id, url, path, error
+    MetadataFetched(ActiveDownloadPermit, FileId, Arc<String>, SizeResult), 
     IoError(ActiveDownloadPermit, std::io::Error, RetryKind),
     RetryAfter(ActiveDownloadPermit, Duration, RetryKind),
     RetryReady(RetryKind),
@@ -213,16 +213,19 @@ enum SupervisorMessage {
 
 #[derive(Debug)]
 pub enum Job {
-    GetSize { file_id: usize, url: Arc<String> },
+    GetSize {
+        file_id: FileId,
+        url: Arc<String>
+    },
     DownloadChunk {
-        file_id: usize, 
+        file_id: FileId, 
         url: Arc<String>,
         range: (usize, usize),
         file_map: Arc<SharedFileMap>,
         expected_len: u64,
         previously_downloaded: u64,
     }, // file id, url, range
-    DownloadStream(usize, Arc<String>, PathBuf), // file id, url
+    DownloadStream(FileId, Arc<String>, PathBuf), // file id, url
 }
 
 #[derive(Debug)]
@@ -238,32 +241,38 @@ pub struct RangeRetryJob {
 
 struct SupervisorState {
     download: Download,
-    chunk_cursors: HashMap<usize, usize>, // used to keep track of last tracked chunk in a file to avoid looping through all the chunks every time
-    uninitialized_cursor: usize, // track the last known initialized file
+    chunk_cursors: HashMap<FileId, usize>, // used to keep track of last tracked chunk in a file to avoid looping through all the chunks every time
+    uninitialized_files: VecDeque<FileId>, // track all uninitialized file
     streams_cursor: usize, // track the last known stream-only file
     // TODO: change this to a vec
-    retry_ranges: HashMap<usize, Vec<RangeRetryJob>>, // ranges that failed but are still buffered
-    retry_uninitialized: Vec<(usize, Arc<String>)>, // tracks the files that failed to get metadata
-    retry_streams: Vec<(usize, Arc<String>, PathBuf)>, // tracks the files that failed to get metadata
+    retry_ranges: HashMap<FileId, Vec<RangeRetryJob>>, // ranges that failed but are still buffered
+    retry_uninitialized: Vec<(FileId, Arc<String>)>, // tracks the files that failed to get metadata
+    retry_streams: Vec<(FileId, Arc<String>, PathBuf)>, // tracks the files that failed to get metadata
     host_sender: UnboundedSender<HostMessage>,
     permit_count: Arc<AtomicUsize>, 
     active_downloads: usize, // tracks how many permits we are using to download files
     active_metadata_requests: usize, // tracks how many permits we are using to gather metadata
     app_context: AppContext,
     retry_queue_count: usize, // tracks how many downloads we are trying. Useful for when there are no jobs and nothing in the retry queue due to retry timeout or delay
-    file_progress: HashMap<usize, Arc<AtomicU64>>, // tracker for how many bytes we have downloaded for each file
+    file_progress: HashMap<FileId, Arc<AtomicU64>>, // tracker for how many bytes we have downloaded for each file
     writer_sender: flume::Sender<FileChunk>, // direct channels to the tasks that manage file writing io
-    shared_file_maps: HashMap<usize, Arc<SharedFileMap>>,
+    shared_file_maps: HashMap<FileId, Arc<SharedFileMap>>,
 }
 
 impl SupervisorState {
     fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>, permit_count: Arc<AtomicUsize>) -> Self {
         let mut file_progress = HashMap::new();
-        for (id, item) in download.files() {
-            if let DownloadType::File(file) = item {
-                let initial_bytes = file.calculate_initial_bytes(BLOCK_SIZE as u64);
-                
-                file_progress.insert(*id, Arc::new(AtomicU64::new(initial_bytes)));
+        for (id, file) in download.files() {
+            let initial_bytes = file.calculate_initial_bytes(BLOCK_SIZE as u64);
+            
+            file_progress.insert(*id, Arc::new(AtomicU64::new(initial_bytes)));
+        }
+
+        let mut uninitialized_files = VecDeque::new();
+
+        for (&file_id, file) in download.files() {
+            if file.size() == None {
+                uninitialized_files.push_back(file_id);
             }
         }
 
@@ -272,7 +281,7 @@ impl SupervisorState {
         Self { 
             download,
             chunk_cursors: HashMap::new(),
-            uninitialized_cursor: 0,
+            uninitialized_files,
             streams_cursor: 0,
             retry_ranges: HashMap::new(),
             retry_uninitialized: Vec::new(),
@@ -329,9 +338,9 @@ impl SupervisorState {
         
         let cursor = self.streams_cursor;
 
-        for (&file_id, file) in self.download.files()[cursor..].iter() {
-            if let DownloadType::File(file) = file && file.size() == Some(FileSize::Unknown) {
-                self.streams_cursor += 1;
+        for (offset, (&file_id, file)) in self.download.files()[cursor..].iter().enumerate() {
+            if file.size() == Some(FileSize::Unknown) {
+                self.streams_cursor = cursor + offset + 1;
 
                 return Some(Job::DownloadStream(file_id, file.url(), file.relative_path().to_owned()));
             }
@@ -341,12 +350,11 @@ impl SupervisorState {
     }
 
     async fn try_take_chunk_job(&mut self) -> Option<Job> {
-        for (&file_id, download_type) in self.download.files().iter() {
-            // skip files that are already completed and folders
-            let file_download = match download_type {
-                DownloadType::File(file) if file.status() != FileStatus::Completed => file,
-                _ => continue, // we skip folders
-            };
+        for (&file_id, file) in self.download.files().iter() {
+            // skip files that are already completed
+            if file.status() == FileStatus::Completed {
+                continue;
+            }
 
             // Check for retries first on this file
             if let Some(retry_range) = self.retry_ranges.get_mut(&file_id) 
@@ -367,7 +375,7 @@ impl SupervisorState {
             // get cursor for this particular file
             let cursor = *self.chunk_cursors.entry(file_id).or_insert(0);
 
-            let chunks = file_download.blocks();
+            let chunks = file.blocks();
 
             // This means that the metadata is still not fetched, so we can skip it
             if chunks.is_empty() {
@@ -414,17 +422,17 @@ impl SupervisorState {
 
                 let range = (start_index, end_index);
 
-                let file_size = match file_download.size()? {
+                let file_size = match file.size()? {
                     FileSize::Unknown => return None,
                     FileSize::Known(file_size) => file_size,
                 };
 
                 let mut previously_downloaded = 0;
 
-                let chunks_len = file_download.blocks().len();
+                let chunks_len = file.blocks().len();
 
                 for block_index in range.0..range.1 {
-                    if file_download.blocks().get(block_index).unwrap() == true {
+                    if file.blocks().get(block_index).unwrap() == true {
                         // If we are on the last block, it is very possible that the size of the block
                         // in bytes is less than the normal CHUNK_SIZE
                         if block_index == (chunks_len - 1) {
@@ -438,7 +446,7 @@ impl SupervisorState {
 
                 let expected_len = self.calculate_chunk_expected_len(BLOCK_SIZE as u64, range, file_size);
 
-                let path = file_download.relative_path();
+                let path = file.relative_path();
 
                 if !self.shared_file_maps.contains_key(&file_id) {
                     if let Some(parent_path) = path.parent() {
@@ -454,7 +462,7 @@ impl SupervisorState {
 
                 return Some(Job::DownloadChunk { 
                     file_id, 
-                    url: file_download.url(), 
+                    url: file.url(), 
                     range, 
                     file_map, 
                     expected_len,
@@ -467,14 +475,11 @@ impl SupervisorState {
     }
 
     /// Gets a metadata job and automatically updates its cursor as needed
-    fn take_metadata_job(&mut self, id: usize, url: Arc<String>) -> Job {
-        if id >= self.uninitialized_cursor {
-            self.uninitialized_cursor = id + 1;
-        }
+    fn take_metadata_job(&mut self, id: FileId, url: Arc<String>) -> Job {
         Job::GetSize { file_id: id, url }
     }
 
-    fn get_next_uninitialized_file(&mut self) -> Option<(usize, Arc<String>)> {
+    fn get_next_uninitialized_file(&mut self) -> Option<(FileId, Arc<String>)> {
         if let Some(uninitialized) = self.retry_uninitialized.pop() {
             return Some(uninitialized);
         }
@@ -483,14 +488,12 @@ impl SupervisorState {
             return None;
         }
 
-        // get the cursor of the file, if no cursor exists in the map, then insert one and return 0
-        let cursor = self.uninitialized_cursor;
-
-        for (&index, download_type) in self.download.files()[cursor..].iter() {
-            if let DownloadType::File(file) = download_type
-                && file.size().is_none()
-            {
-                return Some((index, file.url()));
+        // get next file that still hasn't been initialized
+        while let Some(file_id) = self.uninitialized_files.pop_front()
+            && let Some(file) = self.download.files().get(&file_id)
+        {
+            if file.size().is_none() {
+                return Some((file_id, file.url().clone()));
             }
         }
         
@@ -525,7 +528,7 @@ pub struct DownloadSupervisor {
 impl DownloadSupervisor {
     pub async fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>, global_limit: Arc<BandwidthLimiter>, host_limit: Arc<BandwidthLimiter>, download_limits: Arc<DownloadLimiterGroup>) -> Self {
         debug!("Supervisor created for: {}", download.name());
-        app_context.db_manager.write_download(&download).await;
+        app_context.db_manager.write_download(&download).await.unwrap();
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
         let download_id = download.id();
 
@@ -579,9 +582,9 @@ impl DownloadSupervisor {
 
             let mut save_interval = tokio::time::interval(Duration::from_millis(100));
 
-            let download_status = match state.download.files().get(&0) {
-                Some(DownloadType::File(file)) => file.status().bucket(),
-                Some(DownloadType::Folder(folder)) => folder.status().bucket(),
+            let download_status = match state.download.root_item() {
+                Some(DownloadTypeRef::File(file)) => file.status().bucket(),
+                Some(DownloadTypeRef::Folder(folder)) => folder.status().bucket(),
                 None => StatusBucket::Completed, // Download has nothing inside, so we must be completed
             };
 
@@ -1264,7 +1267,7 @@ impl DownloadSupervisor {
                                     }
 
                                     // Save the download to db
-                                    state.app_context.db_manager.write_download(&state.download).await;
+                                    state.app_context.db_manager.write_download(&state.download).await.unwrap();
 
                                     // Break the loop to close this thread
                                     break; 
@@ -1272,13 +1275,13 @@ impl DownloadSupervisor {
                             }
                         }
                     _ = save_interval.tick() => {
-                        state.app_context.db_manager.write_download(&state.download).await;
+                        state.app_context.db_manager.write_download(&state.download).await.unwrap();
                     }
                 }
         
             }
             // saves to db here for persitence and in case oneshot fails
-            state.app_context.db_manager.write_download(&state.download).await;
+            state.app_context.db_manager.write_download(&state.download).await.unwrap();
 
             let _ = shutdown_sender.send(state);
         });
@@ -1326,27 +1329,25 @@ impl DownloadSupervisor {
     fn calculate_initial_demand(download: &Download) -> usize {
         let mut demand = 0;
 
-        for file_type in download.files().values() {
-            if let DownloadType::File(file) = file_type {
-                // Skip fully downloaded files
-                if file.status() == FileStatus::Completed {
-                    continue; 
-                }
+        for file in download.files().values() {
+            // Skip fully downloaded files
+            if file.status() == FileStatus::Completed {
+                continue; 
+            }
 
-                let chunks = file.blocks(); 
+            let chunks = file.blocks(); 
 
-                if chunks.is_empty() {
-                    // Uninitialized file: needs 1 permit for metadata/stream request
-                    demand += 1;
-                } else {
-                    // Initialized file: count how many 1MB ranges have at least one chunk missing
-                    let incomplete_jobs = chunks
-                        .chunks(BLOCKS_PER_HASH)
-                        .filter(|chunk_slice| !chunk_slice.all())
-                        .count();
-                    
-                    demand += incomplete_jobs;
-                }
+            if chunks.is_empty() {
+                // Uninitialized file: needs 1 permit for metadata/stream request
+                demand += 1;
+            } else {
+                // Initialized file: count how many 1MB ranges have at least one chunk missing
+                let incomplete_jobs = chunks
+                    .chunks(BLOCKS_PER_HASH)
+                    .filter(|chunk_slice| !chunk_slice.all())
+                    .count();
+                
+                demand += incomplete_jobs;
             }
         }
 
@@ -1354,10 +1355,9 @@ impl DownloadSupervisor {
     }
 
     fn is_download_finished(download: &Download) -> bool {
-        download.files().values().all(|f| match f {
-            DownloadType::File(file) => file.status() == FileStatus::Completed,
-            _ => true,
-        })
+        download.files().values().all(|file| 
+            file.status() == FileStatus::Completed
+        )
     }
 
     async fn finish_download(state: &mut SupervisorState) {
@@ -1365,7 +1365,7 @@ impl DownloadSupervisor {
 
         info!("Supervisor finishing download '{}' with final status: {:?}", download.name(), download.status());
 
-        state.app_context.db_manager.write_download(download).await;
+        state.app_context.db_manager.write_download(download).await.unwrap();
 
         let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
     }
@@ -1376,7 +1376,7 @@ impl DownloadSupervisor {
         }
 
         // Save the new statuses to db
-        state.app_context.db_manager.write_download(&state.download).await;
+        state.app_context.db_manager.write_download(&state.download).await.unwrap();
 
         let download_id = state.download.id();
 
@@ -1488,7 +1488,7 @@ async fn download_range(
     limiters: Vec<Arc<BandwidthLimiter>>,
     ui_sender: UnboundedSender<UiStateEvent>,
     download_id: DownloadId,
-    file_id: usize,
+    file_id: FileId,
     file_progress: Arc<AtomicU64>,
     // How many bytes out of this range were already downloaded if any
     // (required to report accurate progress when healing and redownloading certain bytes)

@@ -9,9 +9,11 @@ use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, put};
+use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
-use internet_downloader_backend::download::{DownloadId, DownloadManager};
+use internet_downloader_backend::download::DownloadManager;
 
+use internet_downloader_backend::download::items::{DownloadId, FileId};
 use reqwest::Method;
 use serde::Deserialize;
 use tokio_stream::wrappers::BroadcastStream;
@@ -127,7 +129,14 @@ async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Json(j
 async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> impl IntoResponse  {
     let manager_guard = manager.lock().await;
     let receiver = manager_guard.download_subscribe();
-    let snapshot = manager_guard.get_snapshot().await;
+    let downloads = manager_guard.get_snapshot().await;
+
+    let snapshot: Vec<DownloadSnapshot> = downloads
+        .into_iter()
+        .map(|(_id, download)| {
+            DownloadSnapshot::from(download)
+        })
+        .collect();
 
     drop(manager_guard);
 
@@ -156,7 +165,11 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                     }
                 }
                 _ = snapshot_interval.tick() => {
-                    let snapshot = manager.lock().await.get_snapshot().await;
+                    let downloads = manager.lock().await.get_snapshot().await;
+                    let snapshot: Vec<DownloadSnapshot> = downloads
+                        .into_iter()
+                        .map(|(_id, download)| DownloadSnapshot::from(download))
+                        .collect();
 
                     let snapshot_json = serde_json::to_string(&snapshot).unwrap();
 
@@ -241,7 +254,7 @@ async fn limit_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Path
 #[derive(Deserialize, Debug)]
 struct FilePath {
     download_id: DownloadId,
-    file_id: usize,
+    file_id: FileId,
 }
 
 #[derive(Deserialize, Debug)]
@@ -251,7 +264,7 @@ struct LimitFileSettings {
 
 #[axum::debug_handler] 
 async fn limit_file(State(manager): State<Arc<Mutex<DownloadManager>>>, Path(path): Path<FilePath>, Json(json): Json<LimitFileSettings>) -> impl IntoResponse {
-    debug!(bandwidth_limit = ?json.bandwidth_limit, download = *path.download_id, file_id = path.file_id, "Received network limit");
+    debug!(bandwidth_limit = ?json.bandwidth_limit, download = *path.download_id, file_id = *path.file_id, "Received network limit");
 
     manager.lock().await.set_file_limit(path.download_id, path.file_id, json.bandwidth_limit);
 }

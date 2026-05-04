@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { DeltaEvent, DownloadItem, DownloadNode } from '../downloadTypes';
+import type { DeltaEvent, DownloadItem, FileItem, FolderItem } from '../downloadTypes';
 
 export type DownloadState = {
     downloads: Record<number, DownloadItem>;
@@ -19,15 +19,20 @@ export const useDownloadStore = create<DownloadState>()(
         selectedId: null,
 
         setSnapshot: (items) => set((state) => {
-            state.downloadIds = items.map(i => i.id);
-            state.downloads = {};
-            items.forEach(item => {
-                if (!item.files) {
-                    item.files = {};
-                }
+          state.downloadIds = items.map(i => i.id);
+          state.downloads = {};
+          
+          items.forEach(item => {
+              if (!item.files) {
+                item.files = {};
+              }
 
-                state.downloads[item.id] = item;
-            })
+              if (!item.folders) {
+                item.folders = {};
+              }
+
+              state.downloads[item.id] = item;
+          })
         }),
 
         applyDelta: (delta) => set((state) => {
@@ -56,20 +61,50 @@ export const useDownloadStore = create<DownloadState>()(
                     if (change.active_operation !== undefined) download.active_operation = change.active_operation;
                     if (change.host) download.host = change.host;
 
-                    if (change.files) {
-                        Object.entries(change.files).forEach(([fileIdString, fileChanges]) => {
-                            const fileId = Number(fileIdString);
-                            const file = download.files[fileId];
+                  if (change.files) {
+                    if (!download.files) {
+                      download.files = {};
+                    }
+                    
+                    Object.entries(change.files).forEach(([fileIdString, fileChanges]) => {
+                        const fileId = Number(fileIdString);
+                        const file = download.files[fileId];
 
-                            if (file) {
-                                Object.assign(file, fileChanges);
-                            } 
+                        if (file) {
+                          Object.assign(file, fileChanges);
+                        }
 
-                            // If it's new (and the update contains the full object), add it
-                            else if (fileChanges.type) {
-                                download.files[fileId] = fileChanges as DownloadNode;
-                            }
-                        })
+                        // If it's new (and the update contains the full object), add it
+                        else if (fileChanges.file_name) {
+                          download.files[fileId] = {
+                            id: fileId,
+                            ...fileChanges
+                          } as FileItem;
+                        }
+                      });
+                    }
+
+                  if (change.folders) {
+                    if (!download.folders) {
+                      download.folders = {};
+                    }
+                    
+                    Object.entries(change.folders).forEach(([folderIdString, folderChanges]) => {
+                        const folderId = Number(folderIdString);
+                        const folder = download.folders[folderId];
+
+                        if (folder) {
+                          Object.assign(folder, folderChanges);
+                        } 
+
+                        // If it's new (and the update contains the full object), add it
+                        else if (folderChanges.folder_name !== undefined) {
+                          download.folders[folderId] = {
+                            id: folderId,
+                            ...folderChanges
+                          } as FolderItem;
+                        }
+                      });
                     }
                 });
             }

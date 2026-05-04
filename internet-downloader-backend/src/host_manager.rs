@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{DownloadId, DownloadLimiterGroup, DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand, items::{ChangedItemStatus, Download}, status::DownloadStatus}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
+use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{DownloadLimiterGroup, DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand, items::{ChangedItemStatus, Download, DownloadId}, status::DownloadStatus}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -382,12 +382,12 @@ impl HostManager {
                 if let Some(download_task) = message {
                     let download = Download::new(*id, download_task);
 
-                    for file in &download.files {
+                    for (&file_id, _file) in download.files() {
                         let limiter = BandwidthLimiter::new(0);
                         limiter.set_unlimited(true);
 
                         let file_limiter = Arc::new(limiter);
-                        download_limiter.file_limiters().insert(*file.0, file_limiter);
+                        download_limiter.file_limiters().insert(file_id, file_limiter);
                     }
 
                     let _ = self_sender.send(HostMessage::QueueDownload(download, download_limiter));

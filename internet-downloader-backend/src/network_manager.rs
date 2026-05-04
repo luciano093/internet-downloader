@@ -5,7 +5,7 @@ use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 use tracing::{debug, warn};
 use url::{Host, Url};
 
-use crate::{context::AppContext, download::{DownloadId, DownloadLimiterGroup, DownloadSettings, LimiterRegistry, ManagerCommand, items::Download}, host_manager::HostHandle, utils::network_utils::BandwidthLimiter};
+use crate::{context::AppContext, download::{DownloadLimiterGroup, DownloadSettings, LimiterRegistry, ManagerCommand, items::{Download, DownloadId, FileId}}, host_manager::HostHandle, utils::network_utils::BandwidthLimiter};
 
 pub enum NetworkMessage {
     QueueDownload(String, DownloadId),
@@ -15,7 +15,7 @@ pub enum NetworkMessage {
     SetGlobalSpeedLimit(Option<u64>),
     SetHostSpeedLimit(String, Option<u64>), // String can be a hostname or url
     SetDownloadSpeedLimit(DownloadId, Option<u64>),
-    SetFileSpeedLimit(DownloadId, usize, Option<u64>),
+    SetFileSpeedLimit(DownloadId, FileId, Option<u64>),
 }
 
 /// Handles network related concerns such as connections, downloads, and rate limiting.
@@ -219,7 +219,7 @@ impl NetworkHandle {
         let _ = self.sender.send(NetworkMessage::SetDownloadSpeedLimit(download_id, limit));
     }
 
-    pub fn set_file_limit(&self, download_id: DownloadId, file_id: usize, limit: Option<u64>) {
+    pub fn set_file_limit(&self, download_id: DownloadId, file_id: FileId, limit: Option<u64>) {
         let _ = self.sender.send(NetworkMessage::SetFileSpeedLimit(download_id, file_id, limit));
     }
 }

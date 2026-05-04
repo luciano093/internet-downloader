@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -10,16 +11,17 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::info;
 
-use crate::download::DownloadId;
 use crate::download::FileSize;
 use crate::download::DownloadUpdate;
 use crate::download::FolderUpdate;
 use crate::download::ItemUpdate;
 use crate::download::items::ActiveOperation;
+use crate::download::items::DownloadId;
 use crate::download::items::DownloadItem;
-use crate::download::items::FileDownload;
+use crate::download::items::FileId;
 use crate::download::items::FolderDownload;
-use crate::download::items::{DownloadType, Download};
+use crate::download::items::FolderId;
+use crate::download::items::Download;
 use crate::download::FileUpdate;
 use crate::download::status::DownloadStatus;
 use crate::download::status::FileStatus;
@@ -189,8 +191,8 @@ impl Default for UiStateManager {
     }
 }
 
-pub async fn get_snapshot(db_state_manager: &StateManager) -> DownloadSnapshot {
-    DownloadSnapshot(db_state_manager.load_downloads().await.unwrap())
+pub async fn get_snapshot(db_state_manager: &StateManager) -> IndexMap<DownloadId, Download> {
+    db_state_manager.load_downloads().await.unwrap()
 }
 
 #[derive(Debug, Clone)]
@@ -254,13 +256,11 @@ impl DeltaManager {
                                 FileUpdate::BytesDownloaded { id, .. } => *id,
                             };
 
-                            let item_diff = download_diff.files.entry(file_id).or_insert_with(|| {
-                                ItemDiff::File(FileDiff::new())
+                            let file_diff = download_diff.files.entry(file_id).or_insert_with(|| {
+                                FileDiff::new()
                             });
 
-                            if let ItemDiff::File(file_diff) = item_diff {
-                                file_diff.update(file_update);
-                            }
+                            file_diff.update(file_update);
                         },
                         ItemUpdate::Folder(folder_update) => {
                             let folder_id = match &folder_update {
@@ -268,13 +268,11 @@ impl DeltaManager {
                                 FolderUpdate::Operation { id, .. } => *id,
                             };
 
-                            let item_diff = download_diff.files.entry(folder_id).or_insert_with(|| {
-                                ItemDiff::Folder(FolderDiff::new())
+                            let folder_diff = download_diff.folders.entry(folder_id).or_insert_with(|| {
+                                FolderDiff::new()
                             });
 
-                            if let ItemDiff::Folder(folder_diff) = item_diff {
-                                folder_diff.update(folder_update);
-                            }
+                            folder_diff.update(folder_update);
                         }
                     }
             }
@@ -295,22 +293,8 @@ pub struct DownloadDiff {
     relative_path: Option<PathBuf>,
     status: Option<DownloadStatus>,
     active_operation: Option<Option<ActiveOperation>>,
-    files: HashMap<usize, ItemDiff>,
-}
-
-impl DownloadDiff {
-    fn from(download: &Download, bytes_downloaded: u64) -> Self {
-        let file_diffs = download.files().into_iter().map(|(&id, download_type)| {
-            (id, ItemDiff::from_download_type(download_type, bytes_downloaded))
-        }).collect();
-
-        DownloadDiff { url: Some(download.url().clone()),
-            relative_path: Some(download.relative_path().clone()),
-            status: Some(download.status()),
-            active_operation: Some(download.active_operation()),
-            files: file_diffs,
-        }
-    }
+    files: HashMap<FileId, FileDiff>,
+    folders: HashMap<FolderId, FolderDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,22 +304,10 @@ pub enum ItemDiff {
     Folder(FolderDiff),
 }
 
-impl ItemDiff {
-    fn from_download_type(download_type: &DownloadType, bytes_downloaded: u64) -> Self {
-        match download_type {
-            DownloadType::File(file_download) => {
-                ItemDiff::File(FileDiff::from_file_download(file_download, bytes_downloaded))
-            },
-            DownloadType::Folder(folder_download) => {
-                ItemDiff::Folder(FolderDiff::from(folder_download))
-            },
-        }
-    }
-}
-
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileDiff {
+    parent_id: Option<Option<FolderId>>, 
     status: Option<FileStatus>,
     active_operation: Option<Option<ActiveOperation>>,
     url: Option<String>,
@@ -370,29 +342,18 @@ impl FileDiff {
             },
         }
     }
-
-    fn from_file_download(file: &FileDownload, bytes_downloaded: u64) -> Self {
-        FileDiff { 
-            status: Some(file.status()),
-            active_operation: Some(file.active_operation()),
-            url: Some(file.url().to_string()),
-            file_name: Some(file.name().to_string()),
-            relative_path: Some(file.relative_path().clone()),
-            hash: file.hash(),
-            size: file.size(),
-            bytes_downloaded: Some(bytes_downloaded),
-        }
-    }
 }
 
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FolderDiff {
+    parent_id: Option<Option<FolderId>>, 
     status: Option<DownloadStatus>,
     active_operation: Option<Option<ActiveOperation>>,
     folder_name: Option<String>,
     relative_path: Option<PathBuf>,
-    children: Option<Vec<usize>>,
+    child_files: Option<Vec<FileId>>,
+    child_folders: Option<Vec<FolderId>>,
 }
 
 impl FolderDiff {
@@ -415,65 +376,37 @@ impl FolderDiff {
 impl From<&FolderDownload> for FolderDiff {
     fn from(folder: &FolderDownload) -> Self {
         Self {
+            parent_id: Some(folder.parent_id()),
             status: Some(folder.status()),
             active_operation: Some(folder.active_operation()),
             folder_name: Some(folder.name().to_owned()),
             relative_path: Some(folder.relative_path().clone()),
-            children: Some(folder.children().to_owned()),
+            child_files: Some(folder.child_files().to_owned()),
+            child_folders: Some(folder.child_folders().to_owned()),
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DownloadSnapshot(pub IndexMap<DownloadId, Download>);
-
-impl Serialize for DownloadSnapshot {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer {
-        self.build_tree().serialize(serializer)
-    }
+#[derive(Serialize)]
+pub struct DownloadSnapshot {
+    pub id: DownloadId,
+    pub name: String,
+    pub url: String,
+    pub status: DownloadStatus,
+    pub active_operation: Option<ActiveOperation>,
+    pub files: IndexMap<FileId, FileSnapshot>,
+    pub folders: IndexMap<FolderId, FolderDownload>,
 }
 
-impl DownloadSnapshot {
-    fn build_tree(&self) -> serde_json::Value {
-        let downloads = self.0.iter().map(|(_url, download)| {
-            download_to_json(download)
-        }).collect::<Vec<_>>();
-
-        downloads.into()
-    }
-}
-
-pub fn download_to_json(download: &Download) -> serde_json::Value {
-    let mut files_json = serde_json::to_value(download.files()).unwrap();
-
-    if let Some(files_map) = files_json.as_object_mut() {
-        for (id, file_value) in files_map.iter_mut() {
-            if let Some(file_obj) = file_value.as_object_mut() {
-                file_obj.remove("chunks"); 
-
-                if let Ok(id) = id.parse::<usize>() {
-                    // Assuming you have a way to access the FileDownload here
-                    if let Some(DownloadType::File(file)) = download.files().get(&id) {
-                        // Calculate safe, committed bytes from the BitVec
-                        let committed_bytes = file.calculate_initial_bytes(16384 as u64);
-                        
-                        file_obj.insert(
-                            "bytes_downloaded".to_string(), 
-                            serde_json::json!(committed_bytes)
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    serde_json::json!({
-        "id": download.id(),
-        "name": download.name(),
-        "status": download.status(),
-        "url": download.url(),
-        "files": files_json,
-    })
+#[derive(Serialize)]
+pub struct FileSnapshot {
+    pub id: FileId,
+    pub parent_id: Option<FolderId>,
+    pub file_name: String,
+    pub relative_path: PathBuf,
+    pub size: Option<FileSize>,
+    pub bytes_downloaded: u64,
+    pub status: FileStatus,
+    pub active_operation: Option<ActiveOperation>,
+    pub url: Arc<String>,
 }
