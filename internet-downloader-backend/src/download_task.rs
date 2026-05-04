@@ -528,7 +528,7 @@ pub struct DownloadSupervisor {
 impl DownloadSupervisor {
     pub async fn new(app_context: AppContext, download: Download, host_sender: UnboundedSender<HostMessage>, global_limit: Arc<BandwidthLimiter>, host_limit: Arc<BandwidthLimiter>, download_limits: Arc<DownloadLimiterGroup>) -> Self {
         debug!("Supervisor created for: {}", download.name());
-        app_context.db_manager.write_download(&download).await;
+        app_context.db_manager.write_download(&download).await.unwrap();
         let permit_count: Arc<AtomicUsize> = Arc::new(0.into());
         let download_id = download.id();
 
@@ -1267,7 +1267,7 @@ impl DownloadSupervisor {
                                     }
 
                                     // Save the download to db
-                                    state.app_context.db_manager.write_download(&state.download).await;
+                                    state.app_context.db_manager.write_download(&state.download).await.unwrap();
 
                                     // Break the loop to close this thread
                                     break; 
@@ -1275,13 +1275,13 @@ impl DownloadSupervisor {
                             }
                         }
                     _ = save_interval.tick() => {
-                        state.app_context.db_manager.write_download(&state.download).await;
+                        state.app_context.db_manager.write_download(&state.download).await.unwrap();
                     }
                 }
         
             }
             // saves to db here for persitence and in case oneshot fails
-            state.app_context.db_manager.write_download(&state.download).await;
+            state.app_context.db_manager.write_download(&state.download).await.unwrap();
 
             let _ = shutdown_sender.send(state);
         });
@@ -1365,7 +1365,7 @@ impl DownloadSupervisor {
 
         info!("Supervisor finishing download '{}' with final status: {:?}", download.name(), download.status());
 
-        state.app_context.db_manager.write_download(download).await;
+        state.app_context.db_manager.write_download(download).await.unwrap();
 
         let _ = state.host_sender.send(HostMessage::DownloadFinished(state.download.id()));
     }
@@ -1376,7 +1376,7 @@ impl DownloadSupervisor {
         }
 
         // Save the new statuses to db
-        state.app_context.db_manager.write_download(&state.download).await;
+        state.app_context.db_manager.write_download(&state.download).await.unwrap();
 
         let download_id = state.download.id();
 

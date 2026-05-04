@@ -9,24 +9,84 @@ use tracing::warn;
 use crate::{db::rows::{ChunkHashRow, DownloadFileRow, DownloadFolderRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, FileSize, items::{Download, DownloadId, DownloadItem, FileDownload, FileId, FolderDownload, FolderId}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
 #[derive(Debug, Error)]
-pub enum StateManagerError {
-    #[error("Connection error: {0}")]
-    ConnectionError(sqlx::Error),
-    #[error("Error creating database tables: {0}")]
-    TableCreationError(sqlx::Error),
-}
-
-#[derive(Debug, Error)]
-#[error("{message}: {kind}")]
-pub struct DownloadFetchError {
+#[error("{message}")]
+pub struct DbReadWriteError {
     message: Cow<'static, str>,
-    kind: DbFetchErrorKind,
+    kind: DbReadWriteErrorKind,
 
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
-impl DownloadFetchError {
+impl DbReadWriteError {
+    /// Wraps the current error in a new layer of context, 
+    /// pushing the current message down into the backtrace.
+    pub fn context(self, message: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            message: message.into(),
+            kind: self.kind,
+            source: Box::new(self),
+        }
+    }
+    
+    pub fn kind(&self) -> &DbReadWriteErrorKind {
+        &self.kind
+    }
+}
+
+impl From<DbReadError> for DbReadWriteError {
+    fn from(err: DbReadError) -> Self {
+        Self {
+            message: err.message,
+            kind: DbReadWriteErrorKind::Read(err.kind),
+            source: err.source,
+        }
+    }
+}
+
+impl From<DbWriteError> for DbReadWriteError {
+    fn from(err: DbWriteError) -> Self {
+        Self {
+            message: err.message,
+            kind: DbReadWriteErrorKind::Write(err.kind),
+            source: err.source,
+        }
+    }
+}
+
+impl From<CoreDbError> for DbReadWriteError {
+    fn from(err: CoreDbError) -> Self {
+        Self {
+            message: err.message,
+            kind: DbReadWriteErrorKind::Core(err.kind),
+            source: err.source,
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy)]
+pub enum DbReadWriteErrorKind {
+    #[error(transparent)]
+    Core(#[from] CoreDbErrorKind),
+
+    #[error(transparent)]
+    Read(#[from] DbReadErrorKind),
+    
+    #[error(transparent)]
+    Write(#[from] DbWriteErrorKind),
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct DbWriteError {
+    message: Cow<'static, str>,
+    kind: DbWriteErrorKind,
+
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl DbWriteError {
     pub fn new(message: impl Into<Cow<'static, str>>, err: sqlx::Error) -> Self {
         Self { 
             message: message.into(),
@@ -34,58 +94,219 @@ impl DownloadFetchError {
             source: Box::new(err),
         }
     }
+
+    pub fn with_msg(msg: impl Into<Cow<'static, str>>) -> impl FnOnce(sqlx::Error) -> Self {
+        move |err| Self::new(msg, err)
+    }
+
+    /// Wraps the current error in a new layer of context, 
+    /// pushing the current message down into the backtrace.
+    pub fn context(self, message: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            message: message.into(),
+            kind: self.kind,
+            source: Box::new(self),
+        }
+    }
     
-    pub fn kind(&self) -> &DbFetchErrorKind {
+    pub fn kind(&self) -> &DbWriteErrorKind {
         &self.kind
-    }
-    
-    fn from_sqlx(err: sqlx::Error) -> Self {
-        Self {
-            message: "Failed to fetch download".into(),
-            kind: DbFetchErrorKind::from(&err),
-            source: Box::new(err),
-        }
-    }
-}
-
-impl From<ChunkHashLoadError> for DownloadFetchError {
-    fn from(error: ChunkHashLoadError) -> Self {
-        Self {
-            message: "Failed to fetch chunk hashes for download".into(),
-            kind: error.kind(),
-            source: Box::new(error),
-        }
-    }
-}
-
-impl From<sqlx::Error> for DownloadFetchError {
-    fn from(err: sqlx::Error) -> Self {
-        Self::from_sqlx(err)
     }
 }
 
 #[derive(Debug, Error, Clone, Copy)]
-pub enum DbFetchErrorKind {
-    #[error("Failed to acquire a database connection")]
-    ConnectionFailed,
+pub enum DbWriteErrorKind {
+    #[error(transparent)]
+    Core(#[from] CoreDbErrorKind),
 
-    #[error("Failed to execute database query")]
-    QueryFailed,
+    #[error("A unique constraint was violated (e.g. duplicate key)")]
+    UniqueViolation,
 
+    #[error("A foreign key constraint was violated")]
+    ForeignKeyViolation,
+
+    #[error("A check constraint was violated")]
+    CheckViolation,
+
+    #[error("A required field was missing (NOT NULL constraint violated)")]
+    NotNullViolation,
+}
+
+impl From<&sqlx::Error> for DbWriteErrorKind {
+    fn from(err: &sqlx::Error) -> Self {
+        match err {
+            // Different kinds of write errors that can happen
+            sqlx::Error::Database(db_err) => {
+                if db_err.is_unique_violation() {
+                    DbWriteErrorKind::UniqueViolation
+                } else if db_err.is_foreign_key_violation() {
+                    DbWriteErrorKind::ForeignKeyViolation
+                } else if db_err.is_check_violation() {
+                    DbWriteErrorKind::CheckViolation
+                } else {
+                    if let Some(code) = db_err.code() {
+                        match code.as_ref() {
+                            "1299" => return DbWriteErrorKind::NotNullViolation,
+                            _ => {}
+                        }
+                    }
+                    
+                    DbWriteErrorKind::from(CoreDbErrorKind::from(err))
+                }
+            }
+
+            // Schema issues
+            sqlx::Error::ColumnNotFound(_) | sqlx::Error::TypeNotFound { .. } => {
+                DbWriteErrorKind::Core(CoreDbErrorKind::SchemaCorrupted)
+            }
+
+            // Catch-all
+            _ => DbWriteErrorKind::from(CoreDbErrorKind::from(err))
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct DbReadError {
+    message: Cow<'static, str>,
+    kind: DbReadErrorKind,
+
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl DbReadError {
+    pub fn new(message: impl Into<Cow<'static, str>>, err: sqlx::Error) -> Self {
+        Self { 
+            message: message.into(),
+            kind: (&err).into(),
+            source: Box::new(err),
+        }
+    }
+
+    pub fn with_msg(msg: impl Into<Cow<'static, str>>) -> impl FnOnce(sqlx::Error) -> Self {
+        move |err| Self::new(msg, err)
+    }
+
+    /// Wraps the current error in a new layer of context, 
+    /// pushing the current message down into the backtrace.
+    pub fn context(self, message: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            message: message.into(),
+            kind: self.kind,
+            source: Box::new(self),
+        }
+    }
+    
+    pub fn kind(&self) -> &DbReadErrorKind {
+        &self.kind
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy)]
+pub enum DbReadErrorKind {
+    #[error(transparent)]
+    Core(#[from] CoreDbErrorKind),
+    
+    // Fetch errors
     #[error("Item was not found")]
     NotFound,
 
-    #[error("Database schema corrupted")]
-    SchemaCorrupted,
-
     #[error("Failed to decode database row")]
     DataCorrupted,
+}
+
+impl From<&sqlx::Error> for DbReadErrorKind {
+    fn from(err: &sqlx::Error) -> Self {
+        match err {
+            // Schema issues (non recoverable)
+            sqlx::Error::ColumnNotFound(_) | sqlx::Error::TypeNotFound { .. } => {
+                DbReadErrorKind::Core(CoreDbErrorKind::SchemaCorrupted)
+            }
+
+            // We didn't find the row we were fetching
+            sqlx::Error::RowNotFound => {
+                DbReadErrorKind::NotFound
+            }
+            
+            // Parsing and decoding errors
+            | sqlx::Error::Decode(_) 
+            | sqlx::Error::ColumnDecode { .. } 
+            | sqlx::Error::ColumnIndexOutOfBounds { .. } => {
+                DbReadErrorKind::DataCorrupted
+            }
+            
+            // Catch-all
+            _ => DbReadErrorKind::from(CoreDbErrorKind::from(err))
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct CoreDbError {
+    message: Cow<'static, str>,
+    kind: CoreDbErrorKind,
+
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
+}
+
+impl CoreDbError {
+    pub fn new(message: impl Into<Cow<'static, str>>, err: sqlx::Error) -> Self {
+        Self { 
+            message: message.into(),
+            kind: (&err).into(),
+            source: Box::new(err),
+        }
+    }
+
+    pub fn with_msg(msg: impl Into<Cow<'static, str>>) -> impl FnOnce(sqlx::Error) -> Self {
+        move |err| Self::new(msg, err)
+    }
+
+    pub fn kind(&self) -> &CoreDbErrorKind {
+        &self.kind
+    }
+}
+
+/// This error represents a core database error. \
+/// This kind of error can happen on any database operation. Be it when reading, writing, opening a pool, etc.
+#[derive(Debug, Error, Clone, Copy)]
+pub enum CoreDbErrorKind {
+    #[error("Failed to acquire a database connection")]
+    ConnectionFailed,
+
+    #[error("Database file is locked or busy")]
+    DatabaseBusy,
+
+    #[error("There was an OS error preventing IO")]
+    OsIoError,
+
+    #[error("Unable to open the SQLite database file (either primary database file or a temporary file)")]
+    UnableToOpen,
+    
+    #[error("Unable to allocate memory for database.")]
+    OutOfMemory,
+    
+    #[error("The disk is full and the database cannot grow")]
+    DiskFull,
+    
+    #[error("The database file is read-only or lacks write permissions")]
+    ReadOnly,
+    
+    #[error("The file we tried to do database operations on wasn't a database file")]
+    NotAnSqliteFile,
+    
+    #[error("The database schema corrupted")]
+    SchemaCorrupted,
 
     #[error("Unexpected database error")]
     Unexpected,
 }
 
-impl From<&sqlx::Error> for DbFetchErrorKind {
+impl From<&sqlx::Error> for CoreDbErrorKind {
     fn from(err: &sqlx::Error) -> Self {
         match &err {
             // Connection pool issues
@@ -95,31 +316,47 @@ impl From<&sqlx::Error> for DbFetchErrorKind {
             | sqlx::Error::PoolClosed
             | sqlx::Error::WorkerCrashed 
             | sqlx::Error::BeginFailed => {
-                DbFetchErrorKind::ConnectionFailed
+                CoreDbErrorKind::ConnectionFailed
             }
             // Actual SQL errors returned by the DB
-            sqlx::Error::Database(_) => {
-                DbFetchErrorKind::QueryFailed
-            }
-
-            // Schema issues (non recoverable)
-            sqlx::Error::ColumnNotFound(_) | sqlx::Error::TypeNotFound { .. } => {
-                DbFetchErrorKind::SchemaCorrupted
-            }
-
-            sqlx::Error::RowNotFound => {
-                DbFetchErrorKind::NotFound
-            }
-            
-            // Parsing and decoding errors
-            | sqlx::Error::Decode(_) 
-            | sqlx::Error::ColumnDecode { .. } 
-            | sqlx::Error::ColumnIndexOutOfBounds { .. } => {
-                DbFetchErrorKind::DataCorrupted
+            sqlx::Error::Database(db_err) => {
+                if let Some(code_str) = db_err.code() {
+                    if let Ok(code_int) = code_str.parse::<i32>() {
+                        // SQLite was designed so the primary error category is always stored in the first 8 bits
+                        // For example, 773 (SQLITE_BUSY_TIMEOUT) is (3 * 256) + 5
+                        // where 5 (SQLITE_BUSY) is the core category, meaning we can always 
+                        // take the number that we get from this operation and use it for a more general error.
+                        let primary_code = code_int & 0xFF;
+                        
+                        match primary_code {
+                            // 5: SQLITE_BUSY (Database file is locked)
+                            // 6: SQLITE_LOCKED (A specific table is locked)
+                            // 261: SQLITE_BUSY_RECOVERY
+                            // 517: SQLITE_BUSY_SNAPSHOT (Happens in WAL mode during deadlocks)
+                            // 773: SQLITE_BUSY_TIMEOUT
+                            5 | 6 => {
+                                return CoreDbErrorKind::DatabaseBusy;
+                            }
+                            // 7: SQLITE_NOMEM (SQLite failed to malloc memory)
+                            7 => return CoreDbErrorKind::OutOfMemory,
+                            8 => return CoreDbErrorKind::ReadOnly,
+                            // 10: SQLITE_IOERR (Operating System IO error)
+                            10 => return CoreDbErrorKind::OsIoError,
+                            11 => return CoreDbErrorKind::SchemaCorrupted,
+                            13 => return CoreDbErrorKind::DiskFull,
+                            // 14: SQLITE_CANTOPEN (The SQLite file was not able to be opened)
+                            14 => return CoreDbErrorKind::UnableToOpen,
+                            // 26: SQLITE_NOTADB (File we tried to do operations on is not a sqlite file)
+                            26 => return CoreDbErrorKind::NotAnSqliteFile,
+                            _ => {}
+                        }
+                    }
+                }
+                CoreDbErrorKind::Unexpected
             }
             
             // Catch-all
-            _ => DbFetchErrorKind::Unexpected
+            _ => CoreDbErrorKind::Unexpected
         }
     }
 }
@@ -128,7 +365,7 @@ impl From<&sqlx::Error> for DbFetchErrorKind {
 #[error("{message}: {kind}")]
 pub struct ChunkHashLoadError {
     message: Cow<'static, str>,
-    kind: DbFetchErrorKind,
+    kind: DbReadErrorKind,
     
     #[source]
     source: sqlx::Error,
@@ -143,14 +380,14 @@ impl ChunkHashLoadError {
         }
     }
     
-    pub fn kind(&self) -> DbFetchErrorKind {
+    pub fn kind(&self) -> DbReadErrorKind {
         self.kind
     }
     
     fn from_sqlx(err: sqlx::Error) -> Self {
         Self {
             message: "Failed to load chunk hashes".into(),
-            kind: DbFetchErrorKind::from(&err),
+            kind: DbReadErrorKind::from(&err),
             source: err,
         }
     }
@@ -168,23 +405,23 @@ pub struct StateManager {
 }
 
 impl StateManager {
-    pub async fn new(url: &str) -> Result<Self, StateManagerError> {
+    pub async fn new(url: &str) -> Result<Self, CoreDbError> {
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(url)
             .await
-            .map_err(StateManagerError::ConnectionError)?;
+            .map_err(CoreDbError::with_msg("Failed to create intiial conntection pool to SQLite database"))?;
 
-        sqlx::query("PRAGMA journal_mode = WAL;").execute(&pool).await.map_err(StateManagerError::ConnectionError)?;
-        sqlx::query("PRAGMA synchronous = NORMAL;").execute(&pool).await.map_err(StateManagerError::ConnectionError)?;
-        sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await.map_err(StateManagerError::ConnectionError)?;
+        sqlx::query("PRAGMA journal_mode = WAL;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed to initialize PRAGMA journal_mode during initial database connection"))?;
+        sqlx::query("PRAGMA synchronous = NORMAL;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed to initialize PRAGMA synchronous during initial database connection"))?;
+        sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed to initialize PRAGMA foreign_keys during initial database connection"))?;
 
         Ok(Self {
             pool
         })
     }
 
-    pub async fn create_tables(&self) -> Result<(), StateManagerError> {
+    pub async fn create_tables(&self) -> Result<(), DbWriteError> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS downloads (
@@ -300,7 +537,7 @@ impl StateManager {
         )
         .execute(&self.pool)
         .await
-        .map_err(StateManagerError::TableCreationError)?;
+        .map_err(DbWriteError::with_msg("Failed to create database tables"))?;
 
         let default_settings = AppSettings::default();
 
@@ -313,19 +550,21 @@ impl StateManager {
         .bind(default_settings.global_speed_limit.map(|speed| speed as i64))
         .execute(&self.pool)
         .await
-        .map_err(StateManagerError::TableCreationError)?;
+        .map_err(DbWriteError::with_msg("Failed insert default app settings to databse"))?;
 
         Ok(())
     }
 
-    pub async fn write_download(&self, download: &Download) {
-        let mut transaction = self.pool.begin().await.unwrap();
+    pub async fn write_download(&self, download: &Download) -> Result<(), DbWriteError> {
+        let mut transaction = self.pool.begin()
+            .await
+            .map_err(|err| DbWriteError::new(format!("Failed being database transaction when writing download: {} id: {}", download.name(), download.id()), err))?;
 
         // We don't crash if foreign keys are violated before the end of the transaction
         sqlx::query("PRAGMA defer_foreign_keys = ON")
             .execute(&mut *transaction)
             .await
-            .unwrap();
+            .map_err(|err| DbWriteError::new(format!("Failed initialize PRAGMA defer_foreign_keys when writing download: {} id: {}", download.name(), download.id()), err))?;
 
         let (status, reason) = download.status().to_db_columns();
         let path_bytes = download.relative_path().to_io_bytes_lossy();
@@ -352,7 +591,7 @@ impl StateManager {
         .bind(reason)
         .execute(&mut *transaction)
         .await
-        .unwrap();
+        .map_err(|err| DbWriteError::new(format!("Failed insert download: {} id: {} to database", download.name(), download.id()), err))?;
         
         // We chunk querys to be 1000 files at a time due to a few reasons:
         // Doing one big query with more files will probably be slower
@@ -398,7 +637,9 @@ impl StateManager {
             );
 
             let query = builder.build();
-            query.execute(&mut *transaction).await.unwrap();
+            query.execute(&mut *transaction)
+                .await
+                .map_err(|err| DbWriteError::new(format!("Failed insert folders for download: {} id: {} to database", download.name(), download.id()), err))?;
         }
 
         
@@ -466,32 +707,40 @@ impl StateManager {
             );
 
             let query = builder.build();
-            query.execute(&mut *transaction).await.unwrap();
+            query.execute(&mut *transaction)
+                .await
+                .map_err(|err| DbWriteError::new(format!("Failed insert files for download: {} id: {} to database", download.name(), download.id()), err))?;
 
             for (_, file) in batch {
                 write_chunk_hashes(&mut transaction, download.id(), file)
                     .await
-                    .unwrap();
+                    .map_err(|err| err.context(format!("Failed insert chunk hashes for download: {} id: {} to database", download.name(), download.id())))?;
             }
         }
 
-        transaction.commit().await.unwrap();
+        transaction.commit()
+            .await
+            .map_err(|err| DbWriteError::new(format!("Failed to commit transaction with queries to insert files, folders, and chunk hashes for download: {} id: {} to database ", download.name(), download.id()), err))?;
+
+        Ok(())
     }
 
-    pub async fn delete_download(&self, id: DownloadId) {  
+    pub async fn delete_download(&self, id: DownloadId) -> Result<(), DbWriteError> {  
         sqlx::query("DELETE FROM downloads WHERE id = ?")
             .bind(*id as i64)
             .execute(&self.pool)
             .await
-            .unwrap();
+            .map_err(|err| DbWriteError::new(format!("Failed to delete download: {}", id), err))?;
+
+        Ok(())
     }
 
-    pub async fn load_download(&self, id: DownloadId) -> Result<Option<Download>, DownloadFetchError> {
+    pub async fn load_download(&self, id: DownloadId) -> Result<Option<Download>, DbReadWriteError> {
         let download_row = sqlx::query_as::<_, DownloadRow>("SELECT * FROM downloads WHERE id = ?")
             .bind(*id as i64)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|err| DownloadFetchError::new("Failed to fetch download row", err))?;
+            .map_err(|err| DbReadError::new(format!("Failed to fetch row for download: {}", id), err))?;
 
         let download_row = match download_row {
             Some(download_row) => download_row,
@@ -503,17 +752,20 @@ impl StateManager {
         ).bind(*id as i64)
             .fetch_all(&self.pool)
             .await
-            .map_err(|err| DownloadFetchError::new("Failed to fetch files rows", err))?;
+            .map_err(|err| DbReadError::new(format!("Failed to fetch file rows for download: {}", id), err))?;
         
         let folders_rows = sqlx::query_as::<_, DownloadFolderRow>(
             "SELECT * FROM download_folders WHERE download_id = ? ORDER BY folder_id ASC"
         ).bind(*id as i64)
             .fetch_all(&self.pool)
             .await
-            .map_err(|err| DownloadFetchError::new("Failed to fetch folders rows", err))?;
+            .map_err(|err| DbReadError::new(format!("Failed to fetch folder rows for download: {}", id), err))?;
 
         
-        let chunk_hashes_map = self.load_download_chunk_hashes_with_recovery(id).await?;
+        let chunk_hashes_map = self.load_download_chunk_hashes_with_recovery(id)
+            .await
+            .map_err(|err| err.context(format!("Failed to fetch chunk hashes for download: {}", id)))?;
+        
         let (files, folders) = reconstruct_file_tree(files_rows, folders_rows, chunk_hashes_map);
 
         let download = Download::from_db(download_row, files, folders);
@@ -521,18 +773,18 @@ impl StateManager {
         Ok(Some(download))
     }
 
-    pub async fn load_downloads(&self) -> Result<IndexMap<DownloadId, Download>, DownloadFetchError> {
+    pub async fn load_downloads(&self) -> Result<IndexMap<DownloadId, Download>, DbReadWriteError> {
         let download_rows = sqlx::query_as::<_, DownloadRow>("SELECT * FROM downloads ORDER BY id ASC")
             .fetch_all(&self.pool)
             .await
-            .map_err(|err| DownloadFetchError::new("Failed to fetch all downloads from db", err))?;
+            .map_err(DbReadError::with_msg("Failed to fetch all downloads from db"))?;
 
         let file_rows = sqlx::query_as::<_, DownloadFileRow>(
             "SELECT * FROM download_files ORDER BY download_id ASC, file_id ASC"
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|err| DownloadFetchError::new("Failed to fetch all download files from db", err))?;
+        .map_err(DbReadError::with_msg("Failed to fetch all download files from db"))?;
 
         let mut files_by_download: HashMap<i64, Vec<DownloadFileRow>> = HashMap::new();
 
@@ -548,7 +800,7 @@ impl StateManager {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|err| DownloadFetchError::new("Failed to fetch all download folders from db", err))?;
+        .map_err(DbReadError::with_msg("Failed to fetch all download folders from db"))?;
 
         let mut folders_by_download: HashMap<i64, Vec<DownloadFolderRow>> = HashMap::new();
 
@@ -568,7 +820,7 @@ impl StateManager {
                 // we should isolate where the corruption came from first.
                 // We treat NoFound as corrupted as there shouldn't be an error in the first place
                 // if the chunk hashes were not found.
-                DbFetchErrorKind::DataCorrupted | DbFetchErrorKind::NotFound => {
+                DbReadErrorKind::DataCorrupted | DbReadErrorKind::NotFound => {
                     warn!(error = &err as &dyn std::error::Error, "Chunk hashes are corrupted, recovery process started.");
                     let mut recovered_chunk_hashes = HashMap::new();
                     
@@ -576,17 +828,16 @@ impl StateManager {
                         let download_id = DownloadId(download_row.id as usize);
 
                         // We request hashes download by download instead of all at once
-                        let download_chunk_hashes = self.load_download_chunk_hashes_with_recovery(download_id).await?;
+                        let download_chunk_hashes = self.load_download_chunk_hashes_with_recovery(download_id)
+                            .await
+                            .map_err(|err| err.context(format!("Failed to fetch chunk hashes for download: {}", download_id)))?;
 
                         recovered_chunk_hashes.insert(download_id, download_chunk_hashes);
                     }
                     
                     recovered_chunk_hashes
                 }
-                DbFetchErrorKind::ConnectionFailed |
-                DbFetchErrorKind::QueryFailed |
-                DbFetchErrorKind::SchemaCorrupted |
-                DbFetchErrorKind::Unexpected => return Err(err.into()),
+                _ => return Err(err.context(format!("Failed to fetch chunk hashes when loading all downloads")).into()),
             }
         };
 
@@ -608,14 +859,14 @@ impl StateManager {
         Ok(downloads)
     }
 
-    async fn load_download_chunk_hashes(&self, download_id: DownloadId) -> Result<HashMap<FileId, Vec<Option<[u8; 16]>>>, ChunkHashLoadError> {
+    async fn load_download_chunk_hashes(&self, download_id: DownloadId) -> Result<HashMap<FileId, Vec<Option<[u8; 16]>>>, DbReadWriteError> {
         let rows = sqlx::query_as::<_, ChunkHashRow>(
             "SELECT * FROM chunk_hashes WHERE download_id = ? ORDER BY file_id, chunk_index"
         )
         .bind(*download_id as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|err| ChunkHashLoadError::new("Failed to query chunk hash rows", err))?;
+        .map_err(|err| DbReadError::new(format!("Failed to fetch chunk hashes for download: {}", download_id), err))?;
 
         let mut map = HashMap::new();
 
@@ -633,7 +884,8 @@ impl StateManager {
                     .bind(row.file_id)           
                     .bind(row.chunk_index)       
                     .execute(&self.pool)      
-                    .await;
+                    .await
+                    .map_err(|err| DbWriteError::new(format!("Failed to delete corrupt chunk hash {} for file {} for download: {}", row.chunk_index, row.file_id, download_id), err))?;
                 
                 continue;
             }
@@ -654,13 +906,13 @@ impl StateManager {
         Ok(map)
     }
 
-    async fn load_chunk_hashes(&self) -> Result<HashMap<DownloadId, HashMap<FileId, Vec<Option<[u8; 16]>>>>, ChunkHashLoadError> {
+    async fn load_chunk_hashes(&self) -> Result<HashMap<DownloadId, HashMap<FileId, Vec<Option<[u8; 16]>>>>, DbReadError> {
         let rows = sqlx::query_as::<_, ChunkHashRow>(
             "SELECT * FROM chunk_hashes ORDER BY download_id ASC, file_id, chunk_index"
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(ChunkHashLoadError::from_sqlx)?;
+        .map_err(DbReadError::with_msg("Failed to fetch chunk all chunk hashes from database"))?;
 
         let mut map = HashMap::new();
 
@@ -671,7 +923,7 @@ impl StateManager {
 
             if row.chunk_index < 0 {
                 warn!("Negative chunk_index found in bulk load: {}", row.chunk_index);
-                return Err(ChunkHashLoadError::new(format!("Corrupted negative chunk_index found in database at index {}", row.chunk_index), sqlx::Error::RowNotFound));
+                return Err(DbReadError::new(format!("Corrupted negative chunk_index found in database at index {}", row.chunk_index), sqlx::Error::RowNotFound));
             }
             
             let index = row.chunk_index as usize;
@@ -692,14 +944,14 @@ impl StateManager {
         Ok(map)
     }
 
-    pub async fn get_all_download_urls(&self) -> Vec<(usize, String)> {
-        sqlx::query_as::<_, (i64, String)>("SELECT id, url FROM downloads")
+    pub async fn get_all_download_urls(&self) -> Result<Vec<(usize, String)>, DbReadError> {
+        Ok(sqlx::query_as::<_, (i64, String)>("SELECT id, url FROM downloads")
             .fetch_all(&self.pool)
             .await
-            .unwrap()
+            .map_err(DbReadError::with_msg("Failed to fetch all download urls from database"))?
             .into_iter()
             .map(|(id, url)| (id as usize, url))
-            .collect()
+            .collect::<Vec<(usize, String)>>())
     }
 
     pub async fn file_exists(&self, download_id: DownloadId, file_id: FileId) -> bool {
@@ -714,17 +966,19 @@ impl StateManager {
         result.unwrap_or(false)
     }
 
-    pub async fn load_app_settings(&self) -> Result<Option<AppSettings>, sqlx::Error> {
+    pub async fn load_app_settings(&self) -> Result<Option<AppSettings>, DbReadError> {
         let Some(global_row) = sqlx::query_as::<_, GlobalSettingsRow>("SELECT global_speed_limit FROM app_settings WHERE id = 1")
             .fetch_optional(&self.pool)
-            .await? 
+            .await
+            .map_err(DbReadError::with_msg("Failed to fetch the global app settings from database"))?
         else {
             return Ok(None);
         };
 
         let host_rows = sqlx::query_as::<_, HostSettingsRow>("SELECT host, speed_limit FROM host_settings")
             .fetch_all(&self.pool)
-            .await?;
+            .await
+            .map_err(DbReadError::with_msg("Failed to fetch the host settings from database"))?;
         
         let joined_download_settings_rows = sqlx::query_as::<_, JoinedDownloadSettingsRow>(
             r#"
@@ -738,18 +992,21 @@ impl StateManager {
             "#
         )
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(DbReadError::with_msg("Failed to fetch the the download and file settings from database"))?;
 
         Ok(Some(AppSettings::from_db(global_row, host_rows, joined_download_settings_rows)))
     }
 
-    pub async fn write_app_settings(&self, app_settings: &AppSettings) {
-        let mut transaction = self.pool.begin().await.unwrap();
+    pub async fn write_app_settings(&self, app_settings: &AppSettings) -> Result<(), DbWriteError> {
+        let mut transaction = self.pool.begin()
+            .await
+            .map_err(DbWriteError::with_msg("Failed to begin transaction to save app settings to database"))?;
 
         sqlx::query("PRAGMA defer_foreign_keys = ON")
             .execute(&mut *transaction)
             .await
-            .unwrap();
+            .map_err(DbWriteError::with_msg("Failed to initialize PRAGMA defer_foreign_keys when trying to save app settings to database"))?;
 
         sqlx::query(r#"
             INSERT INTO app_settings (id, global_speed_limit)
@@ -760,7 +1017,7 @@ impl StateManager {
         .bind(app_settings.global_speed_limit.map(|speed_limit| speed_limit as i64))
         .execute(&mut *transaction)
         .await
-        .unwrap();
+        .map_err(DbWriteError::with_msg("Failed to insert app settings to database"))?;
 
         if !app_settings.host_settings.is_empty() {
             let mut host_builder = QueryBuilder::new(r#"
@@ -778,7 +1035,9 @@ impl StateManager {
             "#);
 
             let host_query = host_builder.build();
-            host_query.execute(&mut *transaction).await.unwrap();
+            host_query.execute(&mut *transaction)
+                .await
+                .map_err(DbWriteError::with_msg("Failed to insert host settings to database"))?;
         }
 
         if !app_settings.download_settings.is_empty() {
@@ -798,7 +1057,9 @@ impl StateManager {
             "#);
 
             let downloads_query = downloads_builder.build();
-            downloads_query.execute(&mut *transaction).await.unwrap();
+            downloads_query.execute(&mut *transaction)
+                .await
+                .map_err(DbWriteError::with_msg("Failed to insert download settings to database"))?;
         }
 
         let has_any_files = app_settings.download_settings.values().any(|d| !d.file_settings.is_empty());
@@ -826,20 +1087,26 @@ impl StateManager {
             "#);
 
             let files_query = files_builder.build();
-            files_query.execute(&mut *transaction).await.unwrap();
+            files_query.execute(&mut *transaction)
+                .await
+                .map_err(DbWriteError::with_msg("Failed to insert file settings to database"))?;
         }
 
-        transaction.commit().await.unwrap();
+        transaction.commit()
+            .await
+            .map_err(DbWriteError::with_msg("Failed to commit transaction to write all app settings to database"))?;
+
+        Ok(())
     }
 
-    async fn load_download_chunk_hashes_with_recovery(&self, download_id: DownloadId) -> Result<HashMap<FileId, Vec<Option<[u8; 16]>>>, ChunkHashLoadError> {
+    async fn load_download_chunk_hashes_with_recovery(&self, download_id: DownloadId) -> Result<HashMap<FileId, Vec<Option<[u8; 16]>>>, DbReadWriteError> {
         match self.load_download_chunk_hashes(download_id).await {
             Ok(download_chunk_hashes) => Ok(download_chunk_hashes),
             Err(err) => match err.kind() {
     
                 // When one fails again with one of these, it means we found which download was failing
                 // and can start looking more deeply into the specific failing chunk hash(es)
-                DbFetchErrorKind::DataCorrupted | DbFetchErrorKind::NotFound => {
+                DbReadWriteErrorKind::Read(DbReadErrorKind::DataCorrupted) | DbReadWriteErrorKind::Read(DbReadErrorKind::NotFound) => {
                     warn!("Isolating corrupted chunk hash for download_id {}", *download_id);
     
                     let mut recovered_chunk_hashes: HashMap<FileId, Vec<Option<[u8; 16]>>> = HashMap::new();
@@ -854,7 +1121,7 @@ impl StateManager {
                     match keys_query {
                             Ok(keys) => {
                                 let mut transaction = self.pool.begin().await.map_err(|err| {
-                                    ChunkHashLoadError::new("Failed to start recovery transaction", err)
+                                    CoreDbError::new(format!("Failed to start transaction for chunk recovery process for download: {}", download_id), err)
                                 })?;
                                 
                                 for key_row in keys {
@@ -874,7 +1141,9 @@ impl StateManager {
                                     .bind(file_id)
                                     .bind(chunk_index)
                                     .execute(&mut *transaction)
-                                    .await;
+                                    .await.map_err(|err| {
+                                        DbWriteError::new(format!("Failed to delete corrupted chunk {} for file {} for download: {}", chunk_index, file_id, download_id), err)
+                                    })?;
                                     
                                     continue;
                                 }
@@ -918,13 +1187,15 @@ impl StateManager {
                                         .bind(file_id)
                                         .bind(chunk_index)
                                         .execute(&mut *transaction)
-                                        .await;
+                                        .await.map_err(|err| {
+                                            DbWriteError::new(format!("Failed to delete corrupted chunk {} for file {} for download: {}", chunk_index, file_id, download_id), err)
+                                        })?;
                                     }
                                 }
                             }
     
                             transaction.commit().await.map_err(|err| {
-                                ChunkHashLoadError::new("Failed to commit recovery transaction", err)
+                                CoreDbError::new(format!("Failed to commit transaction fixing corrupted chunks for download: {}", download_id), err)
                             })?;
                             
                             Ok(recovered_chunk_hashes)
@@ -933,20 +1204,17 @@ impl StateManager {
                             // If we can't even run `SELECT file_id, chunk_index`, the SQLite table is broken.
                             warn!("Wasn't able to get any rows for download {}. Schema is corrupted.", *download_id);
                             
-                            return Err(ChunkHashLoadError::new("Schema corrupted: unable to query chunk hash keys", err).into());
+                            return Err(CoreDbError::new(format!("Tried to fix corrupted chunks for download {}, but failed to fetch any chunk rows", download_id), err).into());
                         }
                     }
                 }
-                DbFetchErrorKind::ConnectionFailed |
-                DbFetchErrorKind::QueryFailed |
-                DbFetchErrorKind::SchemaCorrupted |
-                DbFetchErrorKind::Unexpected => return Err(err.into()),
+                _ => return Err(err.into()),
             }
         }
     }
 }
 
-async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, download_id: DownloadId, file: &FileDownload) -> Result<(), sqlx::Error> {
+async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, download_id: DownloadId, file: &FileDownload) -> Result<(), DbWriteError> {
     let hashes = file.chunk_hashes();
 
     if hashes.is_empty() {
@@ -978,7 +1246,9 @@ async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, dow
                     WHERE chunk_hashes.hash IS DISTINCT FROM excluded.hash
         "#);
 
-        builder.build().execute(&mut **transaction).await?;
+        builder.build().execute(&mut **transaction)
+            .await
+            .map_err(|err| DbWriteError::new(format!("Failed to write chunk hashes for file {} download {}", file.id(), download_id), err))?;
     }
 
     Ok(())

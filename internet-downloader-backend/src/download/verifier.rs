@@ -209,7 +209,7 @@ impl Verifier {
             }
         }
 
-        self.db_manager.write_download(&download).await;
+        self.db_manager.write_download(&download).await.unwrap();
 
         let ui_sender = self.ui_sender.clone();
         let db_manager = self.db_manager.clone();
@@ -325,7 +325,7 @@ impl Verifier {
 
             info!("Finished verification {} in {:?}", download.name(), start_time.elapsed());
 
-            db_manager.write_download(&download).await;
+            db_manager.write_download(&download).await.unwrap();
             let _ = download_manager.send(ManagerCommand::DownloadVerified(download));
         });
 

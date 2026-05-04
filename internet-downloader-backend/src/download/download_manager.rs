@@ -384,7 +384,7 @@ impl DownloadManager {
         let mut url_registry: HashMap<String, DownloadId> = HashMap::new();
         let mut id_registry: HashMap<DownloadId, String> = HashMap::new();
 
-        let existing_downloads = db_manager.get_all_download_urls().await; 
+        let existing_downloads = db_manager.get_all_download_urls().await.unwrap(); 
 
         // Add existing downloads to registry
         for (id, url) in existing_downloads {
@@ -489,7 +489,7 @@ impl DownloadManager {
                                         } 
                                     }
 
-                                    db_manager.delete_download(download_id).await;
+                                    db_manager.delete_download(download_id).await.unwrap();
                                     let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*download_id));
                                 }
 
@@ -521,7 +521,7 @@ impl DownloadManager {
                             ManagerCommand::SetGlobalSpeedLimit(limit) => {
                                 app_settings.set_global_speed_limit(limit);
 
-                                app_context.db_manager.write_app_settings(&app_settings).await;
+                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                                 network_manager.set_global_limit(limit);
                             },
@@ -531,7 +531,7 @@ impl DownloadManager {
                                     .or_default()
                                     .speed_limit = limit;
 
-                                app_context.db_manager.write_app_settings(&app_settings).await;
+                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                                 network_manager.set_host_limit(host, limit);
                             },
@@ -540,7 +540,7 @@ impl DownloadManager {
                                     download_settings.speed_limit = limit;
                                 }
 
-                                app_context.db_manager.write_app_settings(&app_settings).await;
+                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                                 network_manager.set_download_limit(download_id, limit);
                             },
@@ -550,7 +550,7 @@ impl DownloadManager {
                                         let file_settings = download_settings.file_settings.entry(file_id).or_default();
                                         file_settings.speed_limit = limit;
 
-                                        app_context.db_manager.write_app_settings(&app_settings).await;
+                                        app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
                                         network_manager.set_file_limit(download_id, file_id, limit);
                                 } else {
                                     warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
