@@ -410,7 +410,7 @@ impl StateManager {
             .max_connections(5)
             .connect(url)
             .await
-            .map_err(CoreDbError::with_msg("Failed to create intiial conntection pool to SQLite database"))?;
+            .map_err(CoreDbError::with_msg("Failed to create initial conntection pool to SQLite database"))?;
 
         sqlx::query("PRAGMA journal_mode = WAL;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed to initialize PRAGMA journal_mode during initial database connection"))?;
         sqlx::query("PRAGMA synchronous = NORMAL;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed to initialize PRAGMA synchronous during initial database connection"))?;
@@ -550,7 +550,7 @@ impl StateManager {
         .bind(default_settings.global_speed_limit.map(|speed| speed as i64))
         .execute(&self.pool)
         .await
-        .map_err(DbWriteError::with_msg("Failed insert default app settings to databse"))?;
+        .map_err(DbWriteError::with_msg("Failed to insert default app settings to database"))?;
 
         Ok(())
     }
@@ -591,7 +591,7 @@ impl StateManager {
         .bind(reason)
         .execute(&mut *transaction)
         .await
-        .map_err(|err| DbWriteError::new(format!("Failed insert download: {} id: {} to database", download.name(), download.id()), err))?;
+        .map_err(|err| DbWriteError::new(format!("Failed to insert download: {} id: {} to database", download.name(), download.id()), err))?;
         
         // We chunk querys to be 1000 files at a time due to a few reasons:
         // Doing one big query with more files will probably be slower
@@ -639,7 +639,7 @@ impl StateManager {
             let query = builder.build();
             query.execute(&mut *transaction)
                 .await
-                .map_err(|err| DbWriteError::new(format!("Failed insert folders for download: {} id: {} to database", download.name(), download.id()), err))?;
+                .map_err(|err| DbWriteError::new(format!("Failed to insert folders for download: {} id: {} to database", download.name(), download.id()), err))?;
         }
 
         
@@ -709,12 +709,12 @@ impl StateManager {
             let query = builder.build();
             query.execute(&mut *transaction)
                 .await
-                .map_err(|err| DbWriteError::new(format!("Failed insert files for download: {} id: {} to database", download.name(), download.id()), err))?;
+                .map_err(|err| DbWriteError::new(format!("Failed to insert files for download: {} id: {} to database", download.name(), download.id()), err))?;
 
             for (_, file) in batch {
                 write_chunk_hashes(&mut transaction, download.id(), file)
                     .await
-                    .map_err(|err| err.context(format!("Failed insert chunk hashes for download: {} id: {} to database", download.name(), download.id())))?;
+                    .map_err(|err| err.context(format!("Failed to insert chunk hashes for download: {} id: {} to database", download.name(), download.id())))?;
             }
         }
 
