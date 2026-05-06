@@ -1,15 +1,20 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import type { DeltaEvent, DownloadItem, FileItem, FolderItem } from '../downloadTypes';
+import type { FilterCategory } from '@/routes/downloads/components/DownloadsSidebar';
 
 export type DownloadState = {
-    downloads: Record<number, DownloadItem>;
-    downloadIds: number[];
-    selectedId: number | null;
+  downloads: Record<number, DownloadItem>;
+  downloadIds: number[];
+  selectedId: number | null;
 
-    setSnapshot: (items: DownloadItem[]) => void;
-    applyDelta: (delta: DeltaEvent) => void;
-    setSelectedId: (id: number | null) => void;
+  setSnapshot: (items: DownloadItem[]) => void;
+  applyDelta: (delta: DeltaEvent) => void;
+  setSelectedId: (id: number | null) => void;
+
+  // Filters
+  statusFilter: FilterCategory | null;
+  setStatusFilter: (status: FilterCategory | null) => void;
 };
 
 export const useDownloadStore = create<DownloadState>()(
@@ -112,6 +117,13 @@ export const useDownloadStore = create<DownloadState>()(
 
         setSelectedId: (id) => set((state) => {
             state.selectedId = id;
+        }),
+
+        // Filters
+        statusFilter: null,
+        
+        setStatusFilter: (status) => set((state) => {
+          state.statusFilter = status;
         }),
     }))
 );

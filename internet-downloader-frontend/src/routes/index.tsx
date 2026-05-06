@@ -3,7 +3,7 @@ import AppLayout from '../components/AppLayout'
 import { DownloadsTable } from './downloads/components/DownloadsTable'
 import { useDownloadStore } from '@/stores/downloadStore'
 import { useCallback, useEffect, useRef } from 'react'
-import DownloadsSidebar from './downloads/components/DownloadsSidebar'
+import DownloadsSidebar, { STATE_TO_CATEGORY } from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import BottomDetailsPane from './downloads/components/BottomDetailsPane'
@@ -16,7 +16,8 @@ function Index() {
   const setSnapshot = useDownloadStore((store) => store.setSnapshot);
   const applyDelta = useDownloadStore((store) => store.applyDelta);
   const downloadIds = useDownloadStore((store) => store.downloadIds);
-  const { selectedId } = useDownloadStore();
+  const downloadStore = useDownloadStore();
+  const { selectedId, statusFilter } = useDownloadStore();
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -56,6 +57,20 @@ function Index() {
       }
     }, [createEventSource]);
 
+  // Apply filters
+
+  const filteredIds = downloadIds.filter(id => {
+    const download = downloadStore.downloads[id];
+
+    const downloadCategory = STATE_TO_CATEGORY[download.status.state];
+
+    // We either get all downloads that match our current status filter
+    // or otherwise, if the statusFilter is not set, we set this to true
+    const matchesStatus = statusFilter == downloadCategory || statusFilter == null;
+
+    return matchesStatus;
+  });
+
     return <>
       <AppLayout
         topBar={<DownloadsTopBar />} 
@@ -63,7 +78,7 @@ function Index() {
       >
         <ResizablePanelGroup orientation='vertical'>
           <ResizablePanel>
-            <DownloadsTable downloadIds={downloadIds} />
+            <DownloadsTable downloadIds={filteredIds} />
           </ResizablePanel>
           { selectedId &&
             <>
