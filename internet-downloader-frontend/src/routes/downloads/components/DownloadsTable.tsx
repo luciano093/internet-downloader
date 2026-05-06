@@ -22,7 +22,7 @@ const SpeedCellContent = ({ download }: { download: DownloadItem }) => {
     return <span>{formatBytes(speed)}/s</span>;
 };
 
-function formatBytes(bytes: number, decimals = 2) {
+export function formatBytes(bytes: number, decimals = 2) {
     if (bytes === 0) return '0 B';
     if (bytes < 0 || isNaN(bytes)) return '0 B';
 
@@ -42,7 +42,7 @@ function formatBytes(bytes: number, decimals = 2) {
 }
 
     
-function getFolderStats(files: Record<number, FileItem>) {
+export function getFolderStats(files: Record<number, FileItem>) {
     const allFiles = Object.values(files);
 
     if (allFiles.length === 0) {
