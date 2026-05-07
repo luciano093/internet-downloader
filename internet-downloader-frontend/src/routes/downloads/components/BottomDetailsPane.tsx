@@ -3,6 +3,7 @@ import { formatDownloadStatus } from "@/lib/status_utils";
 import { useDownloadStore } from "@/stores/downloadStore";
 import type { ReactNode } from "react";
 import { formatBytes, getFolderStats } from "./DownloadsTable";
+import FileTree from "./FileTree";
 
 function DetailsPaneTab({ value, children }: { value: string, children: ReactNode }) {
     return <>
@@ -64,8 +65,8 @@ export default function BottomDetailsPane() {
                     </div>
 
                 </TabsContent>
-
                 <TabsContent value="files" className="flex-1 p-0 m-0 overflow-auto">
+                  <FileTree download={download} />
                 </TabsContent>
                 
                 <TabsContent value="output" className="flex-1 p-4 m-0 overflow-auto font-mono text-xs text-muted">
