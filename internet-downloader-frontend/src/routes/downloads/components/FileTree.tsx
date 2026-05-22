@@ -3,6 +3,8 @@ import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import { File, Folder, FolderOpen, type LucideIcon } from "lucide-react";
 import { useMemo, useRef, useState, type ReactNode } from "react"
 
+const FILE_TREE_ROW_HEIGHT = 24;
+
 type VirtualDownloadItem = {
   type: "folder" | "file";
   depth: number;
@@ -94,7 +96,7 @@ export default function FileTree({ download }: { download: DownloadItem }) {
   const rowVirtualizer = useVirtualizer({
     count: virtualFileList.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 23.5,
+    estimateSize: () => FILE_TREE_ROW_HEIGHT,
     overscan: 10,
   });
   
