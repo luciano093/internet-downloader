@@ -37,6 +37,7 @@ export default function FileTree({ download }: { download: DownloadItem }) {
   const virtualFileList = useMemo(() => {
     const virtualFileList: VirtualDownloadItem[] = [];
 
+    // Downloads always have exactly one root folder or one root file, never multiple ones
     const rootFolder = Object.values(download.folders).filter(folder => folder.parent_id == null)[0];
     const rootFile = Object.values(download.files).filter(file => file.parent_id == null)[0];
 
