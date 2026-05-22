@@ -2,7 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import AppLayout from '../components/AppLayout'
 import { DownloadsTable } from './downloads/components/DownloadsTable'
 import { useDownloadStore } from '@/stores/downloadStore'
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import DownloadsSidebar, { STATE_TO_CATEGORY } from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
@@ -16,8 +16,9 @@ function Index() {
   const setSnapshot = useDownloadStore((store) => store.setSnapshot);
   const applyDelta = useDownloadStore((store) => store.applyDelta);
   const downloadIds = useDownloadStore((store) => store.downloadIds);
-  const downloadStore = useDownloadStore();
-  const { selectedId, statusFilter } = useDownloadStore();
+  const downloads = useDownloadStore((store) => store.downloads);
+  const selectedId = useDownloadStore((store) => store.selectedId);
+  const statusFilter = useDownloadStore((store) => store.statusFilter);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -58,9 +59,9 @@ function Index() {
     }, [createEventSource]);
 
   // Apply filters
-
-  const filteredIds = downloadIds.filter(id => {
-    const download = downloadStore.downloads[id];
+  
+  const filteredIds = useMemo(() => downloadIds.filter(id => {
+    const download = downloads[id];
 
     const downloadCategory = STATE_TO_CATEGORY[download.status.state];
 
@@ -69,7 +70,7 @@ function Index() {
     const matchesStatus = statusFilter == downloadCategory || statusFilter == null;
 
     return matchesStatus;
-  });
+  }), [downloadIds, downloads, statusFilter]);
 
     return <>
       <AppLayout
