@@ -2,7 +2,7 @@ import { useDownloadStore } from "@/stores/downloadStore";
 import { useMemo } from "react";
 import { STATE_TO_CATEGORY, type FilterCategory } from "../lib/filters";
 
-type counts = {
+type Counts = {
   all: number,
   status: Record<FilterCategory, number>,
 }
@@ -20,7 +20,7 @@ export function useDownloadCounts() {
         completed: 0,
         failed: 0,
       } satisfies Record<FilterCategory, number>,
-    } as counts;
+    } as Counts;
 
     for (const id of downloadIds) {
       const download = downloads[id];
