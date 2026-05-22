@@ -1,7 +1,7 @@
 import type { DownloadItem } from "@/downloadTypes";
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import { File, Folder, FolderOpen, type LucideIcon } from "lucide-react";
-import { useMemo, useRef, useState, type ReactNode } from "react"
+import { Fragment, useMemo, useRef, useState, type ReactNode } from "react"
 
 const FILE_TREE_ROW_HEIGHT = 24;
 
@@ -121,7 +121,7 @@ export default function FileTree({ download }: { download: DownloadItem }) {
 
               const isExpanded = expandedFolders.has(folder.id);
 
-              return <>
+              return <Fragment key={virtualRow.key}>
                 <FileTreeRow
                   virtualRow={virtualRow}
                   depth={item.depth}
@@ -136,15 +136,15 @@ export default function FileTree({ download }: { download: DownloadItem }) {
                   }}>
                   {folder.folder_name}
                 </FileTreeRow>
-              </>
+              </Fragment>
             } else {
               const file = download.files[item.id];
 
-              return <>
+              return <Fragment key={virtualRow.key}>
                 <FileTreeRow virtualRow={virtualRow} depth={item.depth} icon={File}>
                   {file.file_name}
                 </FileTreeRow>
-              </>
+              </Fragment>
             }
           })}
         </div>
