@@ -65,7 +65,7 @@ function Index() {
     const download = downloads[id];
     
     if (!download) {
-      console.warn(`Download ID ${id} not found in downloads record — store may be out of sync`);
+      console.warn(`Download ID ${id} not found in downloads record, store may be out of sync`);
       return false;
     }
 

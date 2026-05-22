@@ -119,6 +119,17 @@ export default function FileTree({ download }: { download: DownloadItem }) {
             if (item.type === "folder") {
               const folder = download.folders[item.id];
 
+              // If we just return null, there will be a gap where the missing item was due to the rowVirtualizer
+              // already having allocated space for the skipped row
+              if (!folder) {
+                console.warn(`Folder ID ${item.id} not found in download record, data may be out of sync`);
+                return <Fragment key={virtualRow.key}>
+                  <FileTreeRow virtualRow={virtualRow} depth={item.depth} icon={File}>
+                    {"Folder was not found"}
+                  </FileTreeRow>
+                </Fragment>
+              }
+
               const isExpanded = expandedFolders.has(folder.id);
 
               return <Fragment key={virtualRow.key}>
@@ -139,6 +150,17 @@ export default function FileTree({ download }: { download: DownloadItem }) {
               </Fragment>
             } else {
               const file = download.files[item.id];
+
+              // If we just return null, there will be a gap where the missing item was due to the rowVirtualizer
+              // already having allocated space for the skipped row
+              if (!file) {
+                console.warn(`File ID ${item.id} not found in download record, data may be out of sync`);
+                return <Fragment key={virtualRow.key}>
+                  <FileTreeRow virtualRow={virtualRow} depth={item.depth} icon={File}>
+                    {"File was not found"}
+                  </FileTreeRow>
+                </Fragment>
+              }
 
               return <Fragment key={virtualRow.key}>
                 <FileTreeRow virtualRow={virtualRow} depth={item.depth} icon={File}>
