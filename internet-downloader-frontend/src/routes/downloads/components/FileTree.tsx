@@ -48,7 +48,7 @@ export default function FileTree({ download }: { download: DownloadItem }) {
         type: "folder",
         depth: 0,
         id: rootFolder.id,
-      } as VirtualDownloadItem);
+      } satisfies VirtualDownloadItem);
     }
 
     if (rootFile) {
@@ -56,7 +56,7 @@ export default function FileTree({ download }: { download: DownloadItem }) {
         type: "file",
         depth: 0,
         id: rootFile.id,
-      } as VirtualDownloadItem);
+      } satisfies VirtualDownloadItem);
     }
 
     while (stack.length > 0) {
