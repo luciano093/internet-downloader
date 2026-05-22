@@ -11,9 +11,11 @@ type VirtualDownloadItem = {
   id: number;
 }
 
-function FileTreeRow({ virtualRow, depth, icon: Icon, onClick, children }: { virtualRow: VirtualItem, depth: number, icon: LucideIcon, onClick?: React.MouseEventHandler<HTMLDivElement>, children?: ReactNode }) {
+function FileTreeRow({ virtualRow, depth, icon: Icon, onActivate, children }: { virtualRow: VirtualItem, depth: number, icon: LucideIcon, onActivate?: () => void, children?: ReactNode }) {
   return <div
-    className="flex items-center gap-2 hover:bg-accent cursor-pointer text-[13px]"
+    className={`flex items-center gap-2 text-[13px] ${onActivate ? "hover:bg-accent cursor-pointer" : ""}`}
+    role={onActivate ? "button" : undefined}
+    tabIndex={onActivate ? 0 : undefined}
     style={{
       position: 'absolute',
       top: 0,
@@ -23,7 +25,13 @@ function FileTreeRow({ virtualRow, depth, icon: Icon, onClick, children }: { vir
       transform: `translateY(${virtualRow.start}px)`,
       paddingLeft: `${(depth * 16) + 8}px`
     }}
-    onClick={onClick}
+    onClick={onActivate}
+    onKeyDown={onActivate ? (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onActivate();
+      }
+    } : undefined}
   >
     <Icon className="w-4 h-4 ml-1 opacity-70" />
     {children}
@@ -137,7 +145,7 @@ export default function FileTree({ download }: { download: DownloadItem }) {
                   virtualRow={virtualRow}
                   depth={item.depth}
                   icon={isExpanded ? FolderOpen : Folder}
-                  onClick={() => {
+                  onActivate={() => {
                     setExpandedFolders((prev) => {
                       const next = new Set(prev);
                       if (next.has(folder.id)) next.delete(folder.id);
