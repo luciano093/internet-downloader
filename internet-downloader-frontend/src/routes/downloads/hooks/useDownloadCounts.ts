@@ -20,7 +20,7 @@ export function useDownloadCounts() {
         completed: 0,
         failed: 0,
       } satisfies Record<FilterCategory, number>,
-    } as Counts;
+    } satisfies Counts;
 
     for (const id of downloadIds) {
       const download = downloads[id];

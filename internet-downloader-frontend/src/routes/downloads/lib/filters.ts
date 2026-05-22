@@ -17,7 +17,7 @@ export const STATE_TO_CATEGORY: Record<DownloadStatus["state"], FilterCategory> 
   not_found: "failed",
 };
 
-export const STATUS_FILTERS: { id: FilterCategory; label: string; icon: LucideIcon }[] =[
+export const STATUS_FILTERS: { id: FilterCategory; label: string; icon: LucideIcon }[] = [
   { id: "active", label: "Downloading", icon: ArrowDownToLine },
   { id: "paused", label: "Paused", icon: Pause },
   { id: "completed", label: "Completed", icon: Check },

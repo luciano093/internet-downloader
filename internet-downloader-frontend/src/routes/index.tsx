@@ -73,7 +73,7 @@ function Index() {
 
     // We either get all downloads that match our current status filter
     // or otherwise, if the statusFilter is not set, we set this to true
-    const matchesStatus = statusFilter == downloadCategory || statusFilter == null;
+    const matchesStatus = statusFilter === downloadCategory || statusFilter == null;
 
     return matchesStatus;
   }), [downloadIds, downloads, statusFilter]);
