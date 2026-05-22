@@ -13,7 +13,6 @@ type VirtualDownloadItem = {
 
 function FileTreeRow({ virtualRow, depth, icon: Icon, onClick, children }: { virtualRow: VirtualItem, depth: number, icon: LucideIcon, onClick?: React.MouseEventHandler<HTMLDivElement>, children?: ReactNode }) {
   return <div
-    key={virtualRow.key}
     className="flex items-center gap-2 hover:bg-accent cursor-pointer text-[13px]"
     style={{
       position: 'absolute',

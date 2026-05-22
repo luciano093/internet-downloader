@@ -27,7 +27,7 @@ export function useDownloadCounts() {
       if (!download) continue;
 
       const category = STATE_TO_CATEGORY[download.status.state];
-      counts.status[category] = (counts.status[category] || 0) + 1;
+      counts.status[category] = (counts.status[category]) + 1;
     }
 
     return counts;
