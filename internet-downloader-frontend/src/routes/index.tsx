@@ -63,6 +63,11 @@ function Index() {
   
   const filteredIds = useMemo(() => downloadIds.filter(id => {
     const download = downloads[id];
+    
+    if (!download) {
+      console.warn(`Download ID ${id} not found in downloads record — store may be out of sync`);
+      return false;
+    }
 
     const downloadCategory = STATE_TO_CATEGORY[download.status.state];
 
