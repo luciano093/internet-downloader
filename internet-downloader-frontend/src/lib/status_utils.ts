@@ -24,7 +24,6 @@ export function formatDownloadFailure(reason: DownloadFailureReason): string {
 }
 
 export function formatDownloadStatus(status: DownloadStatus): string {
-    console.log(status.state);
     switch (status.state) {
         case "queued": return "Queued";
         case "initializing": return "Initializing...";

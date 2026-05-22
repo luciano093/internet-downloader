@@ -2,11 +2,12 @@ import { createFileRoute } from '@tanstack/react-router'
 import AppLayout from '../components/AppLayout'
 import { DownloadsTable } from './downloads/components/DownloadsTable'
 import { useDownloadStore } from '@/stores/downloadStore'
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import BottomDetailsPane from './downloads/components/BottomDetailsPane'
+import { STATE_TO_CATEGORY } from './downloads/lib/filters'
 
 export const Route = createFileRoute('/')({
   component: Index,
@@ -16,7 +17,9 @@ function Index() {
   const setSnapshot = useDownloadStore((store) => store.setSnapshot);
   const applyDelta = useDownloadStore((store) => store.applyDelta);
   const downloadIds = useDownloadStore((store) => store.downloadIds);
-  const { selectedId } = useDownloadStore();
+  const downloads = useDownloadStore((store) => store.downloads);
+  const selectedId = useDownloadStore((store) => store.selectedId);
+  const statusFilter = useDownloadStore((store) => store.statusFilter);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -56,6 +59,25 @@ function Index() {
       }
     }, [createEventSource]);
 
+  // Apply filters
+  
+  const filteredIds = useMemo(() => downloadIds.filter(id => {
+    const download = downloads[id];
+    
+    if (!download) {
+      console.warn(`Download ID ${id} not found in downloads record, store may be out of sync`);
+      return false;
+    }
+
+    const downloadCategory = STATE_TO_CATEGORY[download.status.state];
+
+    // We either get all downloads that match our current status filter
+    // or otherwise, if the statusFilter is not set, we set this to true
+    const matchesStatus = statusFilter === downloadCategory || statusFilter == null;
+
+    return matchesStatus;
+  }), [downloadIds, downloads, statusFilter]);
+
     return <>
       <AppLayout
         topBar={<DownloadsTopBar />} 
@@ -63,7 +85,7 @@ function Index() {
       >
         <ResizablePanelGroup orientation='vertical'>
           <ResizablePanel>
-            <DownloadsTable downloadIds={downloadIds} />
+            <DownloadsTable downloadIds={filteredIds} />
           </ResizablePanel>
           { selectedId &&
             <>

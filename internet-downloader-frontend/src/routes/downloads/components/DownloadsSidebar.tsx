@@ -1,16 +1,34 @@
 import { SidebarGroup } from "@/components/SidebarGroup";
 import { SidebarItem } from "@/components/SidebarItem";
-import { List, ArrowDownToLine, Pause, Check, HardDrive } from "lucide-react";
+import { List, HardDrive } from "lucide-react";
+import { useDownloadCounts } from "../hooks/useDownloadCounts";
+import { useDownloadStore } from "@/stores/downloadStore";
+import { STATUS_FILTERS } from "../lib/filters";
 
 export default function DownloadsSidebar() {
+  const counts = useDownloadCounts();
+  const statusFilter = useDownloadStore(store => store.statusFilter);
+  const setStatusFilter = useDownloadStore(store => store.setStatusFilter);
+  
   return (
     <div className="flex flex-col gap-0">
       {/* STATUS Section */}
       <SidebarGroup title="Status">
-        <SidebarItem icon={List} label="All" badge={4} isActive={true} />
-        <SidebarItem icon={ArrowDownToLine} label="Downloading" badge={2} />
-        <SidebarItem icon={Pause} label="Paused" badge={1} />
-        <SidebarItem icon={Check} label="Completed" badge={1} />
+        {/* The "All" status is hardcoded */}
+        <SidebarItem icon={List} label="All" badge={counts.all} isActive={statusFilter === null} onClick={() => setStatusFilter(null)} />
+
+        {/* Rest of the statuses */}
+        {
+          STATUS_FILTERS.map((filter) => (
+            <SidebarItem 
+              key={filter.id}
+              icon={filter.icon} 
+              label={filter.label} 
+              badge={counts.status[filter.id]} 
+              isActive={statusFilter === filter.id}
+              onClick={() => setStatusFilter(filter.id)}
+            />
+          ))}
       </SidebarGroup>
 
       {/* HOSTS Section */}
