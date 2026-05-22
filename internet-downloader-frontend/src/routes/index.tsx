@@ -3,10 +3,11 @@ import AppLayout from '../components/AppLayout'
 import { DownloadsTable } from './downloads/components/DownloadsTable'
 import { useDownloadStore } from '@/stores/downloadStore'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import DownloadsSidebar, { STATE_TO_CATEGORY } from './downloads/components/DownloadsSidebar'
+import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import BottomDetailsPane from './downloads/components/BottomDetailsPane'
+import { STATE_TO_CATEGORY } from './downloads/lib/filters'
 
 export const Route = createFileRoute('/')({
   component: Index,

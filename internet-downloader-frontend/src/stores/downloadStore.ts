@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import type { DeltaEvent, DownloadItem, FileItem, FolderItem } from '../downloadTypes';
-import type { FilterCategory } from '@/routes/downloads/components/DownloadsSidebar';
+import type { FilterCategory } from '@/routes/downloads/lib/filters';
 
 export type DownloadState = {
   downloads: Record<number, DownloadItem>;

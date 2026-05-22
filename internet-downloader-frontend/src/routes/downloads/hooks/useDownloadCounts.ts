@@ -1,6 +1,6 @@
 import { useDownloadStore } from "@/stores/downloadStore";
 import { useMemo } from "react";
-import { STATE_TO_CATEGORY, type FilterCategory } from "../components/DownloadsSidebar";
+import { STATE_TO_CATEGORY, type FilterCategory } from "../lib/filters";
 
 type counts = {
   all: number,
