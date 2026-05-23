@@ -69,7 +69,7 @@ impl DownloadRegistry {
         self.removed_downloads.remove(id)
     }
 
-    pub fn is_marked_for_removal(&mut self, id: &DownloadId) -> bool {
+    pub fn is_marked_for_removal(&self, id: &DownloadId) -> bool {
         self.removed_downloads.contains_key(&id)
     }
     
