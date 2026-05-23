@@ -1,8 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
@@ -20,6 +18,7 @@ use crate::context::AppContext;
 use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, FileId, FolderId};
 use crate::download::status::{DownloadStatus, FileStatus};
 use crate::download::verifier::VerifierHandle;
+use crate::download_registry::DownloadRegistry;
 use crate::download_writer_manager::DownloadWriterManager;
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::utils::file_utils::force_delete_file;
@@ -27,6 +26,7 @@ use crate::network_manager;
 use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::db::state_manager::StateManager;
 use crate::utils::network_utils::BandwidthLimiter;
+use crate::verification_tracker::VerificationTracker;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum DownloadUpdate {
@@ -177,150 +177,6 @@ impl LimiterRegistry {
 
     pub fn downloads(&self) -> &DashMap<DownloadId, Weak<DownloadLimiterGroup>> {
         &self.downloads
-    }
-}
-pub struct DownloadRegistry {
-    url_map: HashMap<String, DownloadId>,
-    id_map: HashMap<DownloadId, String>,
-    next_id: AtomicUsize,
-    removed_downloads: HashMap<DownloadId, bool>,
-}
-
-impl DownloadRegistry {
-    pub fn new() -> Self {
-        Self {
-            url_map: HashMap::new(),
-            id_map: HashMap::new(),
-            next_id: AtomicUsize::new(0),
-            removed_downloads: HashMap::new(),
-        }
-    }
-
-    pub async fn from_db(db_manager: &StateManager) -> Self {
-        let existing_urls = db_manager.get_all_download_urls().await.unwrap();
-        let next_id = existing_urls.iter().map(|(id, _url)| id).max().copied().map(|max_id| max_id + 1).unwrap_or(0);
-
-        let mut registry = Self { 
-            url_map: HashMap::new(),
-            id_map: HashMap::new(),
-            next_id: AtomicUsize::new(next_id),
-            removed_downloads: HashMap::new(),
-        };
-
-        for (id, url) in existing_urls {
-            registry.url_map.insert(url.clone(), DownloadId(id));
-            registry.id_map.insert(DownloadId(id), url);
-        }
-
-        registry
-    }
-
-    pub fn add_downloads(&mut self, downloads: &IndexMap<DownloadId, Download>) {
-        for (id, download) in downloads {
-            self.url_map.insert(download.url().to_string(), *id);
-            self.id_map.insert(*id, download.url().to_string());
-        }
-    }
-    
-    pub fn register(&mut self, url: String) -> DownloadId {
-        let id = self.next_id();
-        self.url_map.insert(url.clone(), id);
-        self.id_map.insert(id, url);
-
-        id
-    }
-    
-    pub fn mark_removed(&mut self, id: DownloadId, from_disk: bool) {
-        self.removed_downloads.insert(id, from_disk);
-    }
-    
-    pub fn finalize_removed(&mut self, id: &DownloadId) -> Option<bool> {
-        if let Some(url) = self.id_map.remove(id) {
-            self.url_map.remove(&url);
-        }
-
-        self.removed_downloads.remove(id)
-    }
-
-    pub fn is_marked_for_removal(&mut self, id: &DownloadId) -> bool {
-        self.removed_downloads.contains_key(&id)
-    }
-    
-    pub fn next_id(&self) -> DownloadId {
-        DownloadId(self.next_id.fetch_add(1, Ordering::Relaxed))
-    }
-
-    pub fn url_map(&self) -> &HashMap<String, DownloadId> {
-        &self.url_map
-    }
-
-    pub fn contains_url(&self, url: &str) -> bool {
-        self.url_map.contains_key(url)
-    }
-    
-    pub fn lookup_url(&self, download_id: &DownloadId) -> Option<&String> {
-        self.id_map.get(download_id)
-    }
-}
-
-// These two separate sets are needed to track two things:
-// is the current download being handled by the verify manager? and
-// does the current download already went through the verification process?
-// Separating these two allows us to implement pausing verification by just dropping the handle,
-// while allowing us to not have to save Verifying as a state to the db, which would be unnecessary
-// as no download loaded at the start of the program should be in a Veriying state.
-pub struct VerificationTracker {
-    verifying: HashSet<DownloadId>,
-    needs_verification: HashSet<DownloadId>,
-    verifier: VerifierHandle,
-}
-
-impl VerificationTracker {
-    pub async fn from_downloads(verifier: VerifierHandle, downloads: IndexMap<DownloadId, Download>) -> Self {
-        let mut verification_tracker = Self {
-            verifying: HashSet::new(),
-            needs_verification: HashSet::new(),
-            verifier,
-        };
-        
-        for &download_id in downloads.keys() {
-            verification_tracker.verifying.insert(download_id);
-            verification_tracker.needs_verification.insert(download_id);
-        }
-
-        let _ = verification_tracker.verifier.verify_downloads(downloads).await;
-        
-        verification_tracker
-    }
-
-    pub async fn verify(&mut self, download: Download) {
-         self.verifying.insert(download.id());
-         let _ = self.verifier.verify_download(download).await;
-    }
-
-    pub async fn cancel(&mut self, download_id: DownloadId) {
-        // Cancel the verification if there is any
-        if self.is_verifying(&download_id) {
-            let _ = self.verifier.cancel_verification(download_id).await;
-        }
-    }
-    
-    pub async fn pause(&mut self, download_id: DownloadId) {
-        self.verifying.remove(&download_id);
-        let _ = self.verifier.pause_verification(download_id).await;
-    }
-
-    pub fn remove(&mut self, download_id: &DownloadId) {
-        self.verifying.remove(&download_id);
-        self.needs_verification.remove(&download_id);
-    }
-
-    pub fn needs_verification(&self, download_id: &DownloadId) -> bool {
-        self.needs_verification.contains(&download_id)
-    }
-     
-    pub fn is_verifying(&mut self, download_id: &DownloadId) -> bool {
-         self.verifying.contains(download_id)
     }
 }
 

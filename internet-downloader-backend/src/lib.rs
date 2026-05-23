@@ -11,3 +11,5 @@ pub mod plugin_registry;
 pub mod context;
 pub mod utils;
 pub mod download_writer_manager;
+pub mod download_registry;
+pub mod verification_tracker;
