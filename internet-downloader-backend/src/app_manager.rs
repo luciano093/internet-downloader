@@ -263,10 +263,70 @@ impl DownloadRegistry {
     }
 }
 
+// These two separate sets are needed to track two things:
+// is the current download being handled by the verify manager? and
+// does the current download already went through the verification process?
+// Separating these two allows us to implement pausing verification by just dropping the handle,
+// while allowing us to not have to save Verifying as a state to the db, which would be unnecessary
+// as no download loaded at the start of the program should be in a Veriying state.
+pub struct VerificationTracker {
+    verifying: HashSet<DownloadId>,
+    needs_verification: HashSet<DownloadId>,
+    verifier: VerifierHandle,
+}
+
+impl VerificationTracker {
+    pub async fn from_downloads(verifier: VerifierHandle, downloads: IndexMap<DownloadId, Download>) -> Self {
+        let mut verification_tracker = Self {
+            verifying: HashSet::new(),
+            needs_verification: HashSet::new(),
+            verifier,
+        };
+        
+        for &download_id in downloads.keys() {
+            verification_tracker.verifying.insert(download_id);
+            verification_tracker.needs_verification.insert(download_id);
+        }
+
+        let _ = verification_tracker.verifier.verify_downloads(downloads).await;
+        
+        verification_tracker
+    }
+
+    pub async fn verify(&mut self, download: Download) {
+         self.verifying.insert(download.id());
+         let _ = self.verifier.verify_download(download).await;
+    }
+
+    pub async fn cancel(&mut self, download_id: DownloadId) {
+        // Cancel the verification if there is any
+        if self.is_verifying(&download_id) {
+            let _ = self.verifier.cancel_verification(download_id).await;
+        }
+    }
+    
+    pub async fn pause(&mut self, download_id: DownloadId) {
+        self.verifying.remove(&download_id);
+        let _ = self.verifier.pause_verification(download_id).await;
+    }
+
+    pub fn remove(&mut self, download_id: &DownloadId) {
+        self.verifying.remove(&download_id);
+        self.needs_verification.remove(&download_id);
+    }
+
+    pub fn needs_verification(&self, download_id: &DownloadId) -> bool {
+        self.needs_verification.contains(&download_id)
+    }
+     
+    pub fn is_verifying(&mut self, download_id: &DownloadId) -> bool {
+         self.verifying.contains(download_id)
+    }
+}
+
 #[derive(Debug)]
 pub struct AppManager {
     db_manager: StateManager,
-    unprocessed_downloads: IndexMap<DownloadId, Download>,
     ui_handle: UiManagerHandle,
     sender: mpsc::Sender<AppManagerCommand>,
     receiver: mpsc::Receiver<AppManagerCommand>,
@@ -276,7 +336,6 @@ impl AppManager {
     pub fn new(db_manager: StateManager, sender: mpsc::Sender<AppManagerCommand>, receiver: mpsc::Receiver<AppManagerCommand>, ui_handle: UiManagerHandle) -> Self {
         AppManager {
             db_manager,
-            unprocessed_downloads: IndexMap::new(),
             ui_handle,
             sender,
             receiver
@@ -285,7 +344,10 @@ impl AppManager {
 
     pub async fn run(mut self) {
         // Load previous state
-        self.load_downloads_from_db().await;
+        let restored_downloads = self.db_manager.load_downloads().await.unwrap();
+
+        debug!(count = ?restored_downloads.len(), "Restored download from disk");
+        trace!("Detailed download restore data:\n{:#?}", restored_downloads);
     
         // Clone shared resources
         let ui_event_sender = self.ui_handle.get_event_sender();
@@ -312,28 +374,11 @@ impl AppManager {
 
         // Download registry for deduplication purposes
         let mut download_registry = DownloadRegistry::from_db(&db_manager).await;
-        
-        let unprocessed_downloads: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
-
-        download_registry.add_downloads(&unprocessed_downloads);
-
-        // These two separate sets are needed to track two things:
-        // is the current download being handled by the verify manager? and
-        // does the current download already went through the verification process?
-        // Separating these two allows us to implement pausing verification by just dropping the handle,
-        // while allowing us to not have to save Verifying as a state to the db, which would be unnecessary
-        // as no download loaded at the start of the program should be in a Veriying state.
-        let mut verifying_downloads = HashSet::new();
-        let mut needs_verification = HashSet::new(); 
+        download_registry.add_downloads(&restored_downloads);
 
         let verifier = VerifierHandle::spawn(self.sender.clone(), ui_event_sender.clone(), db_manager.clone());
 
-        for &download_id in unprocessed_downloads.keys() {
-            verifying_downloads.insert(download_id);
-            needs_verification.insert(download_id);
-        }
-
-        let _ = verifier.verify_downloads(unprocessed_downloads).await;
+        let mut verification_tracker = VerificationTracker::from_downloads(verifier, restored_downloads).await;
 
         loop {
             tokio::select! {
@@ -356,8 +401,8 @@ impl AppManager {
                             download_registry.mark_removed(id, from_disk);
 
                             // Cancel the verification if there is any
-                            if verifying_downloads.contains(&id) {
-                                let _ = verifier.cancel_verification(id).await;
+                            if verification_tracker.is_verifying(&id) {
+                                let _ = verification_tracker.cancel(id).await;
                             }
                             // If it is running. Send Cancel signal.
                             else if let Some(url) = download_registry.lookup_url(&id) {
@@ -371,8 +416,7 @@ impl AppManager {
                             } 
                         },
                         AppManagerCommand::CleanUpDownload(download_id) => {
-                            verifying_downloads.remove(&download_id);
-                            needs_verification.remove(&download_id);
+                            verification_tracker.remove(&download_id);
                             
                             // Finally, we clean it up from the set
                             // Remove from registry now that we know the download is 100% removed
@@ -404,8 +448,7 @@ impl AppManager {
                         },
                         AppManagerCommand::PauseDownload(download_id) => {
                             // Tell the Verifier to cancel if it's currently hashing
-                            verifying_downloads.remove(&download_id);
-                            let _ = verifier.pause_verification(download_id).await;
+                            verification_tracker.pause(download_id).await;
 
                             // Otherwise the download is currently being managed by a host
                             if let Some(url) = download_registry.lookup_url(&download_id) {
@@ -413,9 +456,8 @@ impl AppManager {
                             }
                         },
                         AppManagerCommand::ResumeDownload(download_id) => if let Ok(Some(download)) = db_manager.load_download(download_id).await {
-                            if needs_verification.contains(&download_id) {
-                                verifying_downloads.insert(download_id);
-                                let _ = verifier.verify_download(download).await;
+                            if verification_tracker.needs_verification(&download_id) {
+                                verification_tracker.verify(download).await;
                             } else {
                                 let download_settings = app_settings.get_download_settings(download_id);
 
@@ -466,12 +508,12 @@ impl AppManager {
                         AppManagerCommand::DownloadVerified(download) => {
                             let download_id = download.id();
 
-                            if !verifying_downloads.remove(&download_id) || download_registry.is_marked_for_removal(&download_id) {
+                            if !verification_tracker.is_verifying(&download_id) || download_registry.is_marked_for_removal(&download_id) {
                                 debug!("Ignoring stale verification completion for {}", download_id);
                                 continue;
                             }
                             
-                            needs_verification.remove(&download_id); 
+                            verification_tracker.remove(&download_id); 
 
                             let download_settings = app_settings.get_download_settings(download_id);
                             network_manager.resume_download(download, download_settings);
@@ -479,17 +521,6 @@ impl AppManager {
                     }
                 }
             }
-        }
-    }
-
-    async fn load_downloads_from_db(&mut self) {
-        let restored_downloads = self.db_manager.load_downloads().await.unwrap();
-
-        debug!(count = ?restored_downloads.len(), "Restored download from disk");
-        trace!("Detailed download restore data:\n{:#?}", restored_downloads);
-
-        for (id, download) in restored_downloads {
-            self.unprocessed_downloads.insert(id, download.clone());
         }
     }
 }
