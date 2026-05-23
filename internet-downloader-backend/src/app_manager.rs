@@ -18,20 +18,6 @@ use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::db::state_manager::StateManager;
 use crate::verification_tracker::VerificationTracker;
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
-pub enum DownloadReturnStatus {
-    Completed,
-    Canceled,
-    Paused,
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
-pub enum DownloadCommand {
-    Pause,
-    Resume,
-    Cancel,
-}
-
 // To maybe add in the future:
 // Skip a file in a download
 // Set download priority
