@@ -15,8 +15,7 @@ use url::Host;
 use crate::app_settings::{AppSettings, DownloadSettings};
 use crate::client_state_manager::{FrontendMessage, UiManagerHandle, get_snapshot};
 use crate::context::AppContext;
-use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, FileId, FolderId};
-use crate::download::status::{DownloadStatus, FileStatus};
+use crate::download::items::{Download, DownloadId, DownloadItem, FileId};
 use crate::download::verifier::VerifierHandle;
 use crate::download_registry::DownloadRegistry;
 use crate::download_writer_manager::DownloadWriterManager;
@@ -27,46 +26,6 @@ use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::db::state_manager::StateManager;
 use crate::utils::network_utils::BandwidthLimiter;
 use crate::verification_tracker::VerificationTracker;
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum DownloadUpdate {
-    StatusChanged { id: DownloadId, status: DownloadStatus },
-    OperationChanged { id: DownloadId, operation: Option<ActiveOperation> },
-    ItemUpdated { id: DownloadId, item_update: ItemUpdate }, 
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum ItemUpdate {
-    File(FileUpdate),
-    Folder(FolderUpdate),
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum FileUpdate {
-    Status { id: FileId, status: FileStatus },
-    Operation { id: FileId, operation: Option<ActiveOperation> },
-    Hash { id: FileId, hash: u128 },
-    FileSize { id: FileId, len: u64 },
-    BytesDownloaded { id: FileId, len: u64 },
-}
-
-impl FileUpdate {
-    pub fn id(&self) -> FileId {
-        match self {
-            FileUpdate::Status { id, .. } => *id,
-            FileUpdate::Operation { id, .. } => *id,
-            FileUpdate::Hash { id, .. } => *id,
-            FileUpdate::FileSize { id, .. } => *id,
-            FileUpdate::BytesDownloaded { id, .. } => *id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum FolderUpdate {
-    Status { id: FolderId, status: DownloadStatus },
-    Operation { id: FolderId, operation: Option<ActiveOperation> },
-}
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
 pub enum DownloadReturnStatus {

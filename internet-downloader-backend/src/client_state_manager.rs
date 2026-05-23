@@ -12,9 +12,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::app_manager::FileSize;
-use crate::app_manager::DownloadUpdate;
-use crate::app_manager::FolderUpdate;
-use crate::app_manager::ItemUpdate;
 use crate::download::items::ActiveOperation;
 use crate::download::items::DownloadId;
 use crate::download::items::DownloadItem;
@@ -22,10 +19,49 @@ use crate::download::items::FileId;
 use crate::download::items::FolderDownload;
 use crate::download::items::FolderId;
 use crate::download::items::Download;
-use crate::app_manager::FileUpdate;
 use crate::download::status::DownloadStatus;
 use crate::download::status::FileStatus;
 use crate::db::state_manager::StateManager;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum DownloadUpdate {
+    StatusChanged { id: DownloadId, status: DownloadStatus },
+    OperationChanged { id: DownloadId, operation: Option<ActiveOperation> },
+    ItemUpdated { id: DownloadId, item_update: ItemUpdate }, 
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum ItemUpdate {
+    File(FileUpdate),
+    Folder(FolderUpdate),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum FileUpdate {
+    Status { id: FileId, status: FileStatus },
+    Operation { id: FileId, operation: Option<ActiveOperation> },
+    Hash { id: FileId, hash: u128 },
+    FileSize { id: FileId, len: u64 },
+    BytesDownloaded { id: FileId, len: u64 },
+}
+
+impl FileUpdate {
+    pub fn id(&self) -> FileId {
+        match self {
+            FileUpdate::Status { id, .. } => *id,
+            FileUpdate::Operation { id, .. } => *id,
+            FileUpdate::Hash { id, .. } => *id,
+            FileUpdate::FileSize { id, .. } => *id,
+            FileUpdate::BytesDownloaded { id, .. } => *id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum FolderUpdate {
+    Status { id: FolderId, status: DownloadStatus },
+    Operation { id: FolderId, operation: Option<ActiveOperation> },
+}
 
 pub enum UiStateEvent {
     AddDownload(Download),
