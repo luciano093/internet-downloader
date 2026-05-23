@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 
-use crate::{download::{items::{Download, FileDownload, FileId, FolderDownload, FolderId}, status::StateBucketCounters}, download_task::HASH_CHUNK_SIZE};
+use crate::download::{items::{Download, FileDownload, FileId, FolderDownload, FolderId}, status::StateBucketCounters, supervisor::HASH_CHUNK_SIZE};
 
 #[derive(sqlx::FromRow)]
 pub struct DownloadRow {

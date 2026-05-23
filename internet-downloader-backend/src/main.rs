@@ -1,7 +1,6 @@
 use std::convert::Infallible;
 use std::time::Duration;
-use std::{process::exit, sync::Arc};
-
+use std::process::exit;
 
 use axum::Json;
 use axum::extract::Path;
@@ -9,16 +8,16 @@ use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, put};
+use internet_downloader_backend::app::manager::AppManagerHandle;
 use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
-use internet_downloader_backend::download::DownloadManager;
 
 use internet_downloader_backend::download::items::{DownloadId, FileId};
 use reqwest::Method;
 use serde::Deserialize;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
-use tokio::{fs::File, signal, sync::Mutex};
+use tokio::{fs::File, signal};
 use axum::{extract::State, routing::post, Router};
 use tower_http::cors::{self, Any, CorsLayer};
 use tracing::{debug, info};
@@ -60,13 +59,7 @@ async fn main() {
     let state_manager = StateManager::new("mydb.sqlite3").await.unwrap();
     state_manager.create_tables().await.unwrap();
 
-    let mut download_manager = DownloadManager::new(state_manager);
-
-    download_manager.load_state().await;
-
-    download_manager.start_processing().await;
-
-    let download_manager = Arc::new(Mutex::new(download_manager));
+    let app_manager = AppManagerHandle::new(state_manager);
 
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
@@ -90,7 +83,7 @@ async fn main() {
             .route("/limit", put(limit_host))
         )
         .route("/limit", put(limit_network))
-        .with_state(download_manager)
+        .with_state(app_manager)
         .layer(cors);
 
     let listener = tokio::net::TcpListener::bind("localhost:3211").await.unwrap();
@@ -115,21 +108,20 @@ struct DownloadSettings {
 }
 
 #[axum::debug_handler] 
-async fn add_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Json(json): Json<DownloadSettings>) -> impl IntoResponse {
+async fn add_download(State(manager): State<AppManagerHandle>, Json(json): Json<DownloadSettings>) -> impl IntoResponse {
     debug!(url = %json.url, "Received download query");
 
-    match manager.lock().await.queue_download(json.url).await {
+    match manager.queue_download(json.url).await {
         Ok(_) => StatusCode::OK.into_response(),
-        Err(()) => {
+        Err(_) => {
             StatusCode::BAD_REQUEST.into_response()
         },
     }
 }
 
-async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> impl IntoResponse  {
-    let manager_guard = manager.lock().await;
-    let receiver = manager_guard.download_subscribe();
-    let downloads = manager_guard.get_snapshot().await;
+async fn download_stream(State(manager): State<AppManagerHandle>) -> impl IntoResponse  {
+    let receiver = manager.subscribe();
+    let downloads = manager.get_snapshot().await;
 
     let snapshot: Vec<DownloadSnapshot> = downloads
         .into_iter()
@@ -137,8 +129,6 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
             DownloadSnapshot::from(download)
         })
         .collect();
-
-    drop(manager_guard);
 
     let stream   = async_stream::stream! {
         let snapshot_json = serde_json::to_string(&snapshot).unwrap();
@@ -165,7 +155,7 @@ async fn download_stream(State(manager): State<Arc<Mutex<DownloadManager>>>) -> 
                     }
                 }
                 _ = snapshot_interval.tick() => {
-                    let downloads = manager.lock().await.get_snapshot().await;
+                    let downloads = manager.get_snapshot().await;
                     let snapshot: Vec<DownloadSnapshot> = downloads
                         .into_iter()
                         .map(|(_id, download)| DownloadSnapshot::from(download))
@@ -194,24 +184,24 @@ struct DeleteDownloadSettings {
 }
 
 #[axum::debug_handler] 
-async fn delete_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Path(path): Path<DownloadPath>, Json(json): Json<DeleteDownloadSettings>) -> impl IntoResponse {
+async fn delete_download(State(manager): State<AppManagerHandle>, Path(path): Path<DownloadPath>, Json(json): Json<DeleteDownloadSettings>) -> impl IntoResponse {
     debug!(url = %path.download_id, from_disk = json.from_disk.unwrap_or(false), "Received download deletion query");
 
-    manager.lock().await.remove_download(path.download_id, json.from_disk.unwrap_or(false)).await;
+    let _ = manager.remove_download(path.download_id, json.from_disk.unwrap_or(false)).await;
 }
 
 #[axum::debug_handler] 
-async fn pause_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Path(path): Path<DownloadPath>) -> impl IntoResponse {
+async fn pause_download(State(manager): State<AppManagerHandle>, Path(path): Path<DownloadPath>) -> impl IntoResponse {
     debug!(download_id = %path.download_id, "Received download pause query");
 
-    manager.lock().await.pause_download(path.download_id).await;
+    let _ = manager.pause_download(path.download_id).await;
 }
 
 #[axum::debug_handler] 
-async fn resume_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Path(path): Path<DownloadPath>) -> impl IntoResponse {
+async fn resume_download(State(manager): State<AppManagerHandle>, Path(path): Path<DownloadPath>) -> impl IntoResponse {
     debug!(download_id = %path.download_id, "Received download pause query");
 
-    manager.lock().await.resume_download(path.download_id).await;
+    let _ = manager.resume_download(path.download_id).await;
 }
 
 #[derive(Deserialize, Debug)]
@@ -220,10 +210,10 @@ struct LimitNetworkSettings {
 }
 
 #[axum::debug_handler] 
-async fn limit_network(State(manager): State<Arc<Mutex<DownloadManager>>>, Json(json): Json<LimitNetworkSettings>) -> impl IntoResponse {
+async fn limit_network(State(manager): State<AppManagerHandle>, Json(json): Json<LimitNetworkSettings>) -> impl IntoResponse {
     debug!(bandwidth_limit = ?json.bandwidth_limit, "Received network limit");
 
-    manager.lock().await.set_global_limit(json.bandwidth_limit);
+    let _ = manager.set_global_limit(json.bandwidth_limit).await;
 }
 
 #[derive(Deserialize, Debug)]
@@ -233,10 +223,10 @@ struct LimitHostSettings {
 }
 
 #[axum::debug_handler] 
-async fn limit_host(State(manager): State<Arc<Mutex<DownloadManager>>>, Json(json): Json<LimitHostSettings>) -> impl IntoResponse {
+async fn limit_host(State(manager): State<AppManagerHandle>, Json(json): Json<LimitHostSettings>) -> impl IntoResponse {
     debug!(bandwidth_limit = ?json.bandwidth_limit, host = json.host, "Received network limit");
 
-    manager.lock().await.set_host_limit(json.host, json.bandwidth_limit);
+    let _ = manager.set_host_limit(json.host, json.bandwidth_limit).await;
 }
 
 #[derive(Deserialize, Debug)]
@@ -245,10 +235,10 @@ struct LimitDownloadSettings {
 }
 
 #[axum::debug_handler] 
-async fn limit_download(State(manager): State<Arc<Mutex<DownloadManager>>>, Path(path): Path<DownloadPath>, Json(json): Json<LimitDownloadSettings>) -> impl IntoResponse {
+async fn limit_download(State(manager): State<AppManagerHandle>, Path(path): Path<DownloadPath>, Json(json): Json<LimitDownloadSettings>) -> impl IntoResponse {
     debug!(bandwidth_limit = ?json.bandwidth_limit, download_id = *path.download_id, "Received network limit");
 
-    manager.lock().await.set_download_limit(path.download_id, json.bandwidth_limit);
+    let _ = manager.set_download_limit(path.download_id, json.bandwidth_limit).await;
 }
 
 #[derive(Deserialize, Debug)]
@@ -263,8 +253,8 @@ struct LimitFileSettings {
 }
 
 #[axum::debug_handler] 
-async fn limit_file(State(manager): State<Arc<Mutex<DownloadManager>>>, Path(path): Path<FilePath>, Json(json): Json<LimitFileSettings>) -> impl IntoResponse {
+async fn limit_file(State(manager): State<AppManagerHandle>, Path(path): Path<FilePath>, Json(json): Json<LimitFileSettings>) -> impl IntoResponse {
     debug!(bandwidth_limit = ?json.bandwidth_limit, download = *path.download_id, file_id = *path.file_id, "Received network limit");
 
-    manager.lock().await.set_file_limit(path.download_id, path.file_id, json.bandwidth_limit);
+    let _ = manager.set_file_limit(path.download_id, path.file_id, json.bandwidth_limit).await;
 }

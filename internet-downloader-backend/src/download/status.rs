@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use strum::EnumCount;
 use strum_macros::{EnumCount, EnumDiscriminants, EnumString, IntoStaticStr};
 
-use crate::download::{DownloadFailureReason, FileFailureReason};
+use crate::download::error::{DownloadFailureReason, FileFailureReason};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]
 #[serde(rename_all = "snake_case")]

@@ -2,7 +2,6 @@ pub mod hosts;
 pub mod status;
 pub mod items;
 pub mod verifier;
-
-mod download_manager;
-
-pub use download_manager::*;
+pub mod error;
+pub mod supervisor;
+pub mod writer;

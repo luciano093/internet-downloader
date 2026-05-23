@@ -6,7 +6,7 @@ use sqlx::{QueryBuilder, Row, SqlitePool, Transaction, sqlite::SqlitePoolOptions
 use thiserror::Error;
 use tracing::warn;
 
-use crate::{db::rows::{ChunkHashRow, DownloadFileRow, DownloadFolderRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{AppSettings, FileSize, items::{Download, DownloadId, DownloadItem, FileDownload, FileId, FolderDownload, FolderId}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
+use crate::{app::settings::AppSettings, db::rows::{ChunkHashRow, DownloadFileRow, DownloadFolderRow, DownloadRow, GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow}, download::{items::{Download, DownloadId, DownloadItem, FileDownload, FileId, FileSize, FolderDownload, FolderId}, status::{DownloadStatus, FileStatus, StateBucketCounters}}};
 
 #[derive(Debug, Error)]
 #[error("{message}")]

@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use url::Host;
 
-use crate::{client_state_manager::UiStateEvent, context::AppContext, download::{DownloadLimiterGroup, DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand, items::{ChangedItemStatus, Download, DownloadId}, status::DownloadStatus}, download_task::DownloadSupervisor, utils::network_utils::BandwidthLimiter};
+use crate::{app::{limiters::DownloadLimiterGroup, manager::AppManagerCommand}, client_state_manager::{DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, UiStateEvent}, context::AppContext, download::{items::{ChangedItemStatus, Download, DownloadId}, status::DownloadStatus, supervisor::DownloadSupervisor}, utils::network_utils::BandwidthLimiter};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,
@@ -170,7 +170,7 @@ impl HostManager {
                             self.distribute_permits().await
                         },
                         HostMessage::DownloadFinished(download_id) => {
-                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(crate::download::DownloadUpdate::StatusChanged { id: download_id, status: DownloadStatus::Completed }));
+                            let _ = self.app_context.ui_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::StatusChanged { id: download_id, status: DownloadStatus::Completed }));
                             self.active_downloads.remove(&download_id);
         
                             if let Some(pos) = self.permit_queue.iter().position(|x| *x == download_id) {
@@ -201,7 +201,7 @@ impl HostManager {
                             }
 
                             if let Some(mut supervisor) = self.active_downloads.remove(&download_id) {
-                                let download_manager = self.app_context.download_manager.clone();
+                                let app_manager = self.app_context.app_manager.clone();
                                 tokio::spawn(async move {
                                     if let Some(handle) = supervisor.handle_mut() { 
                                         handle.abort();
@@ -210,10 +210,10 @@ impl HostManager {
                                         drop(supervisor);
                                     }
 
-                                    let _ = download_manager.send(ManagerCommand::CleanUpDownload(download_id));
+                                    let _ = app_manager.send(AppManagerCommand::CleanUpDownload(download_id));
                                 });
                             } else {
-                                let _ = self.app_context.download_manager.send(ManagerCommand::CleanUpDownload(download_id));
+                                let _ = self.app_context.app_manager.send(AppManagerCommand::CleanUpDownload(download_id));
                             }
                         },
                         HostMessage::PauseDownload(download_id) => {
