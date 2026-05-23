@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinError;
 use tracing::info;
 
-use crate::shared_file_map::SharedFileMap;
+use crate::utils::shared_file_map::SharedFileMap;
 
 #[derive(Debug)]
 pub enum FileInitializationError {

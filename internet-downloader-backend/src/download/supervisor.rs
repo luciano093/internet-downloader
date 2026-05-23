@@ -18,16 +18,16 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::app::limiters::DownloadLimiterGroup;
+use crate::app::manager::AppManagerCommand;
 use crate::client_state_manager::{DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, UiStateEvent};
 use crate::context::AppContext;
 use crate::download::error::FileFailureReason;
+use crate::download::hosts::manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::download::items::{ChangedItemStatus, Download, DownloadId, DownloadItem, DownloadTypeRef, FileId, FileSize};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket};
-use crate::app_manager::AppManagerCommand;
-use crate::download_writer_manager::FileChunk;
-use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
-use crate::limiters::DownloadLimiterGroup;
-use crate::shared_file_map::SharedFileMap;
+use crate::download::writer::FileChunk;
+use crate::utils::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 
 pub const BLOCK_SIZE: usize = 16384; // 16 KB

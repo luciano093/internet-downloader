@@ -4,19 +4,19 @@ use indexmap::IndexMap;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
 
-use crate::app_settings::AppSettings;
+use crate::app::registry::DownloadRegistry;
+use crate::app::settings::AppSettings;
+use crate::app::verification_tracker::VerificationTracker;
 use crate::client_state_manager::{FrontendMessage, UiManagerHandle, get_snapshot};
 use crate::context::AppContext;
 use crate::download::items::{Download, DownloadId, DownloadItem, FileId};
 use crate::download::verifier::VerifierHandle;
-use crate::download_registry::DownloadRegistry;
-use crate::download_writer_manager::DownloadWriterManager;
+use crate::download::writer::DownloadWriterManager;
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::utils::file_utils::force_delete_file;
 use crate::network_manager;
 use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::db::state_manager::StateManager;
-use crate::verification_tracker::VerificationTracker;
 
 // To maybe add in the future:
 // Skip a file in a download

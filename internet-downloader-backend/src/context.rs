@@ -1,9 +1,9 @@
 use reqwest::Client;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
+use crate::app::manager::AppManagerCommand;
 use crate::client_state_manager::UiStateEvent;
-use crate::app_manager::AppManagerCommand;
-use crate::download_writer_manager::DownloadWriterManager;
+use crate::download::writer::DownloadWriterManager;
 use crate::network_manager::NetworkConfig;
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::db::state_manager::StateManager;

@@ -1,16 +1,8 @@
-pub mod app_manager;
-pub mod app_settings;
 pub mod download;
 pub mod db;
 pub mod client_state_manager;
 pub mod network_manager;
-pub mod host_manager;
-pub mod download_task;
-pub mod shared_file_map;
 pub mod plugin_registry;
 pub mod context;
 pub mod utils;
-pub mod download_writer_manager;
-pub mod download_registry;
-pub mod verification_tracker;
-pub mod limiters;
+pub mod app;

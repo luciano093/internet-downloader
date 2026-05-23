@@ -1,3 +1,5 @@
+pub mod manager;
+
 use std::collections::HashMap;
 
 use reqwest::Client;

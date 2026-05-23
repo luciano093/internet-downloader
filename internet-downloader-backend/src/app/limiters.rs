@@ -3,7 +3,7 @@ use std::sync::{Arc, Weak};
 use dashmap::DashMap;
 use url::Host;
 
-use crate::app_settings::DownloadSettings;
+use crate::app::settings::DownloadSettings;
 use crate::download::items::{DownloadId, FileId};
 use crate::utils::network_utils::BandwidthLimiter;
 

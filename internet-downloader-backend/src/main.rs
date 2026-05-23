@@ -8,7 +8,7 @@ use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, put};
-use internet_downloader_backend::app_manager::AppManagerHandle;
+use internet_downloader_backend::app::manager::AppManagerHandle;
 use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
 

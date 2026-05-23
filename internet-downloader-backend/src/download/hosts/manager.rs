@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 use url::Host;
 
-use crate::{app_manager::AppManagerCommand, client_state_manager::{DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, UiStateEvent}, context::AppContext, download::{items::{ChangedItemStatus, Download, DownloadId}, status::DownloadStatus}, download_task::DownloadSupervisor, limiters::DownloadLimiterGroup, utils::network_utils::BandwidthLimiter};
+use crate::{app::{limiters::DownloadLimiterGroup, manager::AppManagerCommand}, client_state_manager::{DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, UiStateEvent}, context::AppContext, download::{items::{ChangedItemStatus, Download, DownloadId}, status::DownloadStatus, supervisor::DownloadSupervisor}, utils::network_utils::BandwidthLimiter};
 
 struct PermitGuard {
     counter: Arc<AtomicUsize>,

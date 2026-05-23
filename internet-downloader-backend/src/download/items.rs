@@ -15,7 +15,7 @@ use crate::download::error::{DownloadFailureReason, FileFailureReason};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::error::{serialize_hash, serialize_chunks};
-use crate::download_task::{BLOCK_SIZE, HASH_CHUNK_SIZE};
+use crate::download::supervisor::{BLOCK_SIZE, HASH_CHUNK_SIZE};
 
 #[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
 pub enum FileSize {
