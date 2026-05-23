@@ -85,7 +85,11 @@ impl AppManager {
 
         let (network_manager, _) = NetworkHandle::spawn(app_context.clone()).await;
 
-        let mut app_settings = AppSettings::new();
+        let mut app_settings = db_manager
+            .load_app_settings()
+            .await
+            .unwrap()
+            .unwrap_or_else(|| AppSettings::new());
 
         // Download registry for deduplication purposes
         let mut download_registry = DownloadRegistry::from_db(&db_manager).await;
