@@ -61,7 +61,7 @@ impl VerificationTracker {
         self.needs_verification.contains(&download_id)
     }
      
-    pub fn is_verifying(&mut self, download_id: &DownloadId) -> bool {
+    pub fn is_verifying(&self, download_id: &DownloadId) -> bool {
          self.verifying.contains(download_id)
     }
 }
