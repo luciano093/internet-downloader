@@ -8,13 +8,13 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::download::FileSize;
-use crate::download::DownloadUpdate;
-use crate::download::FolderUpdate;
-use crate::download::ItemUpdate;
+use crate::app_manager::FileSize;
+use crate::app_manager::DownloadUpdate;
+use crate::app_manager::FolderUpdate;
+use crate::app_manager::ItemUpdate;
 use crate::download::items::ActiveOperation;
 use crate::download::items::DownloadId;
 use crate::download::items::DownloadItem;
@@ -22,14 +22,14 @@ use crate::download::items::FileId;
 use crate::download::items::FolderDownload;
 use crate::download::items::FolderId;
 use crate::download::items::Download;
-use crate::download::FileUpdate;
+use crate::app_manager::FileUpdate;
 use crate::download::status::DownloadStatus;
 use crate::download::status::FileStatus;
 use crate::db::state_manager::StateManager;
 
 pub enum UiStateEvent {
     AddDownload(Download),
-    RemoveDownload(usize), 
+    RemoveDownload(DownloadId), 
     AddUpdate(DownloadUpdate),
 }
 
@@ -37,7 +37,7 @@ pub enum UiStateEvent {
 pub enum FrontendMessage {
     // Sent immediately
     DownloadAdded(Download),
-    DownloadRemoved { id: usize },
+    DownloadRemoved { id: DownloadId },
 
     // Sent on flush interval
     BatchUpdate(DownloadDeltaMap),
@@ -71,16 +71,38 @@ impl Serialize for FrontendMessage {
     }
 }
 
-#[derive(Debug)]
-pub struct UiStateHandle {
+#[derive(Debug, Clone)]
+pub struct UiManagerHandle {
     event_sender: mpsc::UnboundedSender<UiStateEvent>,
     delta_sender: broadcast::Sender<FrontendMessage>,
-    shutdown_sender: oneshot::Sender<()>, 
+    cancel_token: CancellationToken,
 }
 
-impl UiStateHandle {
+impl UiManagerHandle {
+    pub fn new() -> Self {
+        let delta_sender = broadcast::Sender::new(1000);
+        let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+
+        let ui_manager = UiManager::new(delta_sender.clone(), event_receiver, cancel_token.clone());
+
+        tokio::spawn(async move {
+            ui_manager.run().await;
+        });
+
+        UiManagerHandle { 
+            event_sender, 
+            delta_sender, 
+            cancel_token,
+        }
+    }
+    
     pub fn add_download(&self, download: Download) {
-        self.event_sender.send(UiStateEvent::AddDownload(download)).unwrap();
+        let _ = self.event_sender.send(UiStateEvent::AddDownload(download));
+    }
+    
+    pub fn remove_download(&self, download_id: DownloadId) {
+        let _ = self.event_sender.send(UiStateEvent::RemoveDownload(download_id));
     }
 
     pub fn get_event_sender(&self) -> mpsc::UnboundedSender<UiStateEvent> {
@@ -92,107 +114,87 @@ impl UiStateHandle {
     }
 
     pub fn shutdown(self) {
-        let _ = self.shutdown_sender.send(());
+        self.cancel_token.cancel();
     }
 }
 
 #[derive(Debug)]
-pub struct UiStateManager {
+pub struct UiManager {
     delta_sender: broadcast::Sender<FrontendMessage>,
     event_receiver: mpsc::UnboundedReceiver<UiStateEvent>,
-    event_sender: mpsc::UnboundedSender<UiStateEvent>,
+    cancel_token: CancellationToken,
 }
 
-impl UiStateManager {
-    pub fn new() -> Self {
-        let delta_sender = broadcast::Sender::new(1000);
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-
+impl UiManager {
+    pub fn new(delta_sender: broadcast::Sender<FrontendMessage>, event_receiver: mpsc::UnboundedReceiver<UiStateEvent>, cancel_token: CancellationToken,) -> Self {
         Self { 
             delta_sender,
             event_receiver,
-            event_sender,
+            cancel_token,
         }
     }
 
-    pub fn start(self) -> UiStateHandle {
+    pub async fn run(self) {
         let mut delta_manager = DeltaManager::new(); 
-        let (shutdown_sender, mut shutdown_receiver) = oneshot::channel();
 
-        let delta_sender = self.delta_sender.clone();
+        let mut delta_timer = tokio::time::interval(Duration::from_millis(100));
+        let mut event_receiver = self.event_receiver;
 
-        tokio::spawn(async move {
-            let mut delta_timer = tokio::time::interval(Duration::from_millis(100));
-            let mut event_receiver = self.event_receiver;
+        let mut removed_ids: HashSet<DownloadId> = HashSet::new();
 
-            let mut removed_ids: HashSet<usize> = HashSet::new();
+        loop {
+            tokio::select! {
+                Some(event) = event_receiver.recv() => {
+                    match event {
+                        UiStateEvent::AddDownload(download) => {
+                            removed_ids.remove(&download.id());
+                            let _ = self.delta_sender.send(FrontendMessage::DownloadAdded(download));
+                        },
+                        UiStateEvent::RemoveDownload(id) => {
+                            removed_ids.insert(id);
+                            delta_manager.deltas.remove(&id);
 
-            loop {
-                tokio::select! {
-                    Some(event) = event_receiver.recv() => {
-                        match event {
-                            UiStateEvent::AddDownload(download) => {
-                                removed_ids.remove(&download.id());
-                                let _ = delta_sender.send(FrontendMessage::DownloadAdded(download));
-                            },
-                            UiStateEvent::RemoveDownload(id) => {
-                                removed_ids.insert(id);
-                                delta_manager.deltas.remove(&id);
+                            let _ = self.delta_sender.send(FrontendMessage::DownloadRemoved { id });
+                        },
+                        UiStateEvent::AddUpdate(download_update) => {
+                            let update_id = match &download_update {
+                                DownloadUpdate::StatusChanged { id, .. } => *id,
+                                DownloadUpdate::ItemUpdated { id, .. } => *id,
+                                DownloadUpdate::OperationChanged { id, .. } => *id,
+                            };
 
-                                let _ = delta_sender.send(FrontendMessage::DownloadRemoved { id });
-                            },
-                            UiStateEvent::AddUpdate(download_update) => {
-                                let update_id = match &download_update {
-                                    DownloadUpdate::StatusChanged { id, .. } => *id,
-                                    DownloadUpdate::ItemUpdated { id, .. } => *id,
-                                    DownloadUpdate::OperationChanged { id, .. } => *id,
-                                };
+                            if removed_ids.contains(&update_id) {
+                                continue;
+                            }
 
-                                if removed_ids.contains(&update_id) {
-                                    continue;
-                                }
+                            let force_flush = matches!(download_update, DownloadUpdate::StatusChanged { .. });
 
-                                let force_flush = matches!(download_update, DownloadUpdate::StatusChanged { .. });
+                            delta_manager.add_update(download_update);
 
-                                delta_manager.add_update(download_update);
+                            if force_flush {
+                                let _ = self.delta_sender.send(FrontendMessage::BatchUpdate(delta_manager.drain_deltas()));
 
-                                if force_flush {
-                                    let _ = delta_sender.send(FrontendMessage::BatchUpdate(delta_manager.drain_deltas()));
-
-                                    delta_timer.reset();
-                                }
-                            },
-                        }
-                    }
-                    _ = delta_timer.tick() => {
-                        if !delta_manager.deltas().is_empty() {
-                            _ = delta_sender.send(FrontendMessage::BatchUpdate(delta_manager.drain_deltas()));
-                        }
-                    }
-                    _ = &mut shutdown_receiver => {
-                        info!("UI state manager shutting down");
-                        break;
+                                delta_timer.reset();
+                            }
+                        },
                     }
                 }
+                _ = delta_timer.tick() => {
+                    if !delta_manager.deltas().is_empty() {
+                        _ = self.delta_sender.send(FrontendMessage::BatchUpdate(delta_manager.drain_deltas()));
+                    }
+                }
+                _ = self.cancel_token.cancelled() => {
+                    info!("UI state manager shutting down");
+                    break;
+                }
             }
-        });
-
-        UiStateHandle {
-            event_sender: self.event_sender,
-            delta_sender: self.delta_sender,
-            shutdown_sender,
         }
     }
 }
 
-impl Default for UiStateManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub async fn get_snapshot(db_state_manager: &StateManager) -> IndexMap<DownloadId, Download> {
-    db_state_manager.load_downloads().await.unwrap()
+pub async fn get_snapshot(db_manager: &StateManager) -> IndexMap<DownloadId, Download> {
+    db_manager.load_downloads().await.unwrap()
 }
 
 #[derive(Debug, Clone)]

@@ -22,7 +22,7 @@ use crate::client_state_manager::UiStateEvent;
 use crate::context::AppContext;
 use crate::download::items::{ChangedItemStatus, Download, DownloadId, DownloadItem, DownloadTypeRef, FileId};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket};
-use crate::download::{DownloadLimiterGroup, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
+use crate::app_manager::{DownloadLimiterGroup, DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, AppManagerCommand};
 use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
 use crate::shared_file_map::SharedFileMap;
@@ -953,7 +953,7 @@ impl DownloadSupervisor {
                                             RangeDownloadError::DiskPoolDropped => {
                                                 error!("App-wide disk pool dropped. App entered an invalid state and should restart. This probably happened due to an OS error or logic bug.");
 
-                                                let _ = state.app_context.download_manager.send(ManagerCommand::Shutdown);
+                                                let _ = state.app_context.app_manager.send(AppManagerCommand::Shutdown);
 
                                                 break;
                                             },

@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::client_state_manager::UiStateEvent;
 use crate::db::state_manager::StateManager;
-use crate::download::{DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, ManagerCommand};
+use crate::app_manager::{DownloadUpdate, FileFailureReason, FileSize, FileUpdate, FolderUpdate, ItemUpdate, AppManagerCommand};
 use crate::download::items::{ActiveOperation, ChangedItemOperation, ChangedItemStatus, Download, DownloadId, DownloadItem, FileId};
 use crate::download::status::FileStatus;
 use crate::download_task::{BLOCKS_PER_HASH, HASH_CHUNK_SIZE};
@@ -92,7 +92,7 @@ impl Drop for DownloadGuard {
 struct Verifier {
     receiver: mpsc::Receiver<VerifierMessage>,
     sender: mpsc::Sender<VerifierMessage>,
-    download_manager: UnboundedSender<ManagerCommand>,
+    app_manager: mpsc::Sender<AppManagerCommand>,
     ui_sender: UnboundedSender<UiStateEvent>,
     db_manager: StateManager,
     handles: HashMap<DownloadId, (JoinHandle<()>, Arc<AtomicBool>)>, // We save an atomic bool in case we need to kill nested handles
@@ -103,7 +103,7 @@ impl Verifier {
     fn new(
         receiver: mpsc::Receiver<VerifierMessage>,
         sender: mpsc::Sender<VerifierMessage>,
-        download_manager: UnboundedSender<ManagerCommand>,
+        app_manager: mpsc::Sender<AppManagerCommand>,
         ui_sender: UnboundedSender<UiStateEvent>,
         db_manager: StateManager,
     ) -> Self
@@ -112,7 +112,7 @@ impl Verifier {
         Self {
             receiver,
             sender,
-            download_manager,
+            app_manager,
             ui_sender,
             db_manager,
             handles: HashMap::new(),
@@ -132,7 +132,7 @@ impl Verifier {
                         let _ = handle.await; 
                     }
 
-                    let _ = self.download_manager.send(ManagerCommand::CleanUpDownload(download_id));
+                    let _ = self.app_manager.send(AppManagerCommand::CleanUpDownload(download_id));
                 },
                 VerifierMessage::PauseVerification(download_id) => {
                     if let Some((handle, cancel_flag)) = self.handles.remove(&download_id) {
@@ -213,7 +213,7 @@ impl Verifier {
 
         let ui_sender = self.ui_sender.clone();
         let db_manager = self.db_manager.clone();
-        let download_manager = self.download_manager.clone();
+        let app_manager = self.app_manager.clone();
 
         let semaphore = self.semaphore.clone();
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -326,7 +326,7 @@ impl Verifier {
             info!("Finished verification {} in {:?}", download.name(), start_time.elapsed());
 
             db_manager.write_download(&download).await.unwrap();
-            let _ = download_manager.send(ManagerCommand::DownloadVerified(download));
+            let _ = app_manager.send(AppManagerCommand::DownloadVerified(download));
         });
 
         self.handles.insert(download_id, (handle, cancel_flag));
@@ -528,14 +528,14 @@ pub struct VerifierHandle {
 
 impl VerifierHandle {
     pub fn spawn(
-        download_manager: UnboundedSender<ManagerCommand>,
+        app_manager: mpsc::Sender<AppManagerCommand>,
         ui_sender: UnboundedSender<UiStateEvent>,
         db_manager: StateManager,
     )-> Self
     {
         let (sender, receiver) = mpsc::channel(1000);
 
-        let verifier = Verifier::new(receiver, sender.clone(), download_manager, ui_sender, db_manager);
+        let verifier = Verifier::new(receiver, sender.clone(), app_manager, ui_sender, db_manager);
 
         tokio::spawn(async move {
             verifier.run().await;

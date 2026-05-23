@@ -1,3 +1,4 @@
+pub mod app_manager;
 pub mod download;
 pub mod db;
 pub mod client_state_manager;

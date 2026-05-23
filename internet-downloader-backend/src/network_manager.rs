@@ -5,7 +5,7 @@ use tokio::{sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
 use tracing::{debug, warn};
 use url::{Host, Url};
 
-use crate::{context::AppContext, download::{DownloadLimiterGroup, DownloadSettings, LimiterRegistry, ManagerCommand, items::{Download, DownloadId, FileId}}, host_manager::HostHandle, utils::network_utils::BandwidthLimiter};
+use crate::{context::AppContext, app_manager::{DownloadLimiterGroup, DownloadSettings, LimiterRegistry, AppManagerCommand}, download::items::{Download, DownloadId, FileId}, host_manager::HostHandle, utils::network_utils::BandwidthLimiter};
 
 pub enum NetworkMessage {
     QueueDownload(String, DownloadId),
@@ -62,7 +62,7 @@ impl NetworkManager {
                         host_handle.cancel_download(download_id);
                     } else {
                         // The host manager for this download doesn't exist, so the download doesn't exist
-                        let _ = self.app_context.download_manager.send(ManagerCommand::CleanUpDownload(download_id));
+                        let _ = self.app_context.app_manager.send(AppManagerCommand::CleanUpDownload(download_id));
                     }
                 },
                 NetworkMessage::PauseDownload(url, download_id) => {

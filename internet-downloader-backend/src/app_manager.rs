@@ -9,13 +9,12 @@ use bitvec::vec::BitVec;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize, Serializer};
 use strum_macros::{EnumDiscriminants, EnumString, IntoStaticStr};
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
 use dashmap::DashMap;
 use url::Host;
 
-use crate::client_state_manager::{FrontendMessage, UiStateEvent, UiStateHandle, UiStateManager, get_snapshot};
+use crate::client_state_manager::{FrontendMessage, UiManagerHandle, get_snapshot};
 use crate::context::AppContext;
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
 use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, FileId, FolderId};
@@ -90,7 +89,7 @@ pub enum DownloadCommand {
 // Force retry a failed download
 // Reload a plugin (manually)
 // Set host max connections
-pub enum ManagerCommand {
+pub enum AppManagerCommand {
     QueueDownload(String),
     DownloadVerified(Download),
     RemoveDownload(DownloadId, bool), // true if we want to remove from disk too
@@ -261,103 +260,34 @@ impl AppSettings {
 }
 
 #[derive(Debug)]
-pub struct DownloadManager {
-    next_id: Option<AtomicUsize>,
-    db_state_manager: StateManager,
+pub struct AppManager {
+    next_id: AtomicUsize,
+    db_manager: StateManager,
     unprocessed_downloads: IndexMap<DownloadId, Download>,
-    ui_state_handle: Option<UiStateHandle>,
-    command_sender: Option<UnboundedSender<ManagerCommand>>,
+    ui_handle: UiManagerHandle,
+    sender: mpsc::Sender<AppManagerCommand>,
+    receiver: mpsc::Receiver<AppManagerCommand>,
 }
 
-impl DownloadManager {
-    pub fn new(db_state_manager: StateManager) -> Self {
-        DownloadManager {
-            next_id: Some(AtomicUsize::new(0)), 
-            db_state_manager,
+impl AppManager {
+    pub fn new(db_manager: StateManager, sender: mpsc::Sender<AppManagerCommand>, receiver: mpsc::Receiver<AppManagerCommand>, ui_handle: UiManagerHandle) -> Self {
+        AppManager {
+            next_id: AtomicUsize::new(0), 
+            db_manager,
             unprocessed_downloads: IndexMap::new(),
-            ui_state_handle: None,
-            command_sender: None,
+            ui_handle,
+            sender,
+            receiver
         }
     }
 
-    pub async fn load_state(&mut self) {
-        let restored_downloads = self.db_state_manager.load_downloads().await.unwrap();
-
-        let max_id = restored_downloads.keys().max().copied().unwrap_or(DownloadId(0));
-
-        self.next_id.as_mut().unwrap().store(*max_id + 1, Ordering::Relaxed);
-
-        debug!(count = ?restored_downloads.len(), "Restored download from disk");
-        trace!("Detailed download restore data:\n{:#?}", restored_downloads);
-
-        for (id, download) in restored_downloads {
-            self.unprocessed_downloads.insert(id, download.clone());
-        }
-    }
-
-    pub async fn queue_download(&mut self, url: String) -> Result<(), ()> {
-        if let Some(sender) = &self.command_sender {
-            sender.send(ManagerCommand::QueueDownload(url)).unwrap();
-        }
-
-        Ok(())
-    }
-
-    pub async fn remove_download(&mut self, id: DownloadId, from_disk: bool) {
-        if let Some(sender) = &self.command_sender {
-            let _ = sender.send(ManagerCommand::RemoveDownload(id, from_disk));
-        }
-    }
-
-    pub async fn pause_download(&mut self, download_id: DownloadId) {
-        if let Some(sender) = &self.command_sender {
-            let _ = sender.send(ManagerCommand::PauseDownload(download_id));
-        }
-    }
-
-    pub async fn resume_download(&mut self, download_id: DownloadId) {
-        if let Some(sender) = &self.command_sender {
-            let _ = sender.send(ManagerCommand::ResumeDownload(download_id));
-        }
-    }
-
-    pub fn set_global_limit(&self, limit: Option<u64>) {
-        if let Some(sender) = &self.command_sender {
-            let _ = sender.send(ManagerCommand::SetGlobalSpeedLimit(limit));
-        }
-    }
-
-    pub fn set_host_limit(&self, host: String, limit: Option<u64>) {
-        if let Some(sender) = &self.command_sender {
-            let _ = sender.send(ManagerCommand::SetHostSpeedLimit(host, limit));
-        }
-    }
-
-    pub fn set_download_limit(&self, download_id: DownloadId, limit: Option<u64>) {
-        if let Some(sender) = &self.command_sender {
-            let _ = sender.send(ManagerCommand::SetDownloadSpeedLimit(download_id, limit));
-        }
-    }
-
-    pub fn set_file_limit(&self, download_id: DownloadId, file_id: FileId, limit: Option<u64>) {
-        if let Some(sender) = &self.command_sender {
-            let _ = sender.send(ManagerCommand::SetFileSpeedLimit(download_id, file_id, limit));
-        }
-    }
-
-    pub async fn start_processing(&mut self) {
-        let (command_sender, mut command_receiver) = mpsc::unbounded_channel::<ManagerCommand>();
-
-        self.command_sender = Some(command_sender.clone()); 
-
-        let ui_state_manager = UiStateManager::new();
-        let ui_state_handle = ui_state_manager.start();
-        self.ui_state_handle = Some(ui_state_handle);
-
-        
+    pub async fn run(mut self) {
+        // Load previous state
+        self.load_state().await;
+    
         // Clone shared resources
-        let ui_event_sender = self.ui_state_handle.as_ref().unwrap().get_event_sender();
-        let db_manager = self.db_state_manager.clone();
+        let ui_event_sender = self.ui_handle.get_event_sender();
+        let db_manager = self.db_manager.clone();
 
         let unprocessed_downloads: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
 
@@ -369,7 +299,7 @@ impl DownloadManager {
         let app_context = AppContext {
             client,
             network_config,
-            download_manager: command_sender.clone(),
+            app_manager: self.sender.clone(),
             ui_sender: ui_event_sender.clone(),
             db_manager: db_manager.clone(),
             plugin_registry,
@@ -397,8 +327,6 @@ impl DownloadManager {
             url_registry.insert(download.url().to_string(), *id);
             id_registry.insert(*id, download.url().to_string());
         }
-
-        let next_id = self.next_id.take().unwrap();
         
         let mut removed_downloads = HashMap::new();
 
@@ -411,7 +339,7 @@ impl DownloadManager {
         let mut verifying_downloads = HashSet::new();
         let mut needs_verification = HashSet::new(); 
 
-        let verifier = VerifierHandle::spawn(command_sender.clone(), ui_event_sender.clone(), db_manager.clone());
+        let verifier = VerifierHandle::spawn(self.sender.clone(), ui_event_sender.clone(), db_manager.clone());
 
         for &download_id in unprocessed_downloads.keys() {
             verifying_downloads.insert(download_id);
@@ -420,168 +348,240 @@ impl DownloadManager {
 
         let _ = verifier.verify_downloads(unprocessed_downloads).await;
 
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    Some(command) = command_receiver.recv() => {
-                        match command {
-                            ManagerCommand::QueueDownload(url) => {
-                                debug!("registry: {:#?}", url_registry);
-                                debug!("url: {}", url);
-                                if url_registry.contains_key(&url) {
-                                    debug!("Download already exists: {}", url);
-                                    continue; 
-                                }
+        loop {
+            tokio::select! {
+                Some(command) = self.receiver.recv() => {
+                    match command {
+                        AppManagerCommand::QueueDownload(url) => {
+                            debug!("registry: {:#?}", url_registry);
+                            debug!("url: {}", url);
+                            if url_registry.contains_key(&url) {
+                                debug!("Download already exists: {}", url);
+                                continue; 
+                            }
 
-                                let id = DownloadId(next_id.fetch_add(1, Ordering::Relaxed));
-                                url_registry.insert(url.clone(), id);
-                                id_registry.insert(id, url.clone());
+                            let id = DownloadId(self.next_id.fetch_add(1, Ordering::Relaxed));
+                            url_registry.insert(url.clone(), id);
+                            id_registry.insert(id, url.clone());
 
-                                network_manager.queue_download(url, id);
-                            },
-                            ManagerCommand::RemoveDownload(id, from_disk) => {
-                                info!("Removing download");
-                                // First, we set it as removed
-                                removed_downloads.insert(id, from_disk);
+                            network_manager.queue_download(url, id);
+                        },
+                        AppManagerCommand::RemoveDownload(id, from_disk) => {
+                            info!("Removing download");
+                            // First, we set it as removed
+                            removed_downloads.insert(id, from_disk);
 
-                                 // Cancel the verification if there is any
-                                if verifying_downloads.contains(&id) {
-                                    let _ = verifier.cancel_verification(id).await;
-                                }
-                                // If it is running. Send Cancel signal.
-                                else if let Some(url) = id_registry.get(&id) {
-                                    // In this case, we have to wait for the download to finish so it sends the clean up command
-                                    network_manager.cancel_download(url.clone(), DownloadId(*id));
-                                }
-                                // Else if it's already done or doesn't exist; just clean up
-                                else {
-                                    debug!("Removed completed download {}", id);
-                                    let _ = command_sender.send(ManagerCommand::CleanUpDownload(id));
-                                } 
-                            },
-                            ManagerCommand::CleanUpDownload(download_id) => {
-                                // Remove from registry now that we know the download is 100% removed
-                                if let Some(url) = id_registry.remove(&download_id) {
-                                    url_registry.remove(&url);
-                                }
+                                // Cancel the verification if there is any
+                            if verifying_downloads.contains(&id) {
+                                let _ = verifier.cancel_verification(id).await;
+                            }
+                            // If it is running. Send Cancel signal.
+                            else if let Some(url) = id_registry.get(&id) {
+                                // In this case, we have to wait for the download to finish so it sends the clean up command
+                                network_manager.cancel_download(url.clone(), DownloadId(*id));
+                            }
+                            // Else if it's already done or doesn't exist; just clean up
+                            else {
+                                debug!("Removed completed download {}", id);
+                                let _ = self.sender.send(AppManagerCommand::CleanUpDownload(id)).await;
+                            } 
+                        },
+                        AppManagerCommand::CleanUpDownload(download_id) => {
+                            // Remove from registry now that we know the download is 100% removed
+                            if let Some(url) = id_registry.remove(&download_id) {
+                                url_registry.remove(&url);
+                            }
 
-                                verifying_downloads.remove(&download_id);
-                                needs_verification.remove(&download_id);
-                                
-                                // Finally, we clean it up from the set
-                                if let Some(from_disk) = removed_downloads.remove(&download_id) {
-                                    if from_disk {
-                                        match db_manager.load_download(download_id).await {
-                                            Ok(Some(download)) => {
-                                                for file in download.files().values() {
-                                                    let path = file.relative_path(); 
-                                                    if path.exists() {
-                                                        force_delete_file(&path); 
-                                                    }
+                            verifying_downloads.remove(&download_id);
+                            needs_verification.remove(&download_id);
+                            
+                            // Finally, we clean it up from the set
+                            if let Some(from_disk) = removed_downloads.remove(&download_id) {
+                                if from_disk {
+                                    match db_manager.load_download(download_id).await {
+                                        Ok(Some(download)) => {
+                                            for file in download.files().values() {
+                                                let path = file.relative_path(); 
+                                                if path.exists() {
+                                                    force_delete_file(&path); 
                                                 }
                                             }
-                                            Ok(None) => {
-                                                warn!("Tried to load download with id {} but it was not found in DB. Skipping file deletion.", download_id);
-                                            }
-                                            Err(_) => {
-                                                warn!("There was an error loading download {} from DB to delete physical files. Skipping file deletion.", download_id);
-                                            }
-                                        } 
-                                    }
-
-                                    db_manager.delete_download(download_id).await.unwrap();
-                                    let _ = ui_event_sender.send(UiStateEvent::RemoveDownload(*download_id));
+                                        }
+                                        Ok(None) => {
+                                            warn!("Tried to load download with id {} but it was not found in DB. Skipping file deletion.", download_id);
+                                        }
+                                        Err(_) => {
+                                            warn!("There was an error loading download {} from DB to delete physical files. Skipping file deletion.", download_id);
+                                        }
+                                    } 
                                 }
 
-                                info!("Download cleaned up");
-                            },
-                            ManagerCommand::PauseDownload(download_id) => {
-                                // Tell the Verifier to cancel if it's currently hashing
-                                verifying_downloads.remove(&download_id);
-                                let _ = verifier.pause_verification(download_id).await;
+                                db_manager.delete_download(download_id).await.unwrap();
+                                let _ = self.ui_handle.remove_download(download_id);
+                            }
 
-                                // Otherwise the download is currently being managed by a host
-                                if let Some(url) = id_registry.get(&download_id) {
-                                    network_manager.pause_download(url.to_string(), download_id);
-                                }
-                            },
-                            ManagerCommand::ResumeDownload(download_id) => if let Ok(Some(download)) = db_manager.load_download(download_id).await {
-                                if needs_verification.contains(&download_id) {
-                                    verifying_downloads.insert(download_id);
-                                    let _ = verifier.verify_download(download).await;
-                                } else {
-                                    let download_settings = app_settings.get_download_settings(download_id);
+                            info!("Download cleaned up");
+                        },
+                        AppManagerCommand::PauseDownload(download_id) => {
+                            // Tell the Verifier to cancel if it's currently hashing
+                            verifying_downloads.remove(&download_id);
+                            let _ = verifier.pause_verification(download_id).await;
 
-                                    network_manager.resume_download(download, download_settings);
-                                }
-                            },
-                            ManagerCommand::Shutdown => {
-                                break;
-                            },
-                            ManagerCommand::SetGlobalSpeedLimit(limit) => {
-                                app_settings.set_global_speed_limit(limit);
-
-                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
-
-                                network_manager.set_global_limit(limit);
-                            },
-                            ManagerCommand::SetHostSpeedLimit(host, limit) => {
-                                app_settings.host_settings
-                                    .entry(host.clone())
-                                    .or_default()
-                                    .speed_limit = limit;
-
-                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
-
-                                network_manager.set_host_limit(host, limit);
-                            },
-                            ManagerCommand::SetDownloadSpeedLimit(download_id, limit) => {
-                                if let Some(download_settings) = app_settings.download_settings.get_mut(&download_id) {
-                                    download_settings.speed_limit = limit;
-                                }
-
-                                app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
-
-                                network_manager.set_download_limit(download_id, limit);
-                            },
-                            ManagerCommand::SetFileSpeedLimit(download_id, file_id, limit) => {
-                                if app_context.db_manager.file_exists(download_id, file_id).await {
-                                        let download_settings = app_settings.download_settings.entry(download_id).or_default();
-                                        let file_settings = download_settings.file_settings.entry(file_id).or_default();
-                                        file_settings.speed_limit = limit;
-
-                                        app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
-                                        network_manager.set_file_limit(download_id, file_id, limit);
-                                } else {
-                                    warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
-                                }
-                            },
-                            ManagerCommand::DownloadVerified(download) => {
-                                let download_id = download.id();
-
-                                if !verifying_downloads.remove(&download_id) || removed_downloads.contains_key(&download_id) {
-                                    debug!("Ignoring stale verification completion for {}", download_id);
-                                    continue;
-                                }
-                                
-                                needs_verification.remove(&download_id); 
-
+                            // Otherwise the download is currently being managed by a host
+                            if let Some(url) = id_registry.get(&download_id) {
+                                network_manager.pause_download(url.to_string(), download_id);
+                            }
+                        },
+                        AppManagerCommand::ResumeDownload(download_id) => if let Ok(Some(download)) = db_manager.load_download(download_id).await {
+                            if needs_verification.contains(&download_id) {
+                                verifying_downloads.insert(download_id);
+                                let _ = verifier.verify_download(download).await;
+                            } else {
                                 let download_settings = app_settings.get_download_settings(download_id);
+
                                 network_manager.resume_download(download, download_settings);
-                            },
-                        }
+                            }
+                        },
+                        AppManagerCommand::Shutdown => {
+                            break;
+                        },
+                        AppManagerCommand::SetGlobalSpeedLimit(limit) => {
+                            app_settings.set_global_speed_limit(limit);
+
+                            app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
+
+                            network_manager.set_global_limit(limit);
+                        },
+                        AppManagerCommand::SetHostSpeedLimit(host, limit) => {
+                            app_settings.host_settings
+                                .entry(host.clone())
+                                .or_default()
+                                .speed_limit = limit;
+
+                            app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
+
+                            network_manager.set_host_limit(host, limit);
+                        },
+                        AppManagerCommand::SetDownloadSpeedLimit(download_id, limit) => {
+                            if let Some(download_settings) = app_settings.download_settings.get_mut(&download_id) {
+                                download_settings.speed_limit = limit;
+                            }
+
+                            app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
+
+                            network_manager.set_download_limit(download_id, limit);
+                        },
+                        AppManagerCommand::SetFileSpeedLimit(download_id, file_id, limit) => {
+                            if app_context.db_manager.file_exists(download_id, file_id).await {
+                                    let download_settings = app_settings.download_settings.entry(download_id).or_default();
+                                    let file_settings = download_settings.file_settings.entry(file_id).or_default();
+                                    file_settings.speed_limit = limit;
+
+                                    app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
+                                    network_manager.set_file_limit(download_id, file_id, limit);
+                            } else {
+                                warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
+                            }
+                        },
+                        AppManagerCommand::DownloadVerified(download) => {
+                            let download_id = download.id();
+
+                            if !verifying_downloads.remove(&download_id) || removed_downloads.contains_key(&download_id) {
+                                debug!("Ignoring stale verification completion for {}", download_id);
+                                continue;
+                            }
+                            
+                            needs_verification.remove(&download_id); 
+
+                            let download_settings = app_settings.get_download_settings(download_id);
+                            network_manager.resume_download(download, download_settings);
+                        },
                     }
                 }
             }
-        });
+        }
     }
 
-    pub fn download_subscribe(&self) -> broadcast::Receiver<FrontendMessage> {
-        self.ui_state_handle.as_ref().unwrap().subscribe()
+    async fn load_state(&mut self) {
+        let restored_downloads = self.db_manager.load_downloads().await.unwrap();
+
+        let max_id = restored_downloads.keys().max().copied().unwrap_or(DownloadId(0));
+
+        self.next_id.store(*max_id + 1, Ordering::Relaxed);
+
+        debug!(count = ?restored_downloads.len(), "Restored download from disk");
+        trace!("Detailed download restore data:\n{:#?}", restored_downloads);
+
+        for (id, download) in restored_downloads {
+            self.unprocessed_downloads.insert(id, download.clone());
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AppManagerHandle {
+    sender: mpsc::Sender<AppManagerCommand>,
+    ui_handle: UiManagerHandle,
+    db_manager: StateManager,
+}
+
+impl AppManagerHandle {
+    pub fn new(state_manager: StateManager) -> Self {
+        let (sender, receiver) = mpsc::channel(1000);
+
+        let ui_handle = UiManagerHandle::new();
+        
+        let app_manager = AppManager::new(state_manager.clone(), sender.clone(), receiver, ui_handle.clone());
+
+        tokio::spawn(async move {
+            app_manager.run().await;
+        });
+        
+        Self {
+            sender,
+            ui_handle,
+            db_manager: state_manager,
+        }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<FrontendMessage> {
+        self.ui_handle.subscribe()
     }
 
     pub async fn get_snapshot(&self) -> IndexMap<DownloadId, Download> {
-        get_snapshot(&self.db_state_manager).await
+        get_snapshot(&self.db_manager).await
+    }
+
+    pub async fn queue_download(&self, url: String) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::QueueDownload(url)).await
+    }
+
+    pub async fn remove_download(&self, id: DownloadId, from_disk: bool) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::RemoveDownload(id, from_disk)).await
+    }
+ 
+    pub async fn pause_download(&self, download_id: DownloadId) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::PauseDownload(download_id)).await
+    }
+
+    pub async fn resume_download(&self, download_id: DownloadId) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::ResumeDownload(download_id)).await
+    }
+
+    pub async fn set_global_limit(&self, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::SetGlobalSpeedLimit(limit)).await
+    }
+
+    pub async fn set_host_limit(&self, host: String, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::SetHostSpeedLimit(host, limit)).await
+    }
+
+    pub async fn set_download_limit(&self, download_id: DownloadId, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::SetDownloadSpeedLimit(download_id, limit)).await
+    }
+
+    pub async fn set_file_limit(&self, download_id: DownloadId, file_id: FileId, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::SetFileSpeedLimit(download_id, file_id, limit)).await
     }
 }
 

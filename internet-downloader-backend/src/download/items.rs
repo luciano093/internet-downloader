@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::client_state_manager::{DownloadSnapshot, FileSnapshot};
 use crate::db::rows::{DownloadFileRow, DownloadFolderRow, DownloadRow};
-use crate::download::{DownloadFailureReason, FileFailureReason, FileSize};
+use crate::app_manager::{DownloadFailureReason, FileFailureReason, FileSize};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
-use crate::download::{serialize_hash, serialize_chunks};
+use crate::app_manager::{serialize_hash, serialize_chunks};
 use crate::download_task::{BLOCK_SIZE, HASH_CHUNK_SIZE};
 
 pub trait DownloadItem {
