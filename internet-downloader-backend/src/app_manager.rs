@@ -17,7 +17,6 @@ use url::Host;
 use crate::app_settings::{AppSettings, DownloadSettings};
 use crate::client_state_manager::{FrontendMessage, UiManagerHandle, get_snapshot};
 use crate::context::AppContext;
-use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
 use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, FileId, FolderId};
 use crate::download::status::{DownloadStatus, FileStatus};
 use crate::download::verifier::VerifierHandle;
@@ -180,10 +179,92 @@ impl LimiterRegistry {
         &self.downloads
     }
 }
+pub struct DownloadRegistry {
+    url_map: HashMap<String, DownloadId>,
+    id_map: HashMap<DownloadId, String>,
+    next_id: AtomicUsize,
+    removed_downloads: HashMap<DownloadId, bool>,
+}
+
+impl DownloadRegistry {
+    pub fn new() -> Self {
+        Self {
+            url_map: HashMap::new(),
+            id_map: HashMap::new(),
+            next_id: AtomicUsize::new(0),
+            removed_downloads: HashMap::new(),
+        }
+    }
+
+    pub async fn from_db(db_manager: &StateManager) -> Self {
+        let existing_urls = db_manager.get_all_download_urls().await.unwrap();
+        let next_id = existing_urls.iter().map(|(id, _url)| id).max().copied().map(|max_id| max_id + 1).unwrap_or(0);
+
+        let mut registry = Self { 
+            url_map: HashMap::new(),
+            id_map: HashMap::new(),
+            next_id: AtomicUsize::new(next_id),
+            removed_downloads: HashMap::new(),
+        };
+
+        for (id, url) in existing_urls {
+            registry.url_map.insert(url.clone(), DownloadId(id));
+            registry.id_map.insert(DownloadId(id), url);
+        }
+
+        registry
+    }
+
+    pub fn add_downloads(&mut self, downloads: &IndexMap<DownloadId, Download>) {
+        for (id, download) in downloads {
+            self.url_map.insert(download.url().to_string(), *id);
+            self.id_map.insert(*id, download.url().to_string());
+        }
+    }
+    
+    pub fn register(&mut self, url: String) -> DownloadId {
+        let id = self.next_id();
+        self.url_map.insert(url.clone(), id);
+        self.id_map.insert(id, url);
+
+        id
+    }
+    
+    pub fn mark_removed(&mut self, id: DownloadId, from_disk: bool) {
+        self.removed_downloads.insert(id, from_disk);
+    }
+    
+    pub fn finalize_removed(&mut self, id: &DownloadId) -> Option<bool> {
+        if let Some(url) = self.id_map.remove(id) {
+            self.url_map.remove(&url);
+        }
+
+        self.removed_downloads.remove(id)
+    }
+
+    pub fn is_marked_for_removal(&mut self, id: &DownloadId) -> bool {
+        self.removed_downloads.contains_key(&id)
+    }
+    
+    pub fn next_id(&self) -> DownloadId {
+        DownloadId(self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn url_map(&self) -> &HashMap<String, DownloadId> {
+        &self.url_map
+    }
+
+    pub fn contains_url(&self, url: &str) -> bool {
+        self.url_map.contains_key(url)
+    }
+    
+    pub fn lookup_url(&self, download_id: &DownloadId) -> Option<&String> {
+        self.id_map.get(download_id)
+    }
+}
 
 #[derive(Debug)]
 pub struct AppManager {
-    next_id: AtomicUsize,
     db_manager: StateManager,
     unprocessed_downloads: IndexMap<DownloadId, Download>,
     ui_handle: UiManagerHandle,
@@ -194,7 +275,6 @@ pub struct AppManager {
 impl AppManager {
     pub fn new(db_manager: StateManager, sender: mpsc::Sender<AppManagerCommand>, receiver: mpsc::Receiver<AppManagerCommand>, ui_handle: UiManagerHandle) -> Self {
         AppManager {
-            next_id: AtomicUsize::new(0), 
             db_manager,
             unprocessed_downloads: IndexMap::new(),
             ui_handle,
@@ -205,13 +285,11 @@ impl AppManager {
 
     pub async fn run(mut self) {
         // Load previous state
-        self.load_state().await;
+        self.load_downloads_from_db().await;
     
         // Clone shared resources
         let ui_event_sender = self.ui_handle.get_event_sender();
         let db_manager = self.db_manager.clone();
-
-        let unprocessed_downloads: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
 
         let plugin_registry = PluginRegistryHandler::spawn().await;
         
@@ -233,24 +311,11 @@ impl AppManager {
         let mut app_settings = AppSettings::new();
 
         // Download registry for deduplication purposes
-        let mut url_registry: HashMap<String, DownloadId> = HashMap::new();
-        let mut id_registry: HashMap<DownloadId, String> = HashMap::new();
-
-        let existing_downloads = db_manager.get_all_download_urls().await.unwrap(); 
-
-        // Add existing downloads to registry
-        for (id, url) in existing_downloads {
-            url_registry.insert(url.clone(), DownloadId(id));
-            id_registry.insert(DownloadId(id), url);
-        }
-
-        // Add queued downloads to registry
-        for (id, download) in &unprocessed_downloads {
-            url_registry.insert(download.url().to_string(), *id);
-            id_registry.insert(*id, download.url().to_string());
-        }
+        let mut download_registry = DownloadRegistry::from_db(&db_manager).await;
         
-        let mut removed_downloads = HashMap::new();
+        let unprocessed_downloads: IndexMap<DownloadId, Download> = self.unprocessed_downloads.drain(..).collect();
+
+        download_registry.add_downloads(&unprocessed_downloads);
 
         // These two separate sets are needed to track two things:
         // is the current download being handled by the verify manager? and
@@ -275,30 +340,27 @@ impl AppManager {
                 Some(command) = self.receiver.recv() => {
                     match command {
                         AppManagerCommand::QueueDownload(url) => {
-                            debug!("registry: {:#?}", url_registry);
+                            debug!("registry: {:#?}", download_registry.url_map());
                             debug!("url: {}", url);
-                            if url_registry.contains_key(&url) {
+                            if download_registry.contains_url(&url) {
                                 debug!("Download already exists: {}", url);
                                 continue; 
                             }
 
-                            let id = DownloadId(self.next_id.fetch_add(1, Ordering::Relaxed));
-                            url_registry.insert(url.clone(), id);
-                            id_registry.insert(id, url.clone());
-
+                            let id = download_registry.register(url.clone());
                             network_manager.queue_download(url, id);
                         },
                         AppManagerCommand::RemoveDownload(id, from_disk) => {
                             info!("Removing download");
                             // First, we set it as removed
-                            removed_downloads.insert(id, from_disk);
+                            download_registry.mark_removed(id, from_disk);
 
-                                // Cancel the verification if there is any
+                            // Cancel the verification if there is any
                             if verifying_downloads.contains(&id) {
                                 let _ = verifier.cancel_verification(id).await;
                             }
                             // If it is running. Send Cancel signal.
-                            else if let Some(url) = id_registry.get(&id) {
+                            else if let Some(url) = download_registry.lookup_url(&id) {
                                 // In this case, we have to wait for the download to finish so it sends the clean up command
                                 network_manager.cancel_download(url.clone(), DownloadId(*id));
                             }
@@ -309,16 +371,12 @@ impl AppManager {
                             } 
                         },
                         AppManagerCommand::CleanUpDownload(download_id) => {
-                            // Remove from registry now that we know the download is 100% removed
-                            if let Some(url) = id_registry.remove(&download_id) {
-                                url_registry.remove(&url);
-                            }
-
                             verifying_downloads.remove(&download_id);
                             needs_verification.remove(&download_id);
                             
                             // Finally, we clean it up from the set
-                            if let Some(from_disk) = removed_downloads.remove(&download_id) {
+                            // Remove from registry now that we know the download is 100% removed
+                            if let Some(from_disk) = download_registry.finalize_removed(&download_id) {
                                 if from_disk {
                                     match db_manager.load_download(download_id).await {
                                         Ok(Some(download)) => {
@@ -350,7 +408,7 @@ impl AppManager {
                             let _ = verifier.pause_verification(download_id).await;
 
                             // Otherwise the download is currently being managed by a host
-                            if let Some(url) = id_registry.get(&download_id) {
+                            if let Some(url) = download_registry.lookup_url(&download_id) {
                                 network_manager.pause_download(url.to_string(), download_id);
                             }
                         },
@@ -408,7 +466,7 @@ impl AppManager {
                         AppManagerCommand::DownloadVerified(download) => {
                             let download_id = download.id();
 
-                            if !verifying_downloads.remove(&download_id) || removed_downloads.contains_key(&download_id) {
+                            if !verifying_downloads.remove(&download_id) || download_registry.is_marked_for_removal(&download_id) {
                                 debug!("Ignoring stale verification completion for {}", download_id);
                                 continue;
                             }
@@ -424,12 +482,8 @@ impl AppManager {
         }
     }
 
-    async fn load_state(&mut self) {
+    async fn load_downloads_from_db(&mut self) {
         let restored_downloads = self.db_manager.load_downloads().await.unwrap();
-
-        let max_id = restored_downloads.keys().max().copied().unwrap_or(DownloadId(0));
-
-        self.next_id.store(*max_id + 1, Ordering::Relaxed);
 
         debug!(count = ?restored_downloads.len(), "Restored download from disk");
         trace!("Detailed download restore data:\n{:#?}", restored_downloads);
