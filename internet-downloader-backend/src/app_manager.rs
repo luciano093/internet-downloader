@@ -1,18 +1,10 @@
 use std::fmt::Debug;
-use std::str::FromStr;
-use std::sync::{Arc, Weak};
 
-use bitvec::order::Msb0;
-use bitvec::vec::BitVec;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize, Serializer};
-use strum_macros::{EnumDiscriminants, EnumString, IntoStaticStr};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, trace, warn};
-use dashmap::DashMap;
-use url::Host;
 
-use crate::app_settings::{AppSettings, DownloadSettings};
+use crate::app_settings::AppSettings;
 use crate::client_state_manager::{FrontendMessage, UiManagerHandle, get_snapshot};
 use crate::context::AppContext;
 use crate::download::items::{Download, DownloadId, DownloadItem, FileId};
@@ -24,7 +16,6 @@ use crate::utils::file_utils::force_delete_file;
 use crate::network_manager;
 use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::db::state_manager::StateManager;
-use crate::utils::network_utils::BandwidthLimiter;
 use crate::verification_tracker::VerificationTracker;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, PartialOrd, Eq)]
@@ -60,83 +51,6 @@ pub enum AppManagerCommand {
     SetHostSpeedLimit(String, Option<u64>), // String can be a hostname or url
     SetDownloadSpeedLimit(DownloadId, Option<u64>),
     SetFileSpeedLimit(DownloadId, FileId, Option<u64>),
-}
-
-pub struct DownloadLimiterGroup {
-    download_limiter: Arc<BandwidthLimiter>,
-    file_limiters: DashMap<FileId, Arc<BandwidthLimiter>>,
-}
-
-impl DownloadLimiterGroup {
-    pub fn new() -> Self {
-        let download_limiter = BandwidthLimiter::new(0);
-        download_limiter.set_unlimited(true);
-
-        Self { 
-            download_limiter: Arc::new(download_limiter),
-            file_limiters: DashMap::new()
-        }
-    }
-
-    pub fn from_settings(settings: Option<&DownloadSettings>) -> Self {
-        let group = Self::new();
-
-        if let Some(settings) = settings {
-            if let Some(limit) = settings.speed_limit {
-                group.download_limiter.set_unlimited(false);
-                group.download_limiter.set_limit(limit);
-            }
-
-            for (&file_id, file_setting) in &settings.file_settings {
-                if let Some(limit) = file_setting.speed_limit {
-                    let f_limit = BandwidthLimiter::new(limit);
-                    f_limit.set_unlimited(false);
-                    group.file_limiters.insert(file_id, Arc::new(f_limit));
-                }
-            }
-        }
-
-        group
-    }
-
-    pub fn download_limiter(&self) -> Arc<BandwidthLimiter> {
-        self.download_limiter.clone()
-    }
-
-    pub fn file_limiters(&self) -> &DashMap<FileId, Arc<BandwidthLimiter>> {
-        &self.file_limiters
-    }
-}
-
-pub struct LimiterRegistry {
-    global_limit: Arc<BandwidthLimiter>,
-    host_limits: DashMap<Host, Weak<BandwidthLimiter>>,
-    downloads: DashMap<DownloadId, Weak<DownloadLimiterGroup>>,
-}
-
-impl LimiterRegistry {
-    pub fn new() -> Self {
-        let global_limit = BandwidthLimiter::new(0);
-        global_limit.set_unlimited(true);
-
-        Self {
-            global_limit: Arc::new(global_limit),
-            host_limits: DashMap::new(),
-            downloads: DashMap::new(),
-        }
-    }
-
-    pub fn global_limit(&self) -> Arc<BandwidthLimiter> {
-        self.global_limit.clone()
-    }
-
-    pub fn host_limits(&self) -> &DashMap<Host, Weak<BandwidthLimiter>> {
-        &self.host_limits
-    }
-
-    pub fn downloads(&self) -> &DashMap<DownloadId, Weak<DownloadLimiterGroup>> {
-        &self.downloads
-    }
 }
 
 #[derive(Debug)]
@@ -404,115 +318,5 @@ impl AppManagerHandle {
 
     pub async fn set_file_limit(&self, download_id: DownloadId, file_id: FileId, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
         self.sender.send(AppManagerCommand::SetFileSpeedLimit(download_id, file_id, limit)).await
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumString, Default)]
-#[repr(u8)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "state", content = "value")]
-#[strum(serialize_all = "snake_case")]
-pub enum FileFailureReason {
-    HashMismatch,
-    DiskError,
-    ClientError,
-    ServerError,
-    MetadataFetchError,
-    BadPath,
-    #[default]
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, IntoStaticStr, EnumDiscriminants, Default)]
-#[repr(u8)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "state", content = "value")]
-#[strum(serialize_all = "snake_case")]
-#[strum_discriminants(derive(EnumString, IntoStaticStr))]
-#[strum_discriminants(name(DownloadFailureReasonParse))] 
-#[strum_discriminants(strum(serialize_all = "snake_case"))]
-pub enum DownloadFailureReason {
-    HashMismatch,
-    DiskError,
-    ClientError,
-    ServerError,
-    MetadataFetchError,
-    MultipleErrors,
-    AllFilesFailed(FileFailureReason),
-    FilesMissingFromDisk,
-    StateDesynchronized,
-    BadPath,
-    #[default]
-    Unknown,
-}
-
-impl DownloadFailureReason {
-    pub fn from_db_string(reason_str: &str) -> Option<Self> {
-        if let Some((_prefix, inner_str)) = reason_str.split_once(':') {
-            let inner_reason = FileFailureReason::from_str(inner_str).ok()?;
-            return Some(Self::AllFilesFailed(inner_reason));
-        }
-        
-        let parsed_reason = DownloadFailureReasonParse::from_str(reason_str).ok()?;
-
-        let reason = Some(match parsed_reason {
-            DownloadFailureReasonParse::HashMismatch => Self::HashMismatch,
-            DownloadFailureReasonParse::DiskError => Self::DiskError,
-            DownloadFailureReasonParse::ClientError => Self::ClientError,
-            DownloadFailureReasonParse::ServerError => Self::ServerError,
-            DownloadFailureReasonParse::MetadataFetchError => Self::MetadataFetchError,
-            DownloadFailureReasonParse::MultipleErrors => Self::MultipleErrors,
-            DownloadFailureReasonParse::FilesMissingFromDisk => Self::FilesMissingFromDisk,
-            DownloadFailureReasonParse::StateDesynchronized => Self::StateDesynchronized,
-            DownloadFailureReasonParse::Unknown => Self::Unknown,
-            DownloadFailureReasonParse::BadPath => Self::BadPath,
-            
-            // Fallback if for some reason we still get here
-            DownloadFailureReasonParse::AllFilesFailed => return None,
-        });
-
-        reason
-    }
-}
-
-pub fn serialize_hash<S>(hash: &Option<u128>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if serializer.is_human_readable() {
-        match hash {
-            Some(v) => serializer.collect_str(v),
-            None => serializer.serialize_none(),
-        }
-    } else {
-        hash.serialize(serializer)
-    }
-}
-
-pub fn serialize_chunks<S>(chunks: &BitVec<u8, Msb0>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if serializer.is_human_readable() {
-        serializer.serialize_none()
-    } else {
-        chunks.serialize(serializer)
-    }
-}
-
-#[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
-pub enum FileSize {
-    Unknown,
-    Known(u64)
-}
-
-impl Serialize for FileSize {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer {
-        match self {
-            FileSize::Unknown => "unknown".serialize(serializer),
-            FileSize::Known(size) => size.serialize(serializer),
-        }
     }
 }

@@ -7,15 +7,32 @@ use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
 use os_str_bytes::OsStringBytes;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::client_state_manager::{DownloadSnapshot, FileSnapshot};
 use crate::db::rows::{DownloadFileRow, DownloadFolderRow, DownloadRow};
-use crate::app_manager::{DownloadFailureReason, FileFailureReason, FileSize};
+use crate::download::error::{DownloadFailureReason, FileFailureReason};
 use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
-use crate::app_manager::{serialize_hash, serialize_chunks};
+use crate::download::error::{serialize_hash, serialize_chunks};
 use crate::download_task::{BLOCK_SIZE, HASH_CHUNK_SIZE};
+
+#[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
+pub enum FileSize {
+    Unknown,
+    Known(u64)
+}
+
+impl Serialize for FileSize {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer {
+        match self {
+            FileSize::Unknown => "unknown".serialize(serializer),
+            FileSize::Known(size) => size.serialize(serializer),
+        }
+    }
+}
 
 pub trait DownloadItem {
     type Id;

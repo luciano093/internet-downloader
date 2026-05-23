@@ -15,8 +15,9 @@ use tracing::{info, warn};
 
 use crate::client_state_manager::{DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, UiStateEvent};
 use crate::db::state_manager::StateManager;
-use crate::app_manager::{FileFailureReason, FileSize, AppManagerCommand};
-use crate::download::items::{ActiveOperation, ChangedItemOperation, ChangedItemStatus, Download, DownloadId, DownloadItem, FileId};
+use crate::app_manager::AppManagerCommand;
+use crate::download::error::FileFailureReason;
+use crate::download::items::{ActiveOperation, ChangedItemOperation, ChangedItemStatus, Download, DownloadId, DownloadItem, FileId, FileSize};
 use crate::download::status::FileStatus;
 use crate::download_task::{BLOCKS_PER_HASH, HASH_CHUNK_SIZE};
 use crate::utils::file_utils::hash_file;

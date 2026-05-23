@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::app_manager::FileSize;
+use crate::download::items::FileSize;
 use crate::download::items::ActiveOperation;
 use crate::download::items::DownloadId;
 use crate::download::items::DownloadItem;

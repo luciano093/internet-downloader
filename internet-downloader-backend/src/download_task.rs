@@ -20,11 +20,13 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::client_state_manager::{DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, UiStateEvent};
 use crate::context::AppContext;
-use crate::download::items::{ChangedItemStatus, Download, DownloadId, DownloadItem, DownloadTypeRef, FileId};
+use crate::download::error::FileFailureReason;
+use crate::download::items::{ChangedItemStatus, Download, DownloadId, DownloadItem, DownloadTypeRef, FileId, FileSize};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket};
-use crate::app_manager::{DownloadLimiterGroup, FileFailureReason, FileSize, AppManagerCommand};
+use crate::app_manager::AppManagerCommand;
 use crate::download_writer_manager::FileChunk;
 use crate::host_manager::{ActiveDownloadPermit, HostMessage, ValidDownloadPermit};
+use crate::limiters::DownloadLimiterGroup;
 use crate::shared_file_map::SharedFileMap;
 use crate::utils::network_utils::{BandwidthLimiter, ThrottledStream};
 

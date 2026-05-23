@@ -13,3 +13,4 @@ pub mod utils;
 pub mod download_writer_manager;
 pub mod download_registry;
 pub mod verification_tracker;
+pub mod limiters;
