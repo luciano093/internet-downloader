@@ -24,20 +24,24 @@ impl VerificationTracker {
             needs_verification: HashSet::new(),
             verifier,
         };
-        
+
         for &download_id in downloads.keys() {
-            verification_tracker.verifying.insert(download_id);
             verification_tracker.needs_verification.insert(download_id);
         }
 
-        let _ = verification_tracker.verifier.verify_downloads(downloads).await;
+        if verification_tracker.verifier.verify_downloads(downloads.clone()).await.is_ok() {
+            for &download_id in downloads.keys() {
+                verification_tracker.verifying.insert(download_id);
+            }
+        }
         
         verification_tracker
     }
 
     pub async fn verify(&mut self, download: Download) {
-         self.verifying.insert(download.id());
-         let _ = self.verifier.verify_download(download).await;
+        if self.verifier.verify_download(download.clone()).await.is_ok() {
+            self.verifying.insert(download.id());
+        }
     }
 
     pub async fn cancel(&mut self, download_id: DownloadId) {
