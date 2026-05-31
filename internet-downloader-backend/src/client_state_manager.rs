@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::download::items::ChangedItemOperation;
 use crate::download::items::ChangedItemStatus;
 use crate::download::items::FileSize;
 use crate::download::items::ActiveOperation;
@@ -167,6 +168,29 @@ impl UiManagerHandle {
                 }
                 ChangedItemStatus::Download(status) => {
                     let update = DownloadUpdate::StatusChanged { id: download_id, status };
+                    self.update_download(update);
+                },
+            }
+        }
+    }
+    
+    pub fn update_operations(&self, download_id: DownloadId, changed_items: Vec<ChangedItemOperation>) {
+        if changed_items.is_empty() {
+            return;
+        }
+
+        for item in changed_items {
+            match item {
+                ChangedItemOperation::File { id, operation } => {
+                    let update = FileUpdate::Operation { id, operation };
+                    self.update_file(download_id, update);
+                },
+                ChangedItemOperation::Folder { id, operation } => {
+                    let update = FolderUpdate::Operation { id, operation };
+                    self.update_folder(download_id, update);
+                }
+                ChangedItemOperation::Download(operation) => {
+                    let update = DownloadUpdate::OperationChanged { id: download_id, operation };
                     self.update_download(update);
                 },
             }
