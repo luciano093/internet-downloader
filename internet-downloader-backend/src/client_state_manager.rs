@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::download::items::ChangedItemStatus;
 use crate::download::items::FileSize;
 use crate::download::items::ActiveOperation;
 use crate::download::items::DownloadId;
@@ -135,6 +136,41 @@ impl UiManagerHandle {
     
     pub fn add_download(&self, download: Download) {
         let _ = self.event_sender.send(UiStateEvent::AddDownload(download));
+    }
+
+    pub fn update_file(&self, download_id: DownloadId, update: FileUpdate) {
+        let _ = self.event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(update) }));
+    }
+    
+    pub fn update_folder(&self, download_id: DownloadId, update: FolderUpdate) {
+        let _ = self.event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::Folder(update) }));
+    }
+    
+    pub fn update_download(&self, update: DownloadUpdate) {
+        let _ = self.event_sender.send(UiStateEvent::AddUpdate(update));
+    }
+
+    pub fn update_statuses(&self, download_id: DownloadId, changed_items: Vec<ChangedItemStatus>) {
+        if changed_items.is_empty() {
+            return;
+        }
+
+        for item in changed_items {
+            match item {
+                ChangedItemStatus::File { id, status } => {
+                    let update = FileUpdate::Status { id, status };
+                    self.update_file(download_id, update);
+                },
+                ChangedItemStatus::Folder { id, status } => {
+                    let update = FolderUpdate::Status { id, status };
+                    self.update_folder(download_id, update);
+                }
+                ChangedItemStatus::Download(status) => {
+                    let update = DownloadUpdate::StatusChanged { id: download_id, status };
+                    self.update_download(update);
+                },
+            }
+        }
     }
     
     pub fn remove_download(&self, download_id: DownloadId) {
