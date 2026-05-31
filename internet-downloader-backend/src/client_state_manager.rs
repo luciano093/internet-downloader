@@ -32,6 +32,16 @@ pub enum DownloadUpdate {
     ItemUpdated { id: DownloadId, item_update: ItemUpdate }, 
 }
 
+impl DownloadUpdate {
+    pub fn id(&self) -> DownloadId {
+        match self {
+            DownloadUpdate::StatusChanged { id, .. } => *id,
+            DownloadUpdate::OperationChanged { id, .. } => *id,
+            DownloadUpdate::ItemUpdated { id, .. } => *id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum ItemUpdate {
     File(FileUpdate),
@@ -63,6 +73,15 @@ impl FileUpdate {
 pub enum FolderUpdate {
     Status { id: FolderId, status: DownloadStatus },
     Operation { id: FolderId, operation: Option<ActiveOperation> },
+}
+
+impl FolderUpdate {
+    pub fn id(&self) -> FolderId {
+        match self {
+            FolderUpdate::Status { id, .. } => *id,
+            FolderUpdate::Operation { id, .. } => *id,
+        }
+    }
 }
 
 pub enum UiStateEvent {
@@ -253,13 +272,7 @@ impl UiManager {
                             let _ = self.delta_sender.send(FrontendMessage::DownloadRemoved { id });
                         },
                         UiStateEvent::AddUpdate(download_update) => {
-                            let update_id = match &download_update {
-                                DownloadUpdate::StatusChanged { id, .. } => *id,
-                                DownloadUpdate::ItemUpdated { id, .. } => *id,
-                                DownloadUpdate::OperationChanged { id, .. } => *id,
-                            };
-
-                            if removed_ids.contains(&update_id) {
+                            if removed_ids.contains(&download_update.id()) {
                                 continue;
                             }
 
@@ -346,27 +359,14 @@ impl DeltaManager {
 
                     match item_update {
                         ItemUpdate::File(file_update) => {
-                            let file_id = match &file_update {
-                                FileUpdate::Status { id, .. } => *id,
-                                FileUpdate::Operation { id, .. } => *id,
-                                FileUpdate::Hash { id, .. } => *id,
-                                FileUpdate::FileSize { id, .. } => *id,
-                                FileUpdate::BytesDownloaded { id, .. } => *id,
-                            };
-
-                            let file_diff = download_diff.files.entry(file_id).or_insert_with(|| {
+                            let file_diff = download_diff.files.entry(file_update.id()).or_insert_with(|| {
                                 FileDiff::new()
                             });
 
                             file_diff.update(file_update);
                         },
                         ItemUpdate::Folder(folder_update) => {
-                            let folder_id = match &folder_update {
-                                FolderUpdate::Status { id, .. } => *id,
-                                FolderUpdate::Operation { id, .. } => *id,
-                            };
-
-                            let folder_diff = download_diff.folders.entry(folder_id).or_insert_with(|| {
+                            let folder_diff = download_diff.folders.entry(folder_update.id()).or_insert_with(|| {
                                 FolderDiff::new()
                             });
 
