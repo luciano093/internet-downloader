@@ -424,6 +424,9 @@ impl DownloadSupervisor {
                                     // Set blocks size
                                     let block_count = file_size.div_ceil(BLOCK_SIZE as u64) as usize;
                                     file.blocks_mut().resize(block_count, false);
+
+                                    let hash_chunk_count = file_size.div_ceil(HASH_CHUNK_SIZE as u64) as usize;
+                                    file.chunk_hashes_mut().resize(hash_chunk_count, None);
                                     
                                     let jobs = Self::get_range_jobs(
                                         download_id, 
