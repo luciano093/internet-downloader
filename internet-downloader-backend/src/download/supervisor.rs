@@ -432,6 +432,8 @@ impl DownloadSupervisor {
                                     file.set_size(FileSize::Known(file_size));
                                     file.set_file_name(file_name);
 
+                                    self.app_context.ui_handle.update_file(download_id, FileUpdate::FileSize { id: file_id, len: file_size });
+
                                     // Set blocks size
                                     let block_count = file_size.div_ceil(BLOCK_SIZE as u64) as usize;
                                     file.blocks_mut().resize(block_count, false);
@@ -474,9 +476,10 @@ impl DownloadSupervisor {
 
                             let chunk_count = bytes_downloaded.div_ceil(BLOCK_SIZE as u64) as usize;
                             file.blocks_mut().resize(chunk_count, true);
+
                             trace!("Got {} chunks for file {} in download {}", file.blocks().len(), file_id, self.download.id());
 
-                            self.app_context.ui_handle.update_file(self.download.id(), FileUpdate::FileSize { id: file_id, len: bytes_downloaded });
+                            self.app_context.ui_handle.update_file(self.download.id(), FileUpdate::BytesDownloaded { id: file_id, len: bytes_downloaded });
                             
                             // Update new statuses
                             if let Some(changed_items) = self.download.set_file_status(file_id, FileStatus::Completed) {
@@ -518,6 +521,9 @@ impl DownloadSupervisor {
                                     .unwrap_or(0);
 
                                 trace!("file {} ({}) finished! got {} bytes", file.id(), file.name(), bytes_downloaded);
+
+                                let changed_items = self.download.set_file_active_operation(file_id, None);
+                                self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
                                 
                                 if let Some(changed_items) = self.download.set_file_status(file_id, FileStatus::Completed) {
                                     self.app_context.ui_handle.update_statuses(self.download.id(), changed_items);
