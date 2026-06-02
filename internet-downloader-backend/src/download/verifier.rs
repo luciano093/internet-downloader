@@ -5,19 +5,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use indexmap::IndexMap;
 use memmap2::MmapOptions;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, oneshot};
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::app::manager::AppManagerCommand;
-use crate::client_state_manager::{DownloadUpdate, FileUpdate, FolderUpdate, ItemUpdate, UiStateEvent};
+use crate::client_state_manager::UiManagerHandle;
 use crate::db::state_manager::StateManager;
 use crate::download::error::FileFailureReason;
-use crate::download::items::{ActiveOperation, ChangedItemOperation, ChangedItemStatus, Download, DownloadId, DownloadItem, FileId, FileSize};
+use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, FileId, FileSize};
 use crate::download::status::FileStatus;
 use crate::download::supervisor::{BLOCKS_PER_HASH, HASH_CHUNK_SIZE};
 use crate::utils::file_utils::hash_file;
@@ -29,8 +27,7 @@ struct FileVerificationDiff {
 }
 
 pub enum VerifierMessage {
-    VerifyDownload(Download),
-    VerifyDownloads(IndexMap<DownloadId, Download>),
+    VerifyDownload(Download, oneshot::Sender<Download>),
     VerificationFinished(DownloadId),
     CancelVerification(DownloadId),
     PauseVerification(DownloadId),
@@ -39,50 +36,22 @@ pub enum VerifierMessage {
 struct DownloadGuard {
     download_id: DownloadId,
     download: Option<Download>,
-    ui_sender: UnboundedSender<UiStateEvent>,
+    ui_handle: UiManagerHandle,
     verifier_sender: mpsc::Sender<VerifierMessage>,
 }
 
 impl Drop for DownloadGuard {
     fn drop(&mut self) {
         let download = self.download.take();
-        let ui_sender = self.ui_sender.clone();
+        let ui_handle = self.ui_handle.clone();
         let verifier_sender = self.verifier_sender.clone();
         let download_id = self.download_id;
 
         tokio::spawn(async move {
             if let Some(mut download) = download {
                 let changed_items = download.set_active_operation(None);
-                
                 // Send every change to ui
-                for item in changed_items {
-                    match item {
-                        ChangedItemOperation::File { id, operation } => {
-                            let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                                DownloadUpdate::ItemUpdated { 
-                                    id: download_id, 
-                                    item_update: ItemUpdate::File(FileUpdate::Operation { id, operation }) 
-                                }
-                            ));
-                        },
-                        ChangedItemOperation::Folder { id, operation } => {
-                            let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                                DownloadUpdate::ItemUpdated { 
-                                    id: download_id,
-                                    item_update: ItemUpdate::Folder(FolderUpdate::Operation { id, operation }) 
-                                }
-                            ));
-                        }
-                        ChangedItemOperation::Download(operation) => {
-                            let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                                DownloadUpdate::OperationChanged { 
-                                    id: download_id,
-                                    operation,
-                                }
-                            ));
-                        },
-                    }
-                }
+                ui_handle.update_operations(download_id, changed_items);
             }
 
             let _ = verifier_sender.send(VerifierMessage::VerificationFinished(download_id)).await;
@@ -93,9 +62,9 @@ impl Drop for DownloadGuard {
 struct Verifier {
     receiver: mpsc::Receiver<VerifierMessage>,
     sender: mpsc::Sender<VerifierMessage>,
-    app_manager: mpsc::Sender<AppManagerCommand>,
-    ui_sender: UnboundedSender<UiStateEvent>,
+    ui_handle: UiManagerHandle,
     db_manager: StateManager,
+    cleanup_sender: mpsc::UnboundedSender<DownloadId>,
     handles: HashMap<DownloadId, (JoinHandle<()>, Arc<AtomicBool>)>, // We save an atomic bool in case we need to kill nested handles
     semaphore: Arc<Semaphore>,
 }
@@ -104,18 +73,18 @@ impl Verifier {
     fn new(
         receiver: mpsc::Receiver<VerifierMessage>,
         sender: mpsc::Sender<VerifierMessage>,
-        app_manager: mpsc::Sender<AppManagerCommand>,
-        ui_sender: UnboundedSender<UiStateEvent>,
+        ui_handle: UiManagerHandle,
         db_manager: StateManager,
+        cleanup_sender: mpsc::UnboundedSender<DownloadId>,
     ) -> Self
     {
 
         Self {
             receiver,
             sender,
-            app_manager,
-            ui_sender,
+            ui_handle,
             db_manager,
+            cleanup_sender,
             handles: HashMap::new(),
             semaphore: Arc::new(Semaphore::new(1)), 
         }
@@ -131,9 +100,8 @@ impl Verifier {
 
                         // We want to wait until the handle ends before sending the clean up message
                         let _ = handle.await; 
+                        let _ = self.cleanup_sender.send(download_id);
                     }
-
-                    let _ = self.app_manager.send(AppManagerCommand::CleanUpDownload(download_id));
                 },
                 VerifierMessage::PauseVerification(download_id) => {
                     if let Some((handle, cancel_flag)) = self.handles.remove(&download_id) {
@@ -141,7 +109,7 @@ impl Verifier {
                         handle.abort();
                     }
                 },
-                VerifierMessage::VerifyDownload(download) => {
+                VerifierMessage::VerifyDownload(download, reply) => {
                     let download_name = download.name().clone();
 
                     if self.handles.contains_key(&download.id()) {
@@ -151,23 +119,8 @@ impl Verifier {
 
                     info!("Queued {} for verification", download_name); 
 
-                    let _ = self.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
-                    self.handle_download(download).await;
-                },
-                VerifierMessage::VerifyDownloads(download_map) => {
-                    for (_, download) in download_map {
-                        let download_name = download.name().clone();
-
-                        if self.handles.contains_key(&download.id()) {
-                            warn!("Download {} is already verifying. Ignoring duplicate request.", download.id());
-                            continue;
-                        }
-
-                        info!("Queued {} for verification", download_name); 
-
-                        let _ = self.ui_sender.send(UiStateEvent::AddDownload(download.clone()));
-                        self.handle_download(download).await;
-                    }
+                    let _ = self.ui_handle.add_download(download.clone());
+                    self.handle_download(download, reply).await;
                 },
                 VerifierMessage::VerificationFinished(download_id) => {
                     self.handles.remove(&download_id); 
@@ -176,45 +129,15 @@ impl Verifier {
         }
     }
 
-    async fn handle_download(&mut self, mut download: Download) {
+    async fn handle_download(&mut self, mut download: Download, reply: oneshot::Sender<Download>) {
         let download_id = download.id();
         let changed_items = download.set_active_operation(Some(ActiveOperation::Verifying));
         
         // Send every change to ui
-        for item in changed_items {
-            match item {
-                ChangedItemOperation::File { id, operation } => {
-                    let _ = self.ui_sender.send(UiStateEvent::AddUpdate(
-                        DownloadUpdate::ItemUpdated { 
-                            id: download_id, 
-                            item_update: ItemUpdate::File(FileUpdate::Operation { id, operation }) 
-                        }
-                    ));
-                },
-                ChangedItemOperation::Folder { id, operation } => {
-                    let _ = self.ui_sender.send(UiStateEvent::AddUpdate(
-                        DownloadUpdate::ItemUpdated { 
-                            id: download_id,
-                            item_update: ItemUpdate::Folder(FolderUpdate::Operation { id, operation }) 
-                        }
-                    ));
-                }
-                ChangedItemOperation::Download(operation) => {
-                    let _ = self.ui_sender.send(UiStateEvent::AddUpdate(
-                        DownloadUpdate::OperationChanged { 
-                            id: download_id,
-                            operation,
-                        }
-                    ));
-                },
-            }
-        }
+        self.ui_handle.update_operations(download_id, changed_items);
 
         self.db_manager.write_download(&download).await.unwrap();
-
-        let ui_sender = self.ui_sender.clone();
         let db_manager = self.db_manager.clone();
-        let app_manager = self.app_manager.clone();
 
         let semaphore = self.semaphore.clone();
         let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -224,7 +147,7 @@ impl Verifier {
         let mut download_guard = DownloadGuard { 
             download_id: download_id,
             download: Some(download),
-            ui_sender: self.ui_sender.clone(),
+            ui_handle: self.ui_handle.clone(),
             verifier_sender: self.sender.clone(),
         };
 
@@ -242,35 +165,8 @@ impl Verifier {
 
                 if let Some(new_status) = diff.new_status {
                     if let Some(changed_items) = download_guard.download.as_mut().unwrap().set_file_status(file_id, new_status) {
-                        for item in changed_items {
-                            match item {
-                                ChangedItemStatus::File { id, status } => {
-                                    let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                                        DownloadUpdate::ItemUpdated { 
-                                            id: download_id, 
-                                            item_update: ItemUpdate::File(FileUpdate::Status { id, status }) 
-                                        }
-                                    ));
-                                },
-                                ChangedItemStatus::Folder { id, status } => {
-                                    let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                                        DownloadUpdate::ItemUpdated { 
-                                            id: download_id,
-                                            item_update: ItemUpdate::Folder(FolderUpdate::Status { id, status, }) 
-                                        }
-                                    ));
-                                }
-                                ChangedItemStatus::Download(status) => {
-                                    let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                                        DownloadUpdate::StatusChanged { 
-                                            id: download_id,
-                                            status,
-                                        }
-                                    ));
-                                },
-                            }
-                        }
-                    }                      
+                        download_guard.ui_handle.update_statuses(download_id, changed_items);
+                    }
                 }
 
                 if let Some(failed_chunks) = diff.failed_chunks {
@@ -295,39 +191,12 @@ impl Verifier {
             let changed_items = download.set_active_operation(None);
             
             // Send every change to ui
-            for item in changed_items {
-                match item {
-                    ChangedItemOperation::File { id, operation } => {
-                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                            DownloadUpdate::ItemUpdated { 
-                                id: download_id, 
-                                item_update: ItemUpdate::File(FileUpdate::Operation { id, operation }) 
-                            }
-                        ));
-                    },
-                    ChangedItemOperation::Folder { id, operation } => {
-                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                            DownloadUpdate::ItemUpdated { 
-                                id: download_id,
-                                item_update: ItemUpdate::Folder(FolderUpdate::Operation { id, operation }) 
-                            }
-                        ));
-                    }
-                    ChangedItemOperation::Download(operation) => {
-                        let _ = ui_sender.send(UiStateEvent::AddUpdate(
-                            DownloadUpdate::OperationChanged { 
-                                id: download_id,
-                                operation,
-                            }
-                        ));
-                    },
-                }
-            }
+            download_guard.ui_handle.update_operations(download_id, changed_items);
 
             info!("Finished verification {} in {:?}", download.name(), start_time.elapsed());
 
             db_manager.write_download(&download).await.unwrap();
-            let _ = app_manager.send(AppManagerCommand::DownloadVerified(download));
+            let _ = reply.send(download);
         });
 
         self.handles.insert(download_id, (handle, cancel_flag));
@@ -523,20 +392,21 @@ impl Verifier {
     }
 }
 
+#[derive(Clone)]
 pub struct VerifierHandle {
     sender: mpsc::Sender<VerifierMessage>
 }
 
 impl VerifierHandle {
     pub fn spawn(
-        app_manager: mpsc::Sender<AppManagerCommand>,
-        ui_sender: UnboundedSender<UiStateEvent>,
+        ui_handle: UiManagerHandle,
         db_manager: StateManager,
+        cleanup_sender: mpsc::UnboundedSender<DownloadId>,
     )-> Self
     {
         let (sender, receiver) = mpsc::channel(1000);
 
-        let verifier = Verifier::new(receiver, sender.clone(), app_manager, ui_sender, db_manager);
+        let verifier = Verifier::new(receiver, sender.clone(), ui_handle, db_manager, cleanup_sender);
 
         tokio::spawn(async move {
             verifier.run().await;
@@ -547,12 +417,8 @@ impl VerifierHandle {
         }
     }
 
-    pub async fn verify_download(&self, download: Download) -> Result<(), SendError<VerifierMessage>> {
-        self.sender.send(VerifierMessage::VerifyDownload(download)).await
-    }
-
-    pub async fn verify_downloads(&self, downloads: IndexMap<DownloadId, Download>) -> Result<(), SendError<VerifierMessage>> {
-        self.sender.send(VerifierMessage::VerifyDownloads(downloads)).await
+    pub async fn verify_download(&self, download: Download, receiver: oneshot::Sender<Download>) -> Result<(), SendError<VerifierMessage>> {
+        self.sender.send(VerifierMessage::VerifyDownload(download, receiver)).await
     }
 
     pub async fn cancel_verification(&self, download_id: DownloadId) -> Result<(), SendError<VerifierMessage>> {

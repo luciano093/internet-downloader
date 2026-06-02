@@ -41,7 +41,7 @@ async fn main() {
     let console_layer = tracing_subscriber::fmt::layer()
         .pretty()
         .with_target(false)
-        .with_filter(EnvFilter::new("info"));
+        .with_filter(EnvFilter::new("internet_downloader_backend=debug"));
 
     tracing_subscriber::registry()
         .with(console_layer)
@@ -59,7 +59,7 @@ async fn main() {
     let state_manager = StateManager::new("mydb.sqlite3").await.unwrap();
     state_manager.create_tables().await.unwrap();
 
-    let app_manager = AppManagerHandle::new(state_manager);
+    let app_manager = AppManagerHandle::spawn(state_manager);
 
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
@@ -121,16 +121,17 @@ async fn add_download(State(manager): State<AppManagerHandle>, Json(json): Json<
 
 async fn download_stream(State(manager): State<AppManagerHandle>) -> impl IntoResponse  {
     let receiver = manager.subscribe();
-    let downloads = manager.get_snapshot().await;
 
-    let snapshot: Vec<DownloadSnapshot> = downloads
-        .into_iter()
-        .map(|(_id, download)| {
-            DownloadSnapshot::from(download)
-        })
-        .collect();
-
-    let stream   = async_stream::stream! {
+    let stream = async_stream::stream! {
+        let downloads = manager.get_snapshot().await;
+    
+        let snapshot: Vec<DownloadSnapshot> = downloads
+            .into_iter()
+            .map(|(_id, download)| {
+                DownloadSnapshot::from(download)
+            })
+            .collect();
+        
         let snapshot_json = serde_json::to_string(&snapshot).unwrap();
 
         // explicit turbofish as Infallible can't be inferred automatically

@@ -1,10 +1,10 @@
 use reqwest::Client;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc;
 
 use crate::app::manager::AppManagerCommand;
-use crate::client_state_manager::UiStateEvent;
+use crate::client_state_manager::UiManagerHandle;
 use crate::download::writer::DownloadWriterManager;
-use crate::network_manager::NetworkConfig;
+use crate::network_manager::{NetworkConfig, NetworkHandle};
 use crate::plugin_registry::PluginRegistryHandler;
 use crate::db::state_manager::StateManager;
 
@@ -13,8 +13,9 @@ pub struct AppContext {
     pub client: Client,
     pub network_config: NetworkConfig,
     pub app_manager: mpsc::Sender<AppManagerCommand>,
-    pub ui_sender: UnboundedSender<UiStateEvent>,
+    pub ui_handle: UiManagerHandle,
     pub db_manager: StateManager,
     pub plugin_registry: PluginRegistryHandler,
     pub writer_handle: DownloadWriterManager,
+    pub network_handle: NetworkHandle,
 }

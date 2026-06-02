@@ -28,7 +28,7 @@ pub struct DownloadWriterManager {
 }
 
 impl DownloadWriterManager {
-    pub fn new() -> Self {
+    pub fn spawn() -> Self {
         let (sender, receiver) = flume::bounded::<FileChunk>(32);
 
         for _ in 0..8 {
@@ -46,11 +46,11 @@ impl DownloadWriterManager {
         }
     }
 
-    pub async fn create_file(&self, path: PathBuf, size: u64) -> Result<Arc<SharedFileMap>, FileInitializationError> {
+    pub async fn create_file(path: PathBuf, size: u64) -> Result<SharedFileMap, FileInitializationError> {
         let join_result = tokio::task::spawn_blocking(move || {
             let file = SharedFileMap::new(path, size)?;
 
-            Ok(Arc::new(file))
+            Ok(file)
         })
         .await;
 

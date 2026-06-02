@@ -21,6 +21,7 @@ indexmap = { version = "2.13.0", features = ["serde"] }
 memmap2 = "0.9.9"
 os_str_bytes = "7.1.1"
 pin-project-lite = "0.2.17"
+rand = "0.10.1"
 regex = { version = "1.12.2", features = ["use_std"] }
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset", "system-proxy", "stream"] }
 rquickjs = { version = "0.11.0", features = ["full-async", "parallel"] }
@@ -47,4 +48,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 
 [profile.release]
 debug = true
-strip = false 
+strip = false

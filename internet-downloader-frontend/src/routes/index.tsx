@@ -7,7 +7,7 @@ import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import BottomDetailsPane from './downloads/components/BottomDetailsPane'
-import { STATE_TO_CATEGORY } from './downloads/lib/filters'
+import { getFilterCategory } from './downloads/lib/filters'
 
 export const Route = createFileRoute('/')({
   component: Index,
@@ -69,7 +69,7 @@ function Index() {
       return false;
     }
 
-    const downloadCategory = STATE_TO_CATEGORY[download.status.state];
+    const downloadCategory = getFilterCategory(download.status, download.active_operation);
 
     // We either get all downloads that match our current status filter
     // or otherwise, if the statusFilter is not set, we set this to true

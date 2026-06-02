@@ -58,7 +58,6 @@ pub struct DownloadFileRow {
     pub size_type: Option<String>,
     pub size_bytes: Option<i64>,
     pub retries: i64,
-    pub wait_time: Option<i64>,
 }
 
 impl DownloadFileRow {

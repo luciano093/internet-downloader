@@ -15,20 +15,14 @@ use crate::download::error::{DownloadFailureReason, FileFailureReason};
 #[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum DownloadStatus {
     #[default]
-    Queued,
-    Initializing,
-    Verifying,
-    FetchingMetadata,
-    InProgress,
-    Completed,
-    CompletedWithErrors,
-    Paused,
-    Failed(DownloadFailureReason),
+    Uninitialized,
+    MetadataFetched,
+    Partial,
     NotFound,
-    Retrying,
-    Waiting
+    Completed,
+    Failed(DownloadFailureReason),
+    CompletedWithErrors,
 }
-
 
 impl DownloadStatus {
     pub fn from_db_columns(status: &str, failure_reason: Option<&str>) -> Option<Self> {
@@ -41,60 +35,27 @@ impl DownloadStatus {
         let parsed_state = DownloadStatusParse::from_str(status).ok()?;
 
         Some(match parsed_state {
-            DownloadStatusParse::Queued => Self::Queued,
-            DownloadStatusParse::Initializing => Self::Initializing,
-            DownloadStatusParse::Verifying => Self::Verifying,
-            DownloadStatusParse::FetchingMetadata => Self::FetchingMetadata,
-            DownloadStatusParse::InProgress => Self::InProgress,
-            DownloadStatusParse::Completed => Self::Completed,
-            DownloadStatusParse::CompletedWithErrors => Self::CompletedWithErrors,
-            DownloadStatusParse::Paused => Self::Paused,
-            DownloadStatusParse::NotFound => Self::NotFound,
-            DownloadStatusParse::Retrying => Self::Retrying,
-            DownloadStatusParse::Waiting => Self::Waiting,
+            DownloadStatusParse::Uninitialized => DownloadStatus::Uninitialized,
+            DownloadStatusParse::MetadataFetched => DownloadStatus::MetadataFetched,
+            DownloadStatusParse::Partial => DownloadStatus::Partial,
+            DownloadStatusParse::NotFound => DownloadStatus::NotFound,
+            DownloadStatusParse::Completed => DownloadStatus::Completed,
+            DownloadStatusParse::CompletedWithErrors => DownloadStatus::CompletedWithErrors,
             
             // Fallback if for some reason we still get Failed here
-            DownloadStatusParse::Failed => return None, 
+            DownloadStatusParse::Failed => return None,
         })
-    }
-
-    /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
-    pub fn can_set_to_queue(&self) -> bool {
-        match self {
-            Self::Completed | 
-            Self::CompletedWithErrors |
-            Self::NotFound | 
-            Self::Queued => false,
-
-            Self::Paused | 
-            Self::Failed(_) | 
-            Self::Initializing | 
-            Self::Verifying | 
-            Self::FetchingMetadata | 
-            Self::InProgress | 
-            Self::Retrying | 
-            Self::Waiting => true,
-        }
     }
 
     pub fn bucket(&self) -> StatusBucket {
         match self {
-            Self::Queued => StatusBucket::Queued,
-            Self::Initializing => StatusBucket::Initializing,
-            Self::Verifying => StatusBucket::Verifying,
-            Self::FetchingMetadata => StatusBucket::FetchingMetadata,
-            Self::InProgress => StatusBucket::InProgress,
-            Self::Retrying => StatusBucket::Retrying,
-            Self::Waiting => StatusBucket::Waiting,
-
-            Self::Completed => StatusBucket::Completed,
-
-            Self::CompletedWithErrors => StatusBucket::CompletedWithErrors,
-
-            Self::Failed(_) | 
-            Self::NotFound => StatusBucket::Error,
-            
-            Self::Paused => StatusBucket::Paused,
+            DownloadStatus::Uninitialized => StatusBucket::Uninitialized,
+            DownloadStatus::MetadataFetched => StatusBucket::MetadataFetched,
+            DownloadStatus::Partial => StatusBucket::Partial,
+            DownloadStatus::Completed => StatusBucket::Completed,
+            DownloadStatus::NotFound |
+            DownloadStatus::Failed(_) => StatusBucket::Error,
+            DownloadStatus::CompletedWithErrors => StatusBucket::CompletedWithErrors,
         }
     }
 
@@ -108,18 +69,12 @@ impl DownloadStatus {
 
                 (status_str, Some(reason_str))
             }
-
-            DownloadStatus::Queued |
-            DownloadStatus::Initializing |
-            DownloadStatus::FetchingMetadata |
-            DownloadStatus::InProgress |
-            DownloadStatus::Paused |
+            DownloadStatus::Uninitialized |
+            DownloadStatus::MetadataFetched |
+            DownloadStatus::Partial |
             DownloadStatus::NotFound |
-            DownloadStatus::Retrying |
-            DownloadStatus::CompletedWithErrors |
-            DownloadStatus::Waiting |
-            DownloadStatus::Verifying |
-            DownloadStatus::Completed => (status_str, None),
+            DownloadStatus::Completed |
+            DownloadStatus::CompletedWithErrors => (status_str, None),
         }
     }
 }
@@ -128,17 +83,12 @@ impl DownloadStatus {
 #[derive(Debug, Clone, Copy, EnumCount, PartialEq)]
 #[repr(usize)] // This allows us to use each enum as an index in an array
 pub enum StatusBucket {
-    Queued,
-    Initializing,
-    Verifying,
-    FetchingMetadata,
-    InProgress,
-    Retrying,
-    Waiting,
+    Uninitialized,
+    MetadataFetched,
+    Partial,
     Completed,
-    CompletedWithErrors,
     Error,
-    Paused,
+    CompletedWithErrors,
 }
 
 const BUCKET_COUNT: usize = StatusBucket::COUNT;
@@ -183,137 +133,109 @@ impl Default for StateBucketCounters {
 #[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum FileStatus {
     #[default]
-    Queued,
-    Initializing,
-    FetchingMetadata,
-    InProgress,
+    Uninitialized,
+    MetadataFetched,
+    Partial,
     Completed,
-    Paused,
     Failed(FileFailureReason),
     NotFound,
-    Retrying,
-    Waiting(Option<u64>)
 }
 
 impl FileStatus {
-    /// Returns true if the file is actively downloading or waiting to download.
-    pub fn can_be_paused(&self) -> bool {
+    /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
+    pub fn can_set_to_queued(&self) -> bool {
         match self {
-            // Active states
-            Self::Queued | 
-            Self::Initializing | 
-            Self::FetchingMetadata | 
-            Self::InProgress | 
-            Self::Retrying | 
-            Self::Waiting(_) => true,
-
-            // Inactive states
             Self::Completed | 
-            Self::Failed(_) | 
-            Self::NotFound | 
-            Self::Paused => false,
+            Self::NotFound  => false,
+
+            Self::Uninitialized |
+            Self::MetadataFetched |
+            Self::Partial |
+            Self::Failed(_)  => true,
         }
     }
 
-    /// This function exists because certain states like completed shouldn't be able to transition to queued automatically
-    pub fn can_set_to_queue(&self) -> bool {
+    pub fn can_be_failed(&self) -> bool {
         match self {
+            Self::Uninitialized |
             Self::Completed | 
             Self::NotFound | 
-            Self::Queued => false,
+            Self::Failed(_) => false,
 
-            Self::Paused | 
-            Self::Failed(_) | 
-            Self::Initializing | 
-            Self::FetchingMetadata | 
-            Self::InProgress | 
-            Self::Retrying | 
-            Self::Waiting(_) => true,
+            Self::MetadataFetched |
+            Self::Partial => true,
         }
     }
 
     pub fn bucket(&self) -> StatusBucket {
         match self {
-            Self::Queued => StatusBucket::Queued,
-            Self::Initializing => StatusBucket::Initializing,
-            Self::FetchingMetadata => StatusBucket::FetchingMetadata,
-            Self::InProgress => StatusBucket::InProgress,
-            Self::Retrying => StatusBucket::Retrying,
-            Self::Waiting(_) => StatusBucket::Waiting,
-
+            Self::Uninitialized => StatusBucket::Uninitialized,
+            Self::MetadataFetched => StatusBucket::MetadataFetched,
+            Self::Partial => StatusBucket::Partial,
             Self::Completed => StatusBucket::Completed,
-
-            Self::Failed(_) | 
-            Self::NotFound => StatusBucket::Error,
-            
-            Self::Paused => StatusBucket::Paused,
+            Self::NotFound |
+            Self::Failed(_) => StatusBucket::Error,
         }
     }
 
-    pub fn from_db_columns(status: &str, file_failure_reason: Option<&str>, wait_time: Option<i64>) -> Option<Self> {
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            FileStatus::Uninitialized |
+            FileStatus::MetadataFetched |
+            FileStatus::Partial => false,
+            FileStatus::Completed |
+            FileStatus::NotFound |
+            FileStatus::Failed(_) => true,
+        }
+    }
+
+    pub fn from_db_columns(status: &str, file_failure_reason: Option<&str>) -> Option<Self> {
         if let Some(file_failure_reason) = file_failure_reason {
             let inner_reason = FileFailureReason::from_str(file_failure_reason).unwrap_or_default();
             return Some(Self::Failed(inner_reason));
         }
 
-        if let Some(wait_time) = wait_time {
-            return Some(Self::Waiting(Some(wait_time as u64)));
-        }
-
-         let parsed_reason = FileStatusParse::from_str(status).ok()?;
+        let parsed_reason = FileStatusParse::from_str(status).ok()?;
 
         Some(match parsed_reason {
-            FileStatusParse::Queued => Self::Queued,
-            FileStatusParse::Initializing => Self::Initializing,
-            FileStatusParse::FetchingMetadata => Self::FetchingMetadata,
-            FileStatusParse::InProgress => Self::InProgress,
+            FileStatusParse::Uninitialized => Self::Uninitialized,
+            FileStatusParse::MetadataFetched => Self::MetadataFetched,
+            FileStatusParse::Partial => Self::Partial,
             FileStatusParse::Completed => Self::Completed,
-            FileStatusParse::Paused => Self::Paused,
             FileStatusParse::NotFound => Self::NotFound,
-            FileStatusParse::Retrying => Self::Retrying,
             
             // Fallback if for some reason we still get here
-            FileStatusParse::Failed |
-            FileStatusParse::Waiting => return None,
+            FileStatusParse::Failed  => return None,
         })
     }
 
-    pub fn to_db_columns(&self) -> (&'static str, Option<&'static str>, Option<i64>) {
+    pub fn to_db_columns(&self) -> (&'static str, Option<&'static str>) {
         let status_str: &'static str = self.into(); 
 
         // Enum variants that contain extra information need to be extracted
         match self {
-            FileStatus::Waiting(time) => (status_str, None, time.map(|t| t as i64)),
-            
             FileStatus::Failed(reason) => {
                 let reason_str: &'static str = reason.into();
 
-                (status_str, Some(reason_str), None)
+                (status_str, Some(reason_str))
             }
 
-            FileStatus::Queued |
-            FileStatus::Initializing |
-            FileStatus::FetchingMetadata |
-            FileStatus::InProgress |
-            FileStatus::Paused |
+            FileStatus::Uninitialized |
+            FileStatus::MetadataFetched |
+            FileStatus::Partial |
             FileStatus::NotFound |
-            FileStatus::Retrying |
-            FileStatus::Completed => (status_str, None, None),
+            FileStatus::Completed => (status_str, None),
         }
     }
 
     pub fn as_download_status(&self) -> DownloadStatus {
         match self {
-            FileStatus::Queued => DownloadStatus::Queued,
-            FileStatus::Initializing => DownloadStatus::Initializing,
-            FileStatus::FetchingMetadata => DownloadStatus::FetchingMetadata,
-            FileStatus::InProgress => DownloadStatus::InProgress,
+            FileStatus::Uninitialized => DownloadStatus::Uninitialized,
+            FileStatus::MetadataFetched => DownloadStatus::MetadataFetched,
+            FileStatus::Partial => DownloadStatus::Partial,
             FileStatus::Completed => DownloadStatus::Completed,
-            FileStatus::Paused => DownloadStatus::Paused,
             FileStatus::NotFound => DownloadStatus::NotFound,
-            FileStatus::Retrying => DownloadStatus::Retrying,
-            FileStatus::Waiting(_) => DownloadStatus::Waiting,
-            
+
             FileStatus::Failed(reason) => {
                 DownloadStatus::Failed(DownloadFailureReason::AllFilesFailed(*reason))
             }

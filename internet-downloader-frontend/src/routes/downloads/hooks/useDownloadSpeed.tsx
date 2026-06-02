@@ -20,14 +20,6 @@ export default function useDownloadSpeed(downloadedSize: number, status: string)
         const interval = setInterval(() => {
             const now = performance.now();
             const currentSize = currentSizeRef.current;
-            const currentStatus = statusRef.current?.toLowerCase();
-
-            // Clear speed if stopped or paused
-            if (currentStatus !== 'downloading') {
-                setDownloadSpeed(0);
-                statsHistoryRef.current =[];
-                return;
-            }
 
             statsHistoryRef.current.push({ time: now, size: currentSize });
 

@@ -1,7 +1,11 @@
 export type FileFailureReason = 
-  | { state: "network_error" }
+  | { state: "hash_mismatch" }
   | { state: "disk_error" }
-  | { state: "hash_mismatch" }; 
+  | { state: "client_error" }
+  | { state: "server_error" }
+  | { state: "metadata_fetch_error" }
+  | { state: "bad_path" }
+  | { state: "unknown" };
 
 export type DownloadFailureReason =
   | { state: "hash_mismatch" }
@@ -10,34 +14,35 @@ export type DownloadFailureReason =
   | { state: "server_error" }
   | { state: "metadata_fetch_error" }
   | { state: "multiple_errors" }
-  | { state: "all_files_failed"; value: FileFailureReason };
+  | { state: "all_files_failed"; value: FileFailureReason }
+  | { state: "files_missing_from_disk" }
+  | { state: "state_desynchronized" }
+  | { state: "bad_path" }
+  | { state: "unknown" };
 
 export type FileStatus =
-  | { state: "queued" }
-  | { state: "initializing" }
-  | { state: "fetching_metadata" }
-  | { state: "in_progress" }
+  | { state: "uninitialized" }
+  | { state: "metadata_fetched" }
+  | { state: "partial" }
   | { state: "completed" }
-  | { state: "paused" }
   | { state: "not_found" }
-  | { state: "retrying" }
-  | { state: "waiting"; value: number | null }
   | { state: "failed"; value: FileFailureReason };
 
 export type DownloadStatus =
-  | { state: "queued" }
-  | { state: "initializing" }
-  | { state: "fetching_metadata" }
-  | { state: "in_progress" }
+  | { state: "uninitialized" }
+  | { state: "metadata_fetched" }
+  | { state: "partial" }
   | { state: "completed" }
   | { state: "completed_with_errors" }
-  | { state: "paused" }
   | { state: "not_found" }
-  | { state: "retrying" }
-  | { state: "waiting"; value: number | null }
   | { state: "failed"; value: DownloadFailureReason };
 
-export type ActiveOperation = "verifying";
+export type ActiveOperation = 
+  | { state: "verifying" }
+  | { state: "queued" }
+  | { state: "downloading" }
+  | { state: "paused" }
+  | { state: "waiting"; value: number | null };
 
 export type FileItem = {
   id: number;

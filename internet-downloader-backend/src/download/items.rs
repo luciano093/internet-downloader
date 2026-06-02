@@ -2,12 +2,14 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::fmt::{Debug, Display};
+use std::time::Duration;
 
 use bitvec::order::Msb0;
 use bitvec::vec::BitVec;
 use indexmap::IndexMap;
 use os_str_bytes::OsStringBytes;
 use serde::{Deserialize, Serialize, Serializer};
+use url::{Host, Url};
 
 use crate::client_state_manager::{DownloadSnapshot, FileSnapshot};
 use crate::db::rows::{DownloadFileRow, DownloadFolderRow, DownloadRow};
@@ -337,7 +339,7 @@ impl Download {
             id: DownloadId(id),
             url: value.url,
             relative_path: PathBuf::from("./"),
-            status: DownloadStatus::Queued,
+            status: DownloadStatus::Uninitialized,
             root_item,
             files,
             folders,
@@ -363,6 +365,10 @@ impl Download {
 
     pub const fn files(&self) -> &IndexMap<FileId, FileDownload> {
         &self.files
+    }
+    
+    pub fn files_mut(&mut self) -> &mut IndexMap<FileId, FileDownload> {
+        &mut self.files
     }
 
     pub const fn folders(&self) -> &IndexMap<FolderId, FolderDownload> {
@@ -400,81 +406,46 @@ impl Download {
         BaseItemIterator::new(&self.files, &self.folders)
     }
 
-    pub fn set_paused(&mut self) -> Vec<ChangedItemStatus> {
-        let mut files_to_pause = Vec::new();
-
+    pub fn set_all_files_failed(&mut self, reason: FileFailureReason) -> Vec<ChangedItemStatus> {
+        let mut files_to_fail = Vec::new();
+    
         for (&id, file) in &self.files {
-            if file.status().can_be_paused() {
-                files_to_pause.push(id);
+            if file.status().can_be_failed() {
+                files_to_fail.push(id);
             }
         }
-
+    
         let mut all_changes = Vec::new();
-
-        for id in files_to_pause {
-            if let Some(changes) = self.set_file_status(id, FileStatus::Paused) {
+    
+        for id in files_to_fail {
+            if let Some(changes) = self.set_file_status(id, FileStatus::Failed(reason)) {
                 all_changes.extend(changes);
             }
         }
-
-        all_changes
-    }
-
-    pub fn set_queued(&mut self) -> Vec<ChangedItemStatus> {
-        let mut files_to_queue = Vec::new();
-
-        for (&id, file) in &self.files {
-            if file.status().can_set_to_queue() {
-                files_to_queue.push(id);
-            }
-        }
-        
-        let mut all_changes = Vec::new();
-
-        for id in files_to_queue {
-            if let Some(changes) = self.set_file_status(id, FileStatus::Queued) {
-                all_changes.extend(changes);
-            }
-        }
-
+    
         all_changes
     }
     
     pub fn set_active_operation(&mut self, active_operation: Option<ActiveOperation>) -> Vec<ChangedItemOperation> {
-        let mut changed_items = Vec::new();
-        let mut base_items_to_change = Vec::new();
+        let mut changed_items = Vec::new();   
+        
+        let files_to_change: Vec<FileId> = self.files().keys().cloned().collect();
 
-        // We first gather all the base items to update
-        for item in self.base_item_iter() {
-            if item.active_operation() == active_operation { 
-                continue; // Already has the operation we wanted
-            }
-
-            base_items_to_change.push(item.id());
-        }
-
-        // We iterate over all the base items to change 
-        // (non-base items calculate their operation based on all their children)
-        for item_id in base_items_to_change {
+        // We iterate over all files 
+        for file_id in files_to_change {
             let mut current_parent_id = None;
-            
-            match item_id {
-                ItemId::File(file_id) => {
-                    if let Some(file) = self.files.get_mut(&file_id) {
-                        file.active_operation = active_operation;
-                        current_parent_id = file.parent_id();
-                        
-                        changed_items.push(ChangedItemOperation::File { id: file_id, operation: active_operation });
-                    }
-                },
-                ItemId::Folder(folder_id) => {
-                    if let Some(folder) = self.folders.get_mut(&folder_id) {
-                        folder.active_operation = active_operation;
-                        current_parent_id = folder.parent_id();
-                        
-                        changed_items.push(ChangedItemOperation::Folder { id: folder_id, operation: active_operation });
-                    }
-                },
+
+            if let Some(file) = self.files.get_mut(&file_id) {
+                // If the file status is terminal, we can't have an active operation going,
+                // so we skip this file
+                if file.status().is_terminal() {
+                    continue;
+                }
+                
+                file.active_operation = active_operation;
+                current_parent_id = file.parent_id();
+                
+                changed_items.push(ChangedItemOperation::File { id: file_id, operation: active_operation });
             }
 
             // Bubble up and update all parents
@@ -499,6 +470,61 @@ impl Download {
                 } else {
                     break;
                 }
+            }
+        }
+
+        // If the root item changed, then the download has also changed
+        if let Some(root_item) = self.root_item() {
+            let new_operation = root_item.active_operation();
+
+            if self.active_operation != new_operation {
+                self.active_operation = new_operation;
+                changed_items.push(ChangedItemOperation::Download(new_operation));
+            }
+        }
+
+        changed_items
+    }
+
+    pub fn set_file_active_operation(&mut self, file_id: FileId, active_operation: Option<ActiveOperation>) -> Vec<ChangedItemOperation> {
+        let mut changed_items = Vec::new();
+
+        let mut current_parent_id = None;
+
+        if let Some(file) = self.files.get_mut(&file_id) {
+            // If the file status is terminal, we can't have an active operation going,
+            // so we return the empty list
+            if file.status().is_terminal() {
+                return changed_items;
+            }
+            
+            file.active_operation = active_operation;
+            current_parent_id = file.parent_id();
+            
+            changed_items.push(ChangedItemOperation::File { id: file_id, operation: active_operation });
+        }
+
+        // Bubble up and update all parents
+        while let Some(parent_id) = current_parent_id {
+            let new_folder_op = self.calculate_folder_operation(parent_id);
+
+            if let Some(folder) = self.folders.get_mut(&parent_id) {
+
+                if folder.active_operation != new_folder_op {
+                    folder.active_operation = new_folder_op;
+                    
+                    changed_items.push(ChangedItemOperation::Folder {
+                        id: parent_id,
+                        operation: new_folder_op,
+                    });
+
+                    current_parent_id = folder.parent_id;
+                } else {
+                    // If this folder didn't change, its parents won't either.
+                    break; 
+                }
+            } else {
+                break;
             }
         }
 
@@ -694,21 +720,7 @@ impl DownloadType {
     pub fn as_download_status(&self) -> DownloadStatus {
         match self {
             DownloadType::Folder(folder) => folder.status(),
-            DownloadType::File(file) => match file.status() {
-                FileStatus::Queued => DownloadStatus::Queued,
-                FileStatus::Initializing => DownloadStatus::Initializing,
-                FileStatus::FetchingMetadata => DownloadStatus::FetchingMetadata,
-                FileStatus::InProgress => DownloadStatus::InProgress,
-                FileStatus::Completed => DownloadStatus::Completed,
-                FileStatus::Paused => DownloadStatus::Paused,
-                FileStatus::NotFound => DownloadStatus::NotFound,
-                FileStatus::Retrying => DownloadStatus::Retrying,
-                FileStatus::Waiting(_) => DownloadStatus::Waiting,
-                
-                FileStatus::Failed(reason) => {
-                    DownloadStatus::Failed(DownloadFailureReason::AllFilesFailed(reason))
-                }
-            },
+            DownloadType::File(file) => file.status().as_download_status(),
         }
     }
 }
@@ -839,8 +851,14 @@ impl<'a> DownloadItem for DownloadTypeRef<'a> {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "state", content = "value")]
 pub enum ActiveOperation {
     Verifying,
+    Queued,
+    Downloading,
+    Paused,
+    Waiting(Duration),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -848,6 +866,7 @@ pub struct FileDownload {
     parent_id: Option<FolderId>,
     id: FileId,
     url: Arc<String>,
+    host: Arc<Host>,
     file_name: String,
     relative_path: PathBuf,
     status: FileStatus,
@@ -912,14 +931,17 @@ impl Debug for FileDownload {
 impl FileDownload {
     pub(super) fn new(file_task: &FileTask, relative_path: &Path, id: FileId, parent_id: Option<FolderId>) -> Self {
         let relative_path = relative_path.join(file_task.file_name());
-
+        
+        let url = Url::parse(&file_task.url).unwrap();
+        
         Self { 
             parent_id,
             id,
             url: Arc::new(file_task.url.clone()),
+            host: Arc::new(url.host().unwrap().to_owned()),
             file_name: file_task.file_name().to_owned(),
             relative_path,
-            status: FileStatus::Queued,
+            status: FileStatus::Uninitialized,
             hash: None,
             blocks: BitVec::new(),
             chunk_hashes: Vec::new(),
@@ -957,7 +979,7 @@ impl FileDownload {
             chunks.truncate(len as usize);
         }
 
-        let mut status = FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref(), row.wait_time).unwrap_or_default();
+        let mut status = FileStatus::from_db_columns(&row.status, row.failure_reason.as_deref()).unwrap_or_default();
 
         let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
             .unwrap_or_else(|| {
@@ -972,10 +994,14 @@ impl FileDownload {
             chunk_hashes.resize(expected_chunks as usize, None);
         }
 
+        let url = Url::parse(&row.url).unwrap();
+        let host = url.host().unwrap().to_owned();
+
         Self {
             parent_id: row.parent_folder_id.map(|id| FolderId(id as usize)),
             id: FileId(row.file_id as usize),
             url: Arc::new(row.url),
+            host: Arc::new(host),
             file_name: row.name,
             relative_path,
             status,
@@ -1012,6 +1038,14 @@ impl FileDownload {
         self.url.clone()
     }
 
+    pub fn host(&self) -> Arc<Host> {
+        self.host.clone()
+    }
+    
+    pub fn host_ref(&self) -> &Host {
+        self.host.as_ref()
+    }
+
     pub fn url_ref(&self) -> &String {
         self.url.as_ref()
     }
@@ -1042,6 +1076,10 @@ impl FileDownload {
 
     pub fn reset_retries(&mut self) {
         self.retries = 0;
+    }
+
+    pub fn set_file_name(&mut self, file_name: String) {
+        self.file_name = file_name;
     }
 
     pub fn calculate_initial_bytes(&self, chunk_size: u64) -> u64 {
@@ -1104,17 +1142,12 @@ impl FileDownload {
     // if the file must have existed.
     pub fn must_exist_with_status(&self, status: &FileStatus) -> bool {
         match status {
+            FileStatus::Partial |
             FileStatus::Completed => true,
 
-            // A file should only exist on disk once metadata has been fetched (file size is not None).
-            FileStatus::Paused | FileStatus::InProgress | FileStatus::Waiting(_) | FileStatus::Retrying => {
-                self.size.is_some() 
-            },
-
+            FileStatus::Uninitialized |
+            FileStatus::MetadataFetched |
             FileStatus::Failed(_) |
-            FileStatus::Queued |
-            FileStatus::Initializing |
-            FileStatus::FetchingMetadata |
             FileStatus::NotFound  => false,
         }
     }
@@ -1122,6 +1155,7 @@ impl FileDownload {
 
 impl From<FileDownload> for FileSnapshot {
     fn from(file: FileDownload) -> Self {
+        
         let bytes_downloaded = file.calculate_initial_bytes(BLOCK_SIZE as u64);
         
         FileSnapshot {
@@ -1186,7 +1220,7 @@ impl FolderDownload {
             id,
             folder_name: folder_task.folder_name().to_owned(),
             relative_path,
-            status: DownloadStatus::Queued,
+            status: DownloadStatus::Uninitialized,
             child_files: child_file_ids,
             child_folders: child_folder_ids,
 
@@ -1221,14 +1255,9 @@ impl FolderDownload {
 
     pub fn calculate_status(&self, files_map: &IndexMap<FileId, FileDownload>, folders_map: &IndexMap<FolderId, FolderDownload>) -> DownloadStatus {
         match self.dominant_status() {
-            Some(StatusBucket::Queued) => DownloadStatus::Queued,
-            Some(StatusBucket::Initializing) => DownloadStatus::Initializing,
-            Some(StatusBucket::Verifying) => DownloadStatus::Verifying,
-            Some(StatusBucket::FetchingMetadata) => DownloadStatus::FetchingMetadata,
-            Some(StatusBucket::InProgress) => DownloadStatus::InProgress,
-            Some(StatusBucket::Retrying) => DownloadStatus::Retrying,
-            Some(StatusBucket::Waiting) => DownloadStatus::Waiting,
-            Some(StatusBucket::Paused) => DownloadStatus::Paused,
+            Some(StatusBucket::Uninitialized) => DownloadStatus::Uninitialized,
+            Some(StatusBucket::MetadataFetched) => DownloadStatus::MetadataFetched,
+            Some(StatusBucket::Partial) => DownloadStatus::Partial,
             Some(StatusBucket::Completed) => DownloadStatus::Completed,
             Some(StatusBucket::CompletedWithErrors) => DownloadStatus::CompletedWithErrors,
             Some(StatusBucket::Error) => self.resolve_error_status(files_map, folders_map),
@@ -1247,15 +1276,10 @@ impl FolderDownload {
 
         // Compile time guard
         // A reminder to update this function if a new StatusBucket gets added
-        let _assert_exhaustive = |status| match status {
-            StatusBucket::InProgress |
-            StatusBucket::FetchingMetadata |
-            StatusBucket::Initializing |
-            StatusBucket::Retrying |
-            StatusBucket::Verifying |
-            StatusBucket::Waiting |
-            StatusBucket::Queued |
-            StatusBucket::Paused |
+        let _assert_exhaustive = |status| match status {  
+            StatusBucket::Uninitialized |
+            StatusBucket::MetadataFetched |
+            StatusBucket::Partial |
             StatusBucket::Error |
             StatusBucket::Completed |
             StatusBucket::CompletedWithErrors => (),
@@ -1264,46 +1288,40 @@ impl FolderDownload {
         // Active states, if any of any children has an active state, we adopt the state too
         // Order is important
         // If anything is downloading, the folder is downloading
-        if self.bucket_counters.get(StatusBucket::InProgress) > 0 {
-            Some(StatusBucket::InProgress)
-        } 
-        // If nothing is downloading yet, but we are fetching metadata, the whole folder is fetching
-        else if self.bucket_counters.get(StatusBucket::FetchingMetadata) > 0 {
-            Some(StatusBucket::FetchingMetadata)
-        } 
-        // If no network IO is happening, but we are allocating space, we are initializing
-        else if self.bucket_counters.get(StatusBucket::Initializing) > 0 {
-            Some(StatusBucket::Initializing)
-        } 
-        // If nothing is downloading, but we are retrying a download
-        else if self.bucket_counters.get(StatusBucket::Retrying) > 0 {
-            Some(StatusBucket::Retrying)
-        } 
-        // If at least some file is still being verified
-        else if self.bucket_counters.get(StatusBucket::Verifying) > 0 {
-            Some(StatusBucket::Verifying)
-        } 
-        // If everything is either waiting or queued
-        else if self.bucket_counters.get(StatusBucket::Waiting) > 0 {
-            Some(StatusBucket::Waiting)
-        } 
-        // Every single download that needs to be downloaded is still in queue
-        else if self.bucket_counters.get(StatusBucket::Queued) > 0 {
-            Some(StatusBucket::Queued)
-        } 
-
-        // If no download is active, but some are paused, then we also are paused
-        else if self.bucket_counters.get(StatusBucket::Paused) > 0 {
-            Some(StatusBucket::Paused)
+        if self.bucket_counters.get(StatusBucket::Partial) > 0 {
+            Some(StatusBucket::Partial)
         } 
         // If all children share the same status, we too share it
-        else if self.bucket_counters.get(StatusBucket::Error) == total {
+        else if self.bucket_counters.get(StatusBucket::Uninitialized) == total {
+            Some(StatusBucket::Uninitialized)
+        } else if self.bucket_counters.get(StatusBucket::MetadataFetched) == total {
+            Some(StatusBucket::MetadataFetched)
+        } else if self.bucket_counters.get(StatusBucket::Error) == total {
             Some(StatusBucket::Error)
         } else if self.bucket_counters.get(StatusBucket::Completed) == total {
             Some(StatusBucket::Completed)
         } else if self.bucket_counters.get(StatusBucket::CompletedWithErrors) == total {
             Some(StatusBucket::CompletedWithErrors)
         } 
+        // Mixed statuses
+        else if self.bucket_counters.get(StatusBucket::Uninitialized) > 0 &&
+            self.bucket_counters.get(StatusBucket::MetadataFetched) > 0 
+        {
+            Some(StatusBucket::MetadataFetched)
+        } 
+        // If we have a mix of files that are still not downloaded, but without errors, 
+        // and files that have been completed, we are still in a partially downloaded status
+        else if self.bucket_counters.get(StatusBucket::MetadataFetched) > 0 ||
+            self.bucket_counters.get(StatusBucket::Uninitialized) > 0 
+        {
+            Some(StatusBucket::Partial)
+        } 
+        // If we have any mix of errors
+        else if self.bucket_counters.get(StatusBucket::Error) > 0
+            || self.bucket_counters.get(StatusBucket::CompletedWithErrors) > 0
+        {
+            return Some(StatusBucket::CompletedWithErrors);
+        }
         // There is no dominant status that exists 
         else {
             None

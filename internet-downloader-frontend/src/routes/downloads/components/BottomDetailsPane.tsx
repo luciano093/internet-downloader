@@ -1,5 +1,5 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { formatDownloadStatus } from "@/lib/status_utils";
+import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
 import { useDownloadStore } from "@/stores/downloadStore";
 import type { ReactNode } from "react";
 import { formatBytes, getFolderStats } from "./DownloadsTable";
@@ -54,7 +54,12 @@ export default function BottomDetailsPane() {
                         <div className="text-foreground truncate">{download.name || "Unknown"}</div>
 
                         <div className="text-right pr-6 text-foreground/50 font-medium">Status:</div>
-                        <div className="text-foreground">{formatDownloadStatus(download.status)}</div>
+                        <div className="text-foreground">
+                            {download.active_operation 
+                                ? formatActiveOperation(download.active_operation) 
+                                : formatDownloadStatus(download.status)
+                            }
+                        </div>
 
                         <div className="text-right pr-6 text-foreground/50 font-medium">Size:</div>
                         <div className="text-foreground">{formatBytes(getFolderStats(download.files).totalSize)}</div>

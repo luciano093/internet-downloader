@@ -472,7 +472,6 @@ impl StateManager {
                 size_type TEXT,
                 size_bytes INTEGER,
                 retries INTEGER DEFAULT 0,
-                wait_time INTEGER,
                 
                 PRIMARY KEY (download_id, file_id),
     
@@ -651,14 +650,14 @@ impl StateManager {
                     download_id, file_id, parent_folder_id,
                     name, relative_path_raw, relative_path, 
                     status, failure_reason, 
-                    url, hash, chunks_raw, chunks_len, size_type, size_bytes, retries, wait_time
+                    url, hash, chunks_raw, chunks_len, size_type, size_bytes, retries
                 ) "
             );
 
             let batch: Vec<_> = files_iter.by_ref().take(1000).collect();
 
             builder.push_values(&batch, |mut builder, (file_id, file)| {
-                let (status, reason, wait_time) = file.status().to_db_columns();
+                let (status, reason) = file.status().to_db_columns();
                 let path_bytes = file.relative_path().to_io_bytes_lossy();
                 
                 let hash = file.hash().map(|hash| hash.to_be_bytes().to_vec());
@@ -684,8 +683,7 @@ impl StateManager {
                     .push_bind(file.blocks().len() as i64)   
                     .push_bind(size_type)
                     .push_bind(size_bytes)
-                    .push_bind(file.retries() as i64)
-                    .push_bind(wait_time);
+                    .push_bind(file.retries() as i64);
             });
             
             builder.push(
@@ -698,7 +696,6 @@ impl StateManager {
                 failure_reason = excluded.failure_reason,
                 url = excluded.url,
                 hash = excluded.hash,
-                wait_time = excluded.wait_time,
                 chunks_raw = excluded.chunks_raw,
                 chunks_len = excluded.chunks_len,
                 size_type = excluded.size_type,
@@ -1272,7 +1269,7 @@ fn reconstruct_file_tree(file_rows: Vec<DownloadFileRow>, folder_rows: Vec<Downl
                 .or_default()
                 .push(FileId(file_row.file_id as usize));
 
-            let bucket = FileStatus::from_db_columns(&file_row.status, file_row.failure_reason.as_deref(), file_row.wait_time).unwrap_or_default().bucket();
+            let bucket = FileStatus::from_db_columns(&file_row.status, file_row.failure_reason.as_deref()).unwrap_or_default().bucket();
 
             folder_buckets
                 .entry(parent_id)

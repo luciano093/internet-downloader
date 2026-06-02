@@ -136,7 +136,7 @@ pub struct UiManagerHandle {
 }
 
 impl UiManagerHandle {
-    pub fn new() -> Self {
+    pub fn spawn() -> Self {
         let delta_sender = broadcast::Sender::new(1000);
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
