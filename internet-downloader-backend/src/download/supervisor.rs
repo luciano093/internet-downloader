@@ -13,6 +13,7 @@ use url::Host;
 
 use crate::app::limiters::DownloadLimiterGroup;
 use crate::app::context::AppContext;
+use crate::app::manager::AppManagerEvent;
 use crate::client_state_manager::FileUpdate;
 use crate::download::error::FileFailureReason;
 use crate::download::hosts::manager::{DownloadResult, HttpFailureKind, MetadataJob, MetadataResult, PermanentFailureKind, RangeJob, StreamJob};
@@ -75,7 +76,7 @@ pub struct DownloadSupervisor {
     limiters: Arc<DownloadLimiterGroup>,
     app_context: AppContext,
     verifier: VerifierHandle,
-    cleanup_sender: mpsc::UnboundedSender<DownloadId>,
+    app_manager_event_sender: mpsc::UnboundedSender<AppManagerEvent>,
     receiver: mpsc::Receiver<DownloadCommand>,
     sender: mpsc::Sender<DownloadCommand>,
     cancel_token: CancellationToken,
@@ -87,7 +88,7 @@ impl DownloadSupervisor {
         limiters: Arc<DownloadLimiterGroup>, 
         app_context: AppContext,
         verifier: VerifierHandle,
-        cleanup_sender: mpsc::UnboundedSender<DownloadId>,
+        app_manager_event_sender: mpsc::UnboundedSender<AppManagerEvent>,
         receiver: mpsc::Receiver<DownloadCommand>,
         sender: mpsc::Sender<DownloadCommand>,
     ) -> Self {
@@ -96,7 +97,7 @@ impl DownloadSupervisor {
             limiters,
             app_context,
             verifier,
-            cleanup_sender,
+            app_manager_event_sender,
             receiver,
             sender,
             cancel_token: CancellationToken::new(),
@@ -125,7 +126,9 @@ impl DownloadSupervisor {
                 Some(command) = self.receiver.recv() => {
                     match command {
                         DownloadCommand::Cancel { from_disk } => {
-                            let _ = self.verifier.cancel_verification(self.download.id()).await;
+                            let (reply, listener) = oneshot::channel();
+                            let _ = self.verifier.cancel_verification(self.download.id(), reply).await;
+                            let _ = listener.await;
                             
                             if from_disk {
                                 for file in self.download.files().values() {
@@ -146,10 +149,14 @@ impl DownloadSupervisor {
                             
                             self.app_context.db_manager.delete_download(self.download.id()).await.unwrap();
                             self.app_context.ui_handle.remove_download(self.download.id());
+                            let _ = self.app_manager_event_sender.send(AppManagerEvent::RemoveDownload(self.download.id()));
                             return;
                         },
                         DownloadCommand::Pause => {
-                            let _ = self.verifier.cancel_verification(self.download.id()).await;
+                            let (reply, listener) = oneshot::channel();
+                            let _ = self.verifier.cancel_verification(self.download.id(), reply).await;
+                            let _ = listener.await;
+                            
                             verification_receiver = None;
                             self.app_context.db_manager.write_download(&self.download).await.unwrap();
                         },
@@ -313,7 +320,7 @@ impl DownloadSupervisor {
                             self.app_context.ui_handle.remove_download(self.download.id());
                             
                             // Tell AppManager to remove from registry
-                            let _ = self.cleanup_sender.send(self.download.id());
+                            let _ = self.app_manager_event_sender.send(AppManagerEvent::RemoveDownload(self.download.id()));
                             
                             break;
                         },
@@ -376,6 +383,7 @@ impl DownloadSupervisor {
                         DownloadCommand::Finish => {
                             info!("Download finished: {} ({}) with final status: {:?}", self.download.id(), self.download.name(), self.download.status());
                             self.app_context.db_manager.write_download(&self.download).await.unwrap();
+                            let _ = self.app_manager_event_sender.send(AppManagerEvent::FinishDownload(self.download.id()));
                             break;
                         },
                     }
@@ -809,10 +817,10 @@ pub struct DownloadHandle {
 }
 
 impl DownloadHandle {
-    pub fn spawn(download: Download, limiters: Arc<DownloadLimiterGroup>, app_context: AppContext, verifier: VerifierHandle, cleanup_sender: mpsc::UnboundedSender<DownloadId>) -> Self {
+    pub fn spawn(download: Download, limiters: Arc<DownloadLimiterGroup>, app_context: AppContext, verifier: VerifierHandle, app_manager_event_sender: mpsc::UnboundedSender<AppManagerEvent>) -> Self {
         let (sender, receiver) = mpsc::channel(1000);
         
-        let download_supervisor = DownloadSupervisor::spawn(download, limiters, app_context, verifier, cleanup_sender, receiver, sender.clone());
+        let download_supervisor = DownloadSupervisor::spawn(download, limiters, app_context, verifier, app_manager_event_sender, receiver, sender.clone());
 
         tokio::spawn(async move {
            download_supervisor.run().await; 

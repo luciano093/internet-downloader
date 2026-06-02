@@ -29,7 +29,7 @@ struct FileVerificationDiff {
 pub enum VerifierMessage {
     VerifyDownload(Download, oneshot::Sender<Download>),
     VerificationFinished(DownloadId),
-    CancelVerification(DownloadId),
+    CancelVerification{download_id: DownloadId, reply: oneshot::Sender<()>},
     PauseVerification(DownloadId),
 }
 
@@ -64,7 +64,6 @@ struct Verifier {
     sender: mpsc::Sender<VerifierMessage>,
     ui_handle: UiManagerHandle,
     db_manager: StateManager,
-    cleanup_sender: mpsc::UnboundedSender<DownloadId>,
     handles: HashMap<DownloadId, (JoinHandle<()>, Arc<AtomicBool>)>, // We save an atomic bool in case we need to kill nested handles
     semaphore: Arc<Semaphore>,
 }
@@ -75,7 +74,6 @@ impl Verifier {
         sender: mpsc::Sender<VerifierMessage>,
         ui_handle: UiManagerHandle,
         db_manager: StateManager,
-        cleanup_sender: mpsc::UnboundedSender<DownloadId>,
     ) -> Self
     {
 
@@ -84,7 +82,6 @@ impl Verifier {
             sender,
             ui_handle,
             db_manager,
-            cleanup_sender,
             handles: HashMap::new(),
             semaphore: Arc::new(Semaphore::new(1)), 
         }
@@ -93,14 +90,14 @@ impl Verifier {
     async fn run(mut self) {
         while let Some(message) = self.receiver.recv().await {
             match message {
-                VerifierMessage::CancelVerification(download_id) => {
+                VerifierMessage::CancelVerification { download_id, reply } => {
                     if let Some((handle, cancel_flag)) = self.handles.remove(&download_id) {
                         cancel_flag.store(true, Ordering::Relaxed);
                         handle.abort();
 
                         // We want to wait until the handle ends before sending the clean up message
-                        let _ = handle.await; 
-                        let _ = self.cleanup_sender.send(download_id);
+                        let _ = handle.await;
+                        let _ = reply.send(());
                     }
                 },
                 VerifierMessage::PauseVerification(download_id) => {
@@ -401,12 +398,11 @@ impl VerifierHandle {
     pub fn spawn(
         ui_handle: UiManagerHandle,
         db_manager: StateManager,
-        cleanup_sender: mpsc::UnboundedSender<DownloadId>,
     )-> Self
     {
         let (sender, receiver) = mpsc::channel(1000);
 
-        let verifier = Verifier::new(receiver, sender.clone(), ui_handle, db_manager, cleanup_sender);
+        let verifier = Verifier::new(receiver, sender.clone(), ui_handle, db_manager);
 
         tokio::spawn(async move {
             verifier.run().await;
@@ -421,8 +417,8 @@ impl VerifierHandle {
         self.sender.send(VerifierMessage::VerifyDownload(download, receiver)).await
     }
 
-    pub async fn cancel_verification(&self, download_id: DownloadId) -> Result<(), SendError<VerifierMessage>> {
-        self.sender.send(VerifierMessage::CancelVerification(download_id)).await
+    pub async fn cancel_verification(&self, download_id: DownloadId, reply: oneshot::Sender<()>) -> Result<(), SendError<VerifierMessage>> {
+        self.sender.send(VerifierMessage::CancelVerification{ download_id, reply }).await
     }
 
     pub async fn pause_verification(&self, download_id: DownloadId) -> Result<(), SendError<VerifierMessage>> {

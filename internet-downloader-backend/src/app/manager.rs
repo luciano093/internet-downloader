@@ -25,6 +25,11 @@ use crate::utils::file_utils::force_delete_file;
 use crate::db::state_manager::StateManager;
 use crate::utils::network_utils::BandwidthLimiter;
 
+pub enum AppManagerEvent {
+    FinishDownload(DownloadId),
+    RemoveDownload(DownloadId),
+}
+
 // To maybe add in the future:
 // Skip a file in a download
 // Set download priority
@@ -122,15 +127,22 @@ impl AppManager {
             let _ = self.sender.send(AppManagerCommand::DownloadReady(download)).await;
         }
 
-        let (cleanup_sender, mut cleanup_receiver) = mpsc::unbounded_channel();
-        let verifier = VerifierHandle::spawn(self.ui_handle.clone(), self.db_manager.clone(), cleanup_sender.clone());
+        let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
+        let verifier = VerifierHandle::spawn(self.ui_handle.clone(), self.db_manager.clone());
 
         loop {
             tokio::select! {
-                Some(download_id) = cleanup_receiver.recv() => {
-                    self.supervisors.remove(&download_id);
-                    download_registry.finalize_removed(&download_id);
-                    info!("Download removed {}", download_id);
+                Some(event) = event_receiver.recv() => {
+                    match event {
+                        AppManagerEvent::FinishDownload(download_id) => {
+                            self.supervisors.remove(&download_id);
+                        }
+                        AppManagerEvent::RemoveDownload(download_id) => {
+                            self.supervisors.remove(&download_id);
+                            download_registry.finalize_removed(&download_id);
+                            info!("Download removed {}", download_id);
+                        }
+                    }
                 }
                 Some(command) = self.receiver.recv() => {
                     match command {
@@ -167,7 +179,7 @@ impl AppManager {
     
                             self.limiters.downloads().insert(download_id, Arc::downgrade(&download_limiter));
     
-                            let supervisor = DownloadHandle::spawn(download, download_limiter, app_context.clone(), verifier.clone(), cleanup_sender.clone());
+                            let supervisor = DownloadHandle::spawn(download, download_limiter, app_context.clone(), verifier.clone(), event_sender.clone());
     
                             self.supervisors.insert(download_id, supervisor);
                         }
