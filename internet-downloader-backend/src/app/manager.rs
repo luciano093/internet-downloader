@@ -202,6 +202,8 @@ impl AppManager {
     
                                 download_registry.finalize_removed(&download_id);
                                 let _ = self.db_manager.delete_download(download_id).await;
+                                app_context.ui_handle.remove_download(download_id);
+                                
                                 info!("Download removed {}", download_id);
                             }
                         },
