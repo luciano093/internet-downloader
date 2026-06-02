@@ -381,7 +381,6 @@ impl DownloadSupervisor {
                     }
                 }
                 Some(event) = event_receiver.recv() => {
-                    debug!("Received event: {:?}", event);
                     match event {
                         DownloadResult::Metadata { file_id, metadata } => {
                             debug!("Received metadata for file {}", file_id);
