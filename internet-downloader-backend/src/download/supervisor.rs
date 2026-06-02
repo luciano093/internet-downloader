@@ -405,6 +405,17 @@ impl DownloadSupervisor {
                                     file.set_size(file_size);
                                     file.set_file_name(file_name);
 
+                                    // Set blocks size
+                                    if let FileSize::Known(file_size) = file_size {    
+                                        self.app_context.ui_handle.update_file(download_id, FileUpdate::FileSize { id: file_id, len: file_size });
+                                        
+                                        let block_count = file_size.div_ceil(BLOCK_SIZE as u64) as usize;
+                                        file.blocks_mut().resize(block_count, false);
+    
+                                        let hash_chunk_count = file_size.div_ceil(HASH_CHUNK_SIZE as u64) as usize;
+                                        file.chunk_hashes_mut().resize(hash_chunk_count, None);
+                                    }
+
                                     let job = Self::get_stream_job(
                                         download_id, 
                                         file, 
