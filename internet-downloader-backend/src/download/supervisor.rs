@@ -159,11 +159,17 @@ impl DownloadSupervisor {
                             
                             verification_receiver = None;
                             self.app_context.db_manager.write_download(&self.download).await.unwrap();
+
+                            let changed_items = self.download.set_active_operation(Some(ActiveOperation::Paused));
+                            self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
                         },
                         DownloadCommand::Resume => {
                             let (new_verification_sender, new_verification_receiver) = oneshot::channel();
                             let _ = self.verifier.verify_download(self.download.clone(), new_verification_sender).await;
                             verification_receiver = Some(new_verification_receiver);
+
+                            let changed_items = self.download.set_active_operation(Some(ActiveOperation::Verifying));
+                            self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
                         },
                         DownloadCommand::Finish => {
                             warn!("Finish received during verification for download {}", self.download.id());
