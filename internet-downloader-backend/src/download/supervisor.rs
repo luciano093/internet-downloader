@@ -606,6 +606,12 @@ impl DownloadSupervisor {
                     }
                 }
                 Some((file_id, active_operation)) = active_operations_receiver.recv() => {
+                    if let Some(file) = self.download.get_file(&file_id) {
+                        if !is_valid_transition(file.active_operation(), Some(active_operation)) {
+                            continue; // We don't want to update if the transition is not valid
+                        }
+                    }
+                    
                     let changed_items = self.download.set_file_active_operation(file_id, Some(active_operation));
                     self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
                 }
@@ -847,5 +853,58 @@ impl DownloadHandle {
     
     pub async fn resume(&self) {
         let _ = self.sender.send(DownloadCommand::Resume).await;
+    }
+}
+
+// Might be worth it to look into other ways of doing this
+// for example a proc macro?
+// #[derive(TransitionTable)]
+// #[transition(Verifying => { Paused, Queued, Downloading, Waiting })]
+fn is_valid_transition(from: Option<ActiveOperation>, to: Option<ActiveOperation>) -> bool {
+    use ActiveOperation::*;
+
+    // Same state, we just return
+    if from == to {
+        return true;
+    }
+
+    match (from, to) {
+        // Paused -> Queued (on a resume) 
+        // or None (file finished) are the only valid exits
+        (Some(Paused), Some(Queued)) | (Some(Paused), None) => true,
+        (Some(Paused), _) => {
+            false
+        }
+
+        // Queued
+        (Some(Queued), Some(Downloading))  // worker picked it up
+        | (Some(Queued), Some(Waiting(_))) // immediate failure before Downloading was sent
+        | (Some(Queued), Some(Paused))     // user paused while queued
+        | (Some(Queued), None)             // completed (can happen on 0 byte files?)
+        => true,
+        (Some(Queued), _) => false,
+
+        // Downloading
+        (Some(Downloading), Some(Queued))       // retry, back to queue
+        | (Some(Downloading), Some(Waiting(_))) // one range failed, others still going
+        | (Some(Downloading), Some(Paused))     // user paused
+        | (Some(Downloading), None)             // finished
+        => true,
+        (Some(Downloading), _) => false,
+
+        // Waiting
+        (Some(Waiting(_)), Some(Downloading))  // retry timer fired
+        | (Some(Waiting(_)), Some(Queued))     // went back through queue
+        | (Some(Waiting(_)), Some(Paused))     // user paused during backoff
+        | (Some(Waiting(_)), None)             // finished while waiting
+        | (Some(Waiting(_)), Some(Waiting(_))) // updated retry duration
+        => true,
+        (Some(Waiting(_)), _) => false,
+
+        // Verifyingcan go to any other state
+        (Some(Verifying), _) => true,
+
+        // Either hasn't begun or has been finished
+        (None, _) => true,
     }
 }

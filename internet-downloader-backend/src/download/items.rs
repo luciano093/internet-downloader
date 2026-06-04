@@ -352,6 +352,13 @@ impl Download {
         &self.url
     }
 
+    pub fn get_file(&mut self, id: &FileId) -> Option<&FileDownload> {
+        match self.files.get(id) {
+            Some(file) => Some(file),
+            _ => None,
+        }
+    }
+
     pub fn get_file_mut(&mut self, id: &FileId) -> Option<&mut FileDownload> {
         match self.files.get_mut(id) {
             Some(file) => Some(file),
