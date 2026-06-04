@@ -73,7 +73,7 @@ impl AppManager {
 
     pub async fn run(mut self) {
         // Load previous state
-        let restored_downloads = self.db_manager.load_downloads().await.unwrap();
+        let restored_downloads = self.db_manager.load_all_downloads().await.unwrap();
 
         debug!(count = ?restored_downloads.len(), "Restored download from disk");
         trace!("Detailed download restore data:\n{:#?}", restored_downloads);

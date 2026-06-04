@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashMap};
 
 use indexmap::IndexMap;
 use os_str_bytes::OsStrBytes;
-use sqlx::{QueryBuilder, Row, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
+use sqlx::{QueryBuilder, Row, SqlSafeStr, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
 use thiserror::Error;
 use tracing::warn;
 
@@ -770,34 +770,72 @@ impl StateManager {
         Ok(Some(download))
     }
 
-    pub async fn load_downloads(&self) -> Result<IndexMap<DownloadId, Download>, DbReadWriteError> {
-        let download_rows = sqlx::query_as::<_, DownloadRow>("SELECT * FROM downloads ORDER BY id ASC")
+    pub async fn load_completed_downloads(&self) -> Result<IndexMap<DownloadId, Download>, DbReadWriteError> {
+        self.query_downloads("SELECT * FROM downloads WHERE status = 'completed' ORDER BY id ASC").await
+    }
+    
+    pub async fn load_all_downloads(&self) -> Result<IndexMap<DownloadId, Download>, DbReadWriteError> {
+        self.query_downloads("SELECT * FROM downloads ORDER BY id ASC").await
+    }
+
+    async fn query_downloads(&self, query: impl SqlSafeStr) -> Result<IndexMap<DownloadId, Download>, DbReadWriteError> {
+        let download_rows = sqlx::query_as::<_, DownloadRow>(query)
             .fetch_all(&self.pool)
             .await
-            .map_err(DbReadError::with_msg("Failed to fetch all downloads from db"))?;
+            .map_err(DbReadError::with_msg("Failed to fetch downloads from db"))?;
 
-        let file_rows = sqlx::query_as::<_, DownloadFileRow>(
-            "SELECT * FROM download_files ORDER BY download_id ASC, file_id ASC"
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(DbReadError::with_msg("Failed to fetch all download files from db"))?;
+        let download_ids: Vec<i64> = download_rows.iter().map(|download_row| download_row.id).collect();
+
+        let file_rows = if download_ids.is_empty() {
+               Vec::new()
+        } else {
+            let mut builder = QueryBuilder::new(
+                "SELECT * FROM download_files WHERE download_id IN ("
+            );
+            let mut separated = builder.separated(", ");
+            for id in &download_ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(")");
+            
+            builder
+                .build_query_as::<DownloadFileRow>()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DbReadError::with_msg("Failed to fetch download files from db"))?
+        };
 
         let mut files_by_download: HashMap<i64, Vec<DownloadFileRow>> = HashMap::new();
+        let mut file_ids = Vec::with_capacity(file_rows.len());
 
         for row in file_rows {
+            file_ids.push(row.file_id);
+            
             files_by_download
                 .entry(row.download_id)
                 .or_default()
                 .push(row);
         }
 
-        let folder_rows = sqlx::query_as::<_, DownloadFolderRow>(
-            "SELECT * FROM download_folders ORDER BY download_id ASC, folder_id ASC"
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(DbReadError::with_msg("Failed to fetch all download folders from db"))?;
+        let folder_rows = if download_ids.is_empty() {
+               Vec::new()
+        } else {
+            let mut builder = QueryBuilder::new(
+                "SELECT * FROM download_folders WHERE download_id IN ("
+            );
+            let mut separated = builder.separated(", ");
+            for id in &download_ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(") ");
+            builder.push("ORDER BY download_id ASC, folder_id ASC");
+            
+            builder
+                .build_query_as::<DownloadFolderRow>()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DbReadError::with_msg("Failed to fetch download folders from db"))?
+        };
 
         let mut folders_by_download: HashMap<i64, Vec<DownloadFolderRow>> = HashMap::new();
 
@@ -810,7 +848,7 @@ impl StateManager {
 
         let mut downloads = IndexMap::with_capacity(download_rows.len());
 
-        let mut chunk_hashes = match self.load_chunk_hashes().await {
+        let mut chunk_hashes = match self.load_chunk_hashes(&file_ids).await {
             Ok(chunk_hashes) => chunk_hashes,
             Err(err) => match err.kind() {
                 // We failed to load all the chunks at once due to a corruption somewhere, 
@@ -903,13 +941,26 @@ impl StateManager {
         Ok(map)
     }
 
-    async fn load_chunk_hashes(&self) -> Result<HashMap<DownloadId, HashMap<FileId, Vec<Option<[u8; 16]>>>>, DbReadError> {
-        let rows = sqlx::query_as::<_, ChunkHashRow>(
-            "SELECT * FROM chunk_hashes ORDER BY download_id ASC, file_id, chunk_index"
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(DbReadError::with_msg("Failed to fetch chunk all chunk hashes from database"))?;
+    async fn load_chunk_hashes(&self, file_ids: &[i64]) -> Result<HashMap<DownloadId, HashMap<FileId, Vec<Option<[u8; 16]>>>>, DbReadError> {
+        let rows = if file_ids.is_empty() {
+               Vec::new()
+        } else {
+            let mut builder = QueryBuilder::new(
+                "SELECT * FROM chunk_hashes WHERE download_id IN ("
+            );
+            let mut separated = builder.separated(", ");
+            for id in file_ids {
+                separated.push_bind(id);
+            }
+            separated.push_unseparated(") ");
+            builder.push("ORDER BY download_id ASC, file_id, chunk_index");
+            
+            builder
+                .build_query_as::<ChunkHashRow>()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DbReadError::with_msg("Failed to fetch chunk hashes from database"))?
+        };
 
         let mut map = HashMap::new();
 

@@ -303,7 +303,7 @@ impl UiManager {
 }
 
 pub async fn get_snapshot(db_manager: &StateManager) -> IndexMap<DownloadId, Download> {
-    db_manager.load_downloads().await.unwrap()
+    db_manager.load_all_downloads().await.unwrap()
 }
 
 #[derive(Debug, Clone)]
