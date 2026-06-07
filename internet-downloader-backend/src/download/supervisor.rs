@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::{usize, vec};
 
 use tokio::fs::create_dir_all;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 use url::Host;
@@ -14,7 +14,7 @@ use url::Host;
 use crate::app::limiters::DownloadLimiterGroup;
 use crate::app::context::AppContext;
 use crate::app::manager::AppManagerEvent;
-use crate::client_state_manager::FileUpdate;
+use crate::client_state_manager::{DownloadSnapshot, FileUpdate};
 use crate::download::error::FileFailureReason;
 use crate::download::hosts::manager::{DownloadResult, HttpFailureKind, MetadataJob, MetadataResult, PermanentFailureKind, RangeJob, StreamJob};
 use crate::download::items::{ActiveOperation, Download, DownloadId, DownloadItem, FileDownload, FileId, FileSize};
@@ -80,6 +80,8 @@ pub struct DownloadSupervisor {
     receiver: mpsc::Receiver<DownloadCommand>,
     sender: mpsc::Sender<DownloadCommand>,
     cancel_token: CancellationToken,
+    snapshot_signal_receiver: broadcast::Receiver<()>,
+    snapshot_sender: mpsc::UnboundedSender<DownloadSnapshot>,
 }
 
 impl DownloadSupervisor {
@@ -91,6 +93,8 @@ impl DownloadSupervisor {
         app_manager_event_sender: mpsc::UnboundedSender<AppManagerEvent>,
         receiver: mpsc::Receiver<DownloadCommand>,
         sender: mpsc::Sender<DownloadCommand>,
+        snapshot_signal_receiver: broadcast::Receiver<()>,
+        snapshot_sender: mpsc::UnboundedSender<DownloadSnapshot>,
     ) -> Self {
         Self {
             download,
@@ -101,6 +105,8 @@ impl DownloadSupervisor {
             receiver,
             sender,
             cancel_token: CancellationToken::new(),
+            snapshot_signal_receiver,
+            snapshot_sender,
         }
     }
 
@@ -122,6 +128,10 @@ impl DownloadSupervisor {
             tokio::select! {
                 _ = save_interval.tick() => {
                     self.app_context.db_manager.write_download(&self.download).await.unwrap();
+                }
+                _ = self.snapshot_signal_receiver.recv() => {
+                    let snapshot = DownloadSnapshot::from(self.download.clone());
+                    let _ = self.snapshot_sender.send(snapshot);
                 }
                 Some(command) = self.receiver.recv() => {
                     match command {
@@ -295,6 +305,10 @@ impl DownloadSupervisor {
             tokio::select! {
                 _ = save_interval.tick() => {
                     self.app_context.db_manager.write_download(&self.download).await.unwrap();
+                }
+                _ = self.snapshot_signal_receiver.recv() => {
+                    let snapshot = DownloadSnapshot::from(self.download.clone());
+                    let _ = self.snapshot_sender.send(snapshot);
                 }
                 Some(command) = self.receiver.recv() => {
                     match command {
@@ -829,10 +843,28 @@ pub struct DownloadHandle {
 }
 
 impl DownloadHandle {
-    pub fn spawn(download: Download, limiters: Arc<DownloadLimiterGroup>, app_context: AppContext, verifier: VerifierHandle, app_manager_event_sender: mpsc::UnboundedSender<AppManagerEvent>) -> Self {
+    pub fn spawn(
+        download: Download, 
+        limiters: Arc<DownloadLimiterGroup>, 
+        app_context: AppContext, 
+        verifier: VerifierHandle, 
+        app_manager_event_sender: mpsc::UnboundedSender<AppManagerEvent>,
+        snapshot_signal_receiver: broadcast::Receiver<()>,
+        snapshot_sender: mpsc::UnboundedSender<DownloadSnapshot>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(1000);
         
-        let download_supervisor = DownloadSupervisor::spawn(download, limiters, app_context, verifier, app_manager_event_sender, receiver, sender.clone());
+        let download_supervisor = DownloadSupervisor::spawn(
+            download, 
+            limiters, 
+            app_context, 
+            verifier, 
+            app_manager_event_sender, 
+            receiver, 
+            sender.clone(),
+            snapshot_signal_receiver,
+            snapshot_sender,
+        );
 
         tokio::spawn(async move {
            download_supervisor.run().await; 

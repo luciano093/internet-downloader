@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, put};
 use internet_downloader_backend::app::manager::AppManagerHandle;
+use internet_downloader_backend::app::snapshot::AppSnapshotHandler;
 use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
 
@@ -59,7 +60,8 @@ async fn main() {
     let state_manager = StateManager::new("mydb.sqlite3").await.unwrap();
     state_manager.create_tables().await.unwrap();
 
-    let app_manager = AppManagerHandle::spawn(state_manager);
+    let snapshot_manager = AppSnapshotHandler::spawn(state_manager.clone());
+    let app_manager = AppManagerHandle::spawn(state_manager, snapshot_manager);
 
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
@@ -127,8 +129,8 @@ async fn download_stream(State(manager): State<AppManagerHandle>) -> impl IntoRe
     
         let snapshot: Vec<DownloadSnapshot> = downloads
             .into_iter()
-            .map(|(_id, download)| {
-                DownloadSnapshot::from(download)
+            .map(|(_id, download_snapshot)| {
+                download_snapshot
             })
             .collect();
         
@@ -159,7 +161,7 @@ async fn download_stream(State(manager): State<AppManagerHandle>) -> impl IntoRe
                     let downloads = manager.get_snapshot().await;
                     let snapshot: Vec<DownloadSnapshot> = downloads
                         .into_iter()
-                        .map(|(_id, download)| DownloadSnapshot::from(download))
+                        .map(|(_id, download_snapshot)| download_snapshot)
                         .collect();
 
                     let snapshot_json = serde_json::to_string(&snapshot).unwrap();

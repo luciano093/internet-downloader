@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use indexmap::IndexMap;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -12,7 +11,8 @@ use url::{Host, Url};
 use crate::app::limiters::{DownloadLimiterGroup, LimiterRegistry};
 use crate::app::registry::DownloadRegistry;
 use crate::app::settings::AppSettings;
-use crate::client_state_manager::{FrontendMessage, UiManagerHandle, get_snapshot};
+use crate::app::snapshot::AppSnapshotHandler;
+use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiManagerHandle};
 use crate::app::context::AppContext;
 use crate::download::hosts::DownloadTask;
 use crate::download::items::{Download, DownloadId, DownloadItem, FileId};
@@ -53,6 +53,7 @@ pub enum AppManagerCommand {
 pub struct AppManager {
     db_manager: StateManager,
     ui_handle: UiManagerHandle,
+    snapshot_manager: AppSnapshotHandler,
     sender: mpsc::Sender<AppManagerCommand>,
     receiver: mpsc::Receiver<AppManagerCommand>,
     supervisors: HashMap<DownloadId, DownloadHandle>,
@@ -60,10 +61,17 @@ pub struct AppManager {
 }
 
 impl AppManager {
-    pub fn new(db_manager: StateManager, sender: mpsc::Sender<AppManagerCommand>, receiver: mpsc::Receiver<AppManagerCommand>, ui_handle: UiManagerHandle) -> Self {
+    pub fn new(
+        db_manager: StateManager,
+        sender: mpsc::Sender<AppManagerCommand>,
+        receiver: mpsc::Receiver<AppManagerCommand>,
+        ui_handle: UiManagerHandle,
+        snapshot_manager: AppSnapshotHandler,
+    ) -> Self {
         AppManager {
             db_manager,
             ui_handle,
+            snapshot_manager,
             sender,
             receiver,
             supervisors: HashMap::new(),
@@ -178,8 +186,21 @@ impl AppManager {
                             }
     
                             self.limiters.downloads().insert(download_id, Arc::downgrade(&download_limiter));
+
+                            let snapshot_signal_receiver = self.snapshot_manager.subscribe();
+                            let (snapshot_sender, snapshot_receiver) = mpsc::unbounded_channel();
+                            
+                            self.snapshot_manager.add_supervisor(snapshot_receiver);
     
-                            let supervisor = DownloadHandle::spawn(download, download_limiter, app_context.clone(), verifier.clone(), event_sender.clone());
+                            let supervisor = DownloadHandle::spawn(
+                                download, 
+                                download_limiter, 
+                                app_context.clone(), 
+                                verifier.clone(), 
+                                event_sender.clone(),
+                                snapshot_signal_receiver,
+                                snapshot_sender
+                            );
     
                             self.supervisors.insert(download_id, supervisor);
                         }
@@ -331,16 +352,16 @@ impl AppManager {
 pub struct AppManagerHandle {
     sender: mpsc::Sender<AppManagerCommand>,
     ui_handle: UiManagerHandle,
-    db_manager: StateManager,
+    snapshot_manager: AppSnapshotHandler,
 }
 
 impl AppManagerHandle {
-    pub fn spawn(state_manager: StateManager) -> Self {
+    pub fn spawn(state_manager: StateManager, snapshot_manager: AppSnapshotHandler) -> Self {
         let (sender, receiver) = mpsc::channel(1000);
 
         let ui_handle = UiManagerHandle::spawn();
         
-        let app_manager = AppManager::new(state_manager.clone(), sender.clone(), receiver, ui_handle.clone());
+        let app_manager = AppManager::new(state_manager.clone(), sender.clone(), receiver, ui_handle.clone(), snapshot_manager.clone());
 
         tokio::spawn(async move {
             app_manager.run().await;
@@ -349,7 +370,7 @@ impl AppManagerHandle {
         Self {
             sender,
             ui_handle,
-            db_manager: state_manager,
+            snapshot_manager,
         }
     }
 
@@ -357,8 +378,8 @@ impl AppManagerHandle {
         self.ui_handle.subscribe()
     }
 
-    pub async fn get_snapshot(&self) -> IndexMap<DownloadId, Download> {
-        get_snapshot(&self.db_manager).await
+    pub async fn get_snapshot(&self) -> HashMap<DownloadId, DownloadSnapshot> {
+        self.snapshot_manager.take_snapshot().await
     }
 
     pub async fn queue_download(&self, url: String) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {

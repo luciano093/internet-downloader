@@ -716,6 +716,25 @@ impl From<Download> for DownloadSnapshot {
         }
 }
 
+impl From<&Download> for DownloadSnapshot {
+    fn from(download: &Download) -> DownloadSnapshot {
+        let files: IndexMap<FileId, FileSnapshot> = download.files
+            .iter()
+            .map(|(id, file)| (*id, file.into()))
+            .collect();
+    
+        DownloadSnapshot {
+            id: download.id,
+            name: download.name.clone(),
+            url: download.url.clone(),
+            status: download.status,
+            active_operation: download.active_operation,
+            files,
+            folders: download.folders.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DownloadType {
@@ -1176,6 +1195,22 @@ impl From<FileDownload> for FileSnapshot {
             status: file.status,
             active_operation: file.active_operation,
             url: file.url
+        }
+    }
+}
+
+impl From<&FileDownload> for FileSnapshot {
+    fn from(file: &FileDownload) -> Self {
+        FileSnapshot {
+            id: file.id,
+            parent_id: file.parent_id,
+            file_name: file.file_name.clone(),
+            relative_path: file.relative_path.clone(),
+            size: file.size,
+            bytes_downloaded: file.calculate_initial_bytes(BLOCK_SIZE as u64),
+            status: file.status,
+            active_operation: file.active_operation,
+            url: Arc::clone(&file.url),
         }
     }
 }

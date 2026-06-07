@@ -3,3 +3,4 @@ pub mod settings;
 pub mod limiters;
 pub mod registry;
 pub mod context;
+pub mod snapshot;
