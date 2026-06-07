@@ -708,11 +708,9 @@ impl StateManager {
                 .await
                 .map_err(|err| DbWriteError::new(format!("Failed to insert files for download: {} id: {} to database", download.name(), download.id()), err))?;
 
-            for (_, file) in batch {
-                write_chunk_hashes(&mut transaction, download.id(), file)
-                    .await
-                    .map_err(|err| err.context(format!("Failed to insert chunk hashes for download: {} id: {} to database", download.name(), download.id())))?;
-            }
+            write_batched_chunk_hashes(&mut transaction, download, &batch)
+                .await
+                .map_err(|err| err.context(format!("Failed to insert chunk hashes for download: {} id: {} to database", download.name(), download.id())))?;
         }
 
         transaction.commit()
@@ -1260,6 +1258,45 @@ impl StateManager {
             }
         }
     }
+}
+
+async fn write_batched_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, download: &Download, batch: &[(&FileId, &FileDownload)]) -> Result<(), DbWriteError> {
+    let download_id = download.id();
+    
+    // Collect (download_id, file_id, chunk_index, hash_ref) tuples from all files in this batch
+    let all_hashes: Vec<(DownloadId, FileId, usize, &[u8])> = batch.iter()
+        .flat_map(|(file_id, file)| {
+            file.chunk_hashes().iter().enumerate().filter_map(move |(chunk_index, hash_opt)| {
+                hash_opt.as_ref().map(|hash| (download_id, **file_id, chunk_index, hash.as_slice()))
+            })
+        })
+        .collect();
+
+    for chunk in all_hashes.chunks(1000) {
+        let mut hash_builder = QueryBuilder::new(
+            "INSERT INTO chunk_hashes (download_id, file_id, chunk_index, hash)"
+        );
+        
+        hash_builder.push_values(chunk.iter(), |mut builder, (download_id, file_id, chunk_index, hash)| {
+            builder
+                .push_bind(**download_id as i64)
+                .push_bind(**file_id as i64)
+                .push_bind(*chunk_index as i64)
+                .push_bind(*hash);
+        });
+        
+        hash_builder.push(r#"
+            ON CONFLICT(download_id, file_id, chunk_index) DO UPDATE SET 
+                hash = excluded.hash
+                    WHERE chunk_hashes.hash IS DISTINCT FROM excluded.hash
+        "#);
+        
+        hash_builder.build().execute(&mut **transaction)
+            .await
+            .map_err(|error| DbWriteError::new(format!("Failed to write chunk hashes for download: {} id: {} to database", download.name(), download_id), error))?;
+    }
+
+    Ok(())
 }
 
 async fn write_chunk_hashes(transaction: &mut Transaction<'_, sqlx::Sqlite>, download_id: DownloadId, file: &FileDownload) -> Result<(), DbWriteError> {
