@@ -298,8 +298,6 @@ impl DownloadSupervisor {
                 let _ = handle.queue_stream(job).await;
             }
         }
-
-        let mut save_interval = tokio::time::interval(Duration::from_millis(100));
         
         loop {
             tokio::select! {

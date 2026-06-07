@@ -192,7 +192,6 @@ impl Verifier {
 
             info!("Finished verification {} in {:?}", download.name(), start_time.elapsed());
 
-            db_manager.write_download(&download).await.unwrap();
             let _ = reply.send(download);
         });
 

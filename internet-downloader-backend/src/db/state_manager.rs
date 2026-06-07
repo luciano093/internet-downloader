@@ -415,6 +415,7 @@ impl StateManager {
         sqlx::query("PRAGMA journal_mode = WAL;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed to initialize PRAGMA journal_mode during initial database connection"))?;
         sqlx::query("PRAGMA synchronous = NORMAL;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed to initialize PRAGMA synchronous during initial database connection"))?;
         sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed to initialize PRAGMA foreign_keys during initial database connection"))?;
+        sqlx::query("PRAGMA busy_timeout = 5000;").execute(&pool).await.map_err(CoreDbError::with_msg("Failed initialize PRAGMA busy_timeout during initial database connection"))?;
 
         Ok(Self {
             pool
