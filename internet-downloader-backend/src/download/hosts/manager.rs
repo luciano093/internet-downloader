@@ -17,8 +17,10 @@ use reqwest::{Client, Response};
 use thiserror::Error;
 use tokio::fs::create_dir_all;
 use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::Notify;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_stream::StreamExt;
@@ -499,7 +501,7 @@ pub struct HostScheduler {
     stream: VecDeque<StreamJob>,
     range: VecDeque<RangeJob>,
 
-    max_retries: usize,
+    notify: Arc<Notify>,
 }
 
 pub enum NextJob {
@@ -509,7 +511,7 @@ pub enum NextJob {
 }
 
 impl HostScheduler {
-    pub fn new(strategy: SchedulingStrategy, max_retries: usize) -> Self {
+    pub fn new(strategy: SchedulingStrategy) -> Self {    
         Self {
             strategy,
             metadata_retry: VecDeque::new(),
@@ -518,7 +520,7 @@ impl HostScheduler {
             metadata: VecDeque::new(),
             stream: VecDeque::new(),
             range: VecDeque::new(),
-            max_retries,
+            notify: Arc::new(Notify::const_new()),
         }
     }
 
@@ -528,14 +530,17 @@ impl HostScheduler {
     
     pub fn push_metadata(&mut self, job: MetadataJob) {
         self.metadata.push_back(job);
+        self.notify.notify_waiters();
     }
     
     pub fn push_stream(&mut self, job: StreamJob) {
         self.stream.push_back(job);
+        self.notify.notify_waiters();
     }
     
     pub fn push_range(&mut self, job: RangeJob) {
         self.range.push_back(job);
+        self.notify.notify_waiters();
     }
 
     fn retry(&mut self, failed_job: FailedJob) {
@@ -544,46 +549,54 @@ impl HostScheduler {
             FailedJob::Stream(stream_job) => self.stream_retry.push_back(stream_job),
             FailedJob::Range(range_job) => self.range_retry.push_back(range_job),
         }
+        self.notify.notify_waiters();
     }
 
-    pub fn next(&mut self, permits_available: usize, permits_total: usize) -> Option<NextJob> {
-        // Retries first (metadata > stream > range)
-        if let Some(job) = self.take_from_retry_metadata() {
-            return Some(NextJob::Metadata(job));
-        }
-        if let Some(job) = self.take_from_retry_stream() {
-            return Some(NextJob::Stream(job));
-        }
-        if let Some(job) = self.take_from_retry_range() {
-            return Some(NextJob::Range(job));
-        }
-
-        // If we only have one permit left, prioritize metadata
-        if permits_available == 1 {
+    pub async fn next(&mut self, permits_available: usize, permits_total: usize) -> NextJob {
+        loop {
+            if !self.has_work() {
+                self.notify.notified().await;
+            }
+            
+            // Retries first (metadata > stream > range)
+            if let Some(job) = self.take_from_retry_metadata() {
+                return NextJob::Metadata(job);
+            }
+            if let Some(job) = self.take_from_retry_stream() {
+                return NextJob::Stream(job);
+            }
+            if let Some(job) = self.take_from_retry_range() {
+                return NextJob::Range(job);
+            }
+    
+            // If we only have one permit left, prioritize metadata
+            if permits_available == 1 {
+                if let Some(job) = self.take_metadata() {
+                    return NextJob::Metadata(job);
+                }
+            }
+    
+            // 1.0 means all permits free (idle)
+            // 0.0 means no permits free (saturated)
+            let free_ratio = 1.0 - (permits_available as f64 / permits_total.max(1) as f64);
+    
+            // If more than half our permits are free, prefer metadata
+            if free_ratio > 0.5 {
+                if let Some(job) = self.take_metadata() {
+                    return NextJob::Metadata(job);
+                }
+            }
+            
+            if let Some(job) = self.take_stream() {
+                return NextJob::Stream(job);
+            }
+            if let Some(job) = self.take_range() {
+                return NextJob::Range(job);
+            }
             if let Some(job) = self.take_metadata() {
-                return Some(NextJob::Metadata(job));
+                return NextJob::Metadata(job);
             }
         }
-
-        // 1.0 means all permits free (idle)
-        // 0.0 means no permits free (saturated)
-        let free_ratio = 1.0 - (permits_available as f64 / permits_total.max(1) as f64);
-
-        // If more than half our permits are free, prefer metadata
-        if free_ratio > 0.5 {
-            if let Some(job) = self.take_metadata() {
-                return Some(NextJob::Metadata(job));
-            }
-        }
-        
-        if let Some(job) = self.take_stream() {
-            return Some(NextJob::Stream(job));
-        }
-        if let Some(job) = self.take_range() {
-            return Some(NextJob::Range(job));
-        }
-        
-        self.take_metadata().map(NextJob::Metadata)
     }
 
     // Retry helpers are always FIFO
@@ -663,7 +676,7 @@ impl HostManager {
             sender,
             host_limiter,
             global_limiter,
-            scheduler: HostScheduler::new(SchedulingStrategy::Fifo, MAX_RETRIES),
+            scheduler: HostScheduler::new(SchedulingStrategy::Fifo),
             permits: Arc::new(Semaphore::const_new(5)),
             max_permits: 5,
             rate_limit_sender: None,
@@ -673,19 +686,23 @@ impl HostManager {
     pub async fn run(mut self) {  
         loop {
             tokio::select! {
-                permit = self.permits.clone().acquire_owned(), if self.rate_limit_sender.is_none() => {
-                    let _permit = permit.expect("semaphore closed");
-                    
-                    // Ask the scheduler what to do next
-                    if let Some(next) = self.scheduler.next(
+                result = async {
+                    // Ask the scheduler if we have a next job
+                    let job = self.scheduler.next(
                         self.permits.available_permits(),
                         self.max_permits,
-                    ) {
-                        match next {
-                            NextJob::Metadata(job) => self.dispatch_metadata(job, _permit),
-                            NextJob::Stream(job) => self.dispatch_stream(job, _permit).await,
-                            NextJob::Range(job) => self.dispatch_range(job, _permit),
-                        }
+                    ).await;
+                    
+                    let _permit = self.permits.clone().acquire_owned().await.unwrap();
+                    
+                    (job, _permit)
+                } => {
+                    let (next, _permit) = result;
+                    
+                    match next {
+                        NextJob::Metadata(job) => self.dispatch_metadata(job, _permit),
+                        NextJob::Stream(job) => self.dispatch_stream(job, _permit).await,
+                        NextJob::Range(job) => self.dispatch_range(job, _permit),
                     }
                 }
                 Some(message) = self.receiver.recv() => {
