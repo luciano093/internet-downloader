@@ -1,4 +1,4 @@
-import type { ActiveOperation, DownloadStatus } from "@/downloadTypes";
+import type { DownloadStatus } from "@/downloadTypes";
 import { type LucideIcon, ArrowDownToLine, Pause, Check, X } from "lucide-react";
 
 export type FilterCategory = "active" | "paused" | "completed" | "failed";
@@ -20,8 +20,8 @@ export const STATUS_FILTERS: { id: FilterCategory; label: string; icon: LucideIc
   { id: "failed", label: "Failed", icon: X },
 ];
 
-export function getFilterCategory(status: DownloadStatus, activeOperation: ActiveOperation | null): FilterCategory {
+export function getFilterCategory(status: DownloadStatus, is_paused: boolean): FilterCategory {
   // active_operation overrides status for transient states
-  if (activeOperation?.state === "paused") return "paused";
+  if (is_paused) return "paused";
   return STATE_TO_CATEGORY[status.state];
 }

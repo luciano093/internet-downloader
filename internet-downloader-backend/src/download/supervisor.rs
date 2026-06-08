@@ -111,22 +111,23 @@ impl DownloadSupervisor {
     }
 
     pub async fn run(mut self) {
-        let changed_items = self.download.set_active_operation(Some(ActiveOperation::Verifying));
-        self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
-
-        self.app_context.db_manager.write_download(&self.download).await.unwrap();
-
-        let mut verification_receiver = {
-            let (verification_sender, verification_receiver) = oneshot::channel();
+        let mut verification_receiver = None;
+        
+        if !self.download.is_paused() {
+            let changed_items = self.download.set_active_operation(Some(ActiveOperation::Verifying));
+            self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
+            self.app_context.db_manager.write_download(&self.download).await.unwrap();
+    
+            let (verification_sender, verification_receiver_inner) = oneshot::channel();
             let _ = self.verifier.verify_download(self.download.clone(), verification_sender).await;
-            Some(verification_receiver)
-        };
+            verification_receiver = Some(verification_receiver_inner);
+        }
 
         let mut save_interval = tokio::time::interval(Duration::from_millis(200));
             
         loop {
             tokio::select! {
-                _ = save_interval.tick(), if self.download.active_operation() != Some(ActiveOperation::Paused) => {
+                _ = save_interval.tick(), if self.download.active_operation().is_none() => {
                     self.app_context.db_manager.write_download(&self.download).await.unwrap();
                 }
                 _ = self.snapshot_signal_receiver.recv() => {
@@ -170,10 +171,13 @@ impl DownloadSupervisor {
                             verification_receiver = None;
                             self.app_context.db_manager.write_download(&self.download).await.unwrap();
 
-                            let changed_items = self.download.set_active_operation(Some(ActiveOperation::Paused));
-                            self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
+                            let changed_items = self.download.set_paused(true);
+                            self.app_context.ui_handle.update_paused_state(self.download.id(), changed_items);
                         },
                         DownloadCommand::Resume => {
+                            let changed_items = self.download.set_paused(false);
+                            self.app_context.ui_handle.update_paused_state(self.download.id(), changed_items);
+                            
                             let (new_verification_sender, new_verification_receiver) = oneshot::channel();
                             let _ = self.verifier.verify_download(self.download.clone(), new_verification_sender).await;
                             verification_receiver = Some(new_verification_receiver);
@@ -301,7 +305,7 @@ impl DownloadSupervisor {
         
         loop {
             tokio::select! {
-                _ = save_interval.tick(), if self.download.active_operation() != Some(ActiveOperation::Paused) => {
+                _ = save_interval.tick(), if self.download.active_operation().is_none() => {
                     self.app_context.db_manager.write_download(&self.download).await.unwrap();
                 }
                 _ = self.snapshot_signal_receiver.recv() => {
@@ -351,13 +355,16 @@ impl DownloadSupervisor {
                             while let Ok(_) = event_receiver.try_recv() {}
                             while let Ok(_) = active_operations_receiver.try_recv() {}
 
-                            let changed_items = self.download.set_active_operation(Some(ActiveOperation::Paused));
-                            self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
+                            let changed_items = self.download.set_paused(true);
+                            self.app_context.ui_handle.update_paused_state(self.download.id(), changed_items);
 
                             // Save to DB
                             self.app_context.db_manager.write_download(&self.download).await.unwrap();
                         },
                         DownloadCommand::Resume => {
+                            let changed_items = self.download.set_paused(false);
+                            self.app_context.ui_handle.update_paused_state(self.download.id(), changed_items);
+                            
                             let changed_items = self.download.set_active_operation(Some(ActiveOperation::Queued));
                             self.app_context.ui_handle.update_operations(self.download.id(), changed_items);
 
@@ -899,17 +906,9 @@ fn is_valid_transition(from: Option<ActiveOperation>, to: Option<ActiveOperation
     }
 
     match (from, to) {
-        // Paused -> Queued (on a resume) 
-        // or None (file finished) are the only valid exits
-        (Some(Paused), Some(Queued)) | (Some(Paused), None) => true,
-        (Some(Paused), _) => {
-            false
-        }
-
         // Queued
         (Some(Queued), Some(Downloading))  // worker picked it up
         | (Some(Queued), Some(Waiting(_))) // immediate failure before Downloading was sent
-        | (Some(Queued), Some(Paused))     // user paused while queued
         | (Some(Queued), None)             // completed (can happen on 0 byte files?)
         => true,
         (Some(Queued), _) => false,
@@ -917,7 +916,6 @@ fn is_valid_transition(from: Option<ActiveOperation>, to: Option<ActiveOperation
         // Downloading
         (Some(Downloading), Some(Queued))       // retry, back to queue
         | (Some(Downloading), Some(Waiting(_))) // one range failed, others still going
-        | (Some(Downloading), Some(Paused))     // user paused
         | (Some(Downloading), None)             // finished
         => true,
         (Some(Downloading), _) => false,
@@ -925,13 +923,12 @@ fn is_valid_transition(from: Option<ActiveOperation>, to: Option<ActiveOperation
         // Waiting
         (Some(Waiting(_)), Some(Downloading))  // retry timer fired
         | (Some(Waiting(_)), Some(Queued))     // went back through queue
-        | (Some(Waiting(_)), Some(Paused))     // user paused during backoff
         | (Some(Waiting(_)), None)             // finished while waiting
         | (Some(Waiting(_)), Some(Waiting(_))) // updated retry duration
         => true,
         (Some(Waiting(_)), _) => false,
 
-        // Verifyingcan go to any other state
+        // Verifying can go to any other state
         (Some(Verifying), _) => true,
 
         // Either hasn't begun or has been finished

@@ -131,6 +131,8 @@ impl Default for StateBucketCounters {
 #[strum_discriminants(derive(EnumString, IntoStaticStr))]
 #[strum_discriminants(name(FileStatusParse))] 
 #[strum_discriminants(strum(serialize_all = "snake_case"))]
+// These variants are mutually exclusive, because of this, states like
+// paused shouldn't live in here as they will overwrite the current status of the file.
 pub enum FileStatus {
     #[default]
     Uninitialized,

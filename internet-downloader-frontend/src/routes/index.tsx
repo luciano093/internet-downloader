@@ -69,7 +69,7 @@ function Index() {
       return false;
     }
 
-    const downloadCategory = getFilterCategory(download.status, download.active_operation);
+    const downloadCategory = getFilterCategory(download.status, download.is_paused);
 
     // We either get all downloads that match our current status filter
     // or otherwise, if the statusFilter is not set, we set this to true

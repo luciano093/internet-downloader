@@ -44,6 +44,11 @@ export const useDownloadStore = create<DownloadState>()(
               item.active_operation = existing.active_operation;
             }
 
+            // Preserve is_paused from existing state if snapshot doesn't have it
+            if (existing && item.is_paused === undefined) {
+              item.is_paused = existing.is_paused;
+            }
+
             // Don't let snapshot regress bytes_downloaded
             if (existing) {
               for (const [fileId, fileSnapshot] of Object.entries(item.files)) {
@@ -82,6 +87,7 @@ export const useDownloadStore = create<DownloadState>()(
                     if (change.url) download.url = change.url;
                     if (change.status) download.status = change.status;
                     if (change.active_operation !== undefined) download.active_operation = change.active_operation;
+                    if (change.is_paused !== undefined) download.is_paused = change.is_paused;
                     if (change.host) download.host = change.host;
 
                   if (change.files) {

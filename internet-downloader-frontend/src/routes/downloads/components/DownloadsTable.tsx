@@ -136,8 +136,10 @@ const columns = [
         header: "Status",
         size: 120,
       cell: (download) => {
-          return <>{download.active_operation ? formatActiveOperation(download.active_operation) : formatDownloadStatus(download.status)}</>;
-        }
+        if (download.is_paused) return "Paused";
+        
+        return <>{download.active_operation ? formatActiveOperation(download.active_operation) : formatDownloadStatus(download.status)}</>;
+      }
     }),
     createColumn({ 
         id: "size", 

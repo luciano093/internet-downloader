@@ -26,7 +26,7 @@ export function useDownloadCounts() {
       const download = downloads[id];
       if (!download) continue;
 
-      const category = getFilterCategory(download.status, download.active_operation);
+      const category = getFilterCategory(download.status, download.is_paused);
       counts.status[category] = (counts.status[category]) + 1;
     }
 

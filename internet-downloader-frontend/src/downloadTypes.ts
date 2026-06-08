@@ -41,7 +41,6 @@ export type ActiveOperation =
   | { state: "verifying" }
   | { state: "queued" }
   | { state: "downloading" }
-  | { state: "paused" }
   | { state: "waiting"; value: number | null };
 
 export type FileItem = {
@@ -51,6 +50,7 @@ export type FileItem = {
   relative_path: string;
   status: FileStatus;
   active_operation: ActiveOperation | null,
+  is_paused: boolean,
   url: string;
   hash: string | null;
   size: "unknown" | number;
@@ -66,6 +66,7 @@ export type FolderItem = {
   child_folders: number[];
   status: DownloadStatus;
   active_operation: ActiveOperation | null,
+  is_paused: boolean,
 };
 
 export type DownloadNode = FileItem | FolderItem;
@@ -77,6 +78,7 @@ export interface DownloadItem {
   host: string;
   status: DownloadStatus;
   active_operation: ActiveOperation | null,
+  is_paused: boolean,
   
   files: Record<number, FileItem>;
   folders: Record<number, FolderItem>;
@@ -88,6 +90,7 @@ export type FileItemDiff = {
   relative_path?: string;
   status?: FileStatus;
   active_operation?: ActiveOperation | null,
+  is_paused?: boolean,
   url?: string;
   hash?: string | null;
   size?: "unknown" | number;
@@ -99,6 +102,7 @@ export type FolderItemDiff = {
   folder_name?: string;
   status?: DownloadStatus;
   active_operation?: ActiveOperation | null,
+  is_paused?: boolean,
   child_files?: number[];
   child_folders?: number[];
 };
@@ -110,6 +114,7 @@ export interface DownloadItemDiff {
   url?: string,
   status?: DownloadStatus,
   active_operation?: ActiveOperation | null,
+  is_paused?: boolean,
   host?: string,
   relative_path?: string,
   files: Record<number, FileItemDiff>;

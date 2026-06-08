@@ -432,6 +432,7 @@ impl StateManager {
                 relative_path_raw BLOB NOT NULL, -- used to store actual relative path to support not utf-8
                 relative_path TEXT NOT NULL,    -- a utf-8 version of the relative path for query purposes
                 status TEXT NOT NULL,
+                is_paused INTEGER NOT NULL, -- 0 (false) or 1 (true). SQLite has no BOOL type
                 failure_reason TEXT
             );
 
@@ -445,6 +446,7 @@ impl StateManager {
                 relative_path_raw BLOB NOT NULL,
                 relative_path TEXT NOT NULL,
                 status TEXT NOT NULL,
+                is_paused INTEGER NOT NULL,
                 failure_reason TEXT,
                 
                 PRIMARY KEY (download_id, folder_id),
@@ -463,6 +465,7 @@ impl StateManager {
                 relative_path_raw BLOB NOT NULL,
                 relative_path TEXT NOT NULL,
                 status TEXT NOT NULL,
+                is_paused INTEGER NOT NULL,
                 failure_reason TEXT,
                 
                 -- File-specific fields
@@ -571,14 +574,15 @@ impl StateManager {
 
         sqlx::query(
             r#"
-            INSERT INTO downloads (id, url, name, relative_path_raw, relative_path, status, failure_reason) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO downloads (id, url, name, relative_path_raw, relative_path, status, is_paused, failure_reason) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 url = excluded.url,
                 name = excluded.name,
                 relative_path_raw = excluded.relative_path_raw,
                 relative_path = excluded.relative_path,
                 status = excluded.status, 
+                is_paused = excluded.is_paused,
                 failure_reason = excluded.failure_reason
             "#
         )
@@ -588,6 +592,7 @@ impl StateManager {
         .bind(path_bytes.as_ref())
         .bind(download.relative_path().to_string_lossy())
         .bind(status)
+        .bind(download.is_paused())
         .bind(reason)
         .execute(&mut *transaction)
         .await
@@ -605,7 +610,7 @@ impl StateManager {
                 "INSERT INTO download_folders (
                     download_id, folder_id, parent_folder_id,
                     name, relative_path_raw, relative_path, 
-                    status, failure_reason
+                    status, is_paused, failure_reason
                 ) "
             );
 
@@ -623,6 +628,7 @@ impl StateManager {
                     .push_bind(path_bytes)
                     .push_bind(folder.relative_path().to_string_lossy())
                     .push_bind(status)
+                    .push_bind(folder.is_paused())
                     .push_bind(reason);
             });
 
@@ -633,6 +639,7 @@ impl StateManager {
                 relative_path_raw = excluded.relative_path_raw,
                 relative_path = excluded.relative_path, 
                 status = excluded.status, 
+                is_paused = excluded.is_paused, 
                 failure_reason = excluded.failure_reason"#
             );
 
@@ -650,7 +657,7 @@ impl StateManager {
                 "INSERT INTO download_files (
                     download_id, file_id, parent_folder_id,
                     name, relative_path_raw, relative_path, 
-                    status, failure_reason, 
+                    status, is_paused, failure_reason, 
                     url, hash, chunks_raw, chunks_len, size_type, size_bytes, retries
                 ) "
             );
@@ -677,6 +684,7 @@ impl StateManager {
                     .push_bind(path_bytes)
                     .push_bind(file.relative_path().to_string_lossy())
                     .push_bind(status)
+                    .push_bind(file.is_paused())
                     .push_bind(reason)
                     .push_bind(file.url_ref()) 
                     .push_bind(hash)
@@ -694,6 +702,7 @@ impl StateManager {
                 relative_path_raw = excluded.relative_path_raw,
                 relative_path = excluded.relative_path, 
                 status = excluded.status, 
+                is_paused = excluded.is_paused, 
                 failure_reason = excluded.failure_reason,
                 url = excluded.url,
                 hash = excluded.hash,

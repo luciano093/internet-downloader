@@ -59,7 +59,6 @@ export function formatActiveOperation(operation: ActiveOperation): string {
     case "verifying": return "Verifying...";
     case "queued": return "Queued";
     case "downloading": return "Downloading...";
-    case "paused": return "Paused";
     case "waiting":
       return operation.value !== null ? `Waiting (${operation.value}s)` : "Waiting...";
   }

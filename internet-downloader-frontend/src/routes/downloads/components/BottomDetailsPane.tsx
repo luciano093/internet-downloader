@@ -55,10 +55,10 @@ export default function BottomDetailsPane() {
 
                         <div className="text-right pr-6 text-foreground/50 font-medium">Status:</div>
                         <div className="text-foreground">
-                            {download.active_operation 
-                                ? formatActiveOperation(download.active_operation) 
-                                : formatDownloadStatus(download.status)
-                            }
+                          {download.is_paused ? "Paused"
+                            : download.active_operation ? formatActiveOperation(download.active_operation)
+                            : formatDownloadStatus(download.status)
+                          }
                         </div>
 
                         <div className="text-right pr-6 text-foreground/50 font-medium">Size:</div>
