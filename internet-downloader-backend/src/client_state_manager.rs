@@ -475,7 +475,7 @@ impl FileDiff {
             FileUpdate::BytesDownloaded { len, .. } => {
                 self.bytes_downloaded = Some(len)
             },
-            FileUpdate::Pause { id, is_paused } => {
+            FileUpdate::Pause { is_paused, .. } => {
                 self.is_paused = Some(is_paused)
             },
         }
@@ -508,7 +508,7 @@ impl FolderDiff {
             FolderUpdate::Operation { operation, .. } => {
                 self.active_operation = Some(operation)
             },
-            FolderUpdate::Pause { id, is_paused } => {
+            FolderUpdate::Pause { is_paused, .. } => {
                 self.is_paused = Some(is_paused)
             },
         }

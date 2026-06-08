@@ -134,7 +134,6 @@ impl Verifier {
         self.ui_handle.update_operations(download_id, changed_items);
 
         self.db_manager.write_download(&download).await.unwrap();
-        let db_manager = self.db_manager.clone();
 
         let semaphore = self.semaphore.clone();
         let cancel_flag = Arc::new(AtomicBool::new(false));

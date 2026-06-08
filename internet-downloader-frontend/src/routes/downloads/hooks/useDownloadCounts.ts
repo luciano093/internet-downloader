@@ -1,6 +1,6 @@
 import { useDownloadStore } from "@/stores/downloadStore";
 import { useMemo } from "react";
-import { getFilterCategory, STATE_TO_CATEGORY, type FilterCategory } from "../lib/filters";
+import { getFilterCategory, type FilterCategory } from "../lib/filters";
 
 type Counts = {
   all: number,

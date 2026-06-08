@@ -20,7 +20,6 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Notify;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::watch;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_stream::StreamExt;

@@ -123,7 +123,7 @@ impl AppManager {
             ui_handle: self.ui_handle.clone(),
             db_manager: self.db_manager.clone(),
             plugin_registry,
-            writer_handle: DownloadWriterManager::spawn(),
+            writer_handle: writer,
             network_handle,
         };
 
