@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use chrono::{DateTime, Utc};
+use futures_util::stream::FuturesUnordered;
 use http::{StatusCode, header};
 use rand::RngExt;
 use rand::rng;
@@ -685,7 +686,7 @@ impl HostManager {
     pub async fn run(mut self) {  
         loop {
             tokio::select! {
-                result = async {
+                result = async {          
                     // Ask the scheduler if we have a next job
                     let job = self.scheduler.next(
                         self.permits.available_permits(),
@@ -735,14 +736,26 @@ impl HostManager {
                                 let (rate_limit_sender, mut rate_limit_receiver) = mpsc::unbounded_channel();
                                 self.rate_limit_sender = Some(rate_limit_sender);
 
+                                let permits = self.permits.clone();
+                                let max_permits = self.max_permits;
                                 let sender = self.sender.clone();
+
                                 tokio::spawn(async move {
+                                    // Hold all permits until rate limit expires
+                                    let held = (0..max_permits)
+                                        .map(|_| permits.clone().acquire_owned())
+                                        .collect::<FuturesUnordered<_>>()
+                                        .collect::<Vec<_>>()
+                                        .await;
+                                    
                                     let mut deadline = Instant::now() + duration;
                                     let mut sleep = Box::pin(tokio::time::sleep_until(deadline));
                                     
                                     loop {
                                         tokio::select! {
                                             _ = &mut sleep => {
+                                                // We drop all the permits so they can be used once again
+                                                drop(held);
                                                 let _ = sender.send(HostMessage::RateLimitExpired).await;
                                                 break;
                                             }
@@ -1131,6 +1144,8 @@ impl HostManager {
         warn!("Rate limited for file {} from download {}.", failed_job.file_id(), failed_job.download_id());
 
         let duration = retry_after.map(Duration::from_secs).unwrap_or(Duration::from_secs(5));
+        
+        let _ = failed_job.active_operations_sender().send((failed_job.file_id(), ActiveOperation::Waiting(duration)));
         
         let _ = sender.send(HostMessage::RateLimited(duration)).await;
         let _ = sender.send(HostMessage::RetryReady(failed_job)).await;
