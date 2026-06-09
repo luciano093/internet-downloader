@@ -1282,14 +1282,13 @@ impl HostManager {
                 }
                 StatusCode::OK => {
                     // Server doesn't support ranges and instead returned the full file
-                    // or returned with Contentent-Length
                     let file_name = Self::extract_filename(&response, url);
                     
-                    if let Some(length) = response.content_length() {
-                        return Ok(MetadataResult::Chunked { file_size: length, file_name });
-                    }
-    
-                    Ok(MetadataResult::Stream { file_size: FileSize::Unknown, file_name })
+                    let file_size = response.content_length()
+                        .map(FileSize::Known)
+                        .unwrap_or(FileSize::Unknown);
+                    
+                    Ok(MetadataResult::Stream { file_size, file_name })
                 }
                 status => Err(MetadataError::HttpStatus(status)),
             }
