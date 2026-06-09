@@ -9,24 +9,24 @@ This project aims to be a modern, lightweight alternative to tools like JDownloa
 <img width="1878" height="969" alt="Image" src="https://github.com/user-attachments/assets/8e32ce25-fd26-4cf3-b769-fba756e65e3c" />
 
 ## Current Status: Early Alpha
-The core download engine and real-time state synchronization are highly functional, but the project is still in early development. Many UI elements are currently placeholders, and basic configuration options are still being wired up. 
+The core download engine is mostly stable and can handle complex downloads (it has been tested with 5k+ file downloads without any major problems), but the project is still in early development. Many UI elements are placeholders, basic configuration options are still being wired up, and the database schema may change without notice.
 
 ## Roadmap
 
-#### Plugin System
+### Plugin System
 - [ ] Hot reloading for plugins during development
 - [ ] Browser automation API via WebDriver (no bundled browser)
 - [ ] Captcha relay to frontend for manual solving
 
-#### Download Engine
+### Download Engine
 - [ ] Custom save directories per download
 - [ ] Custom download categories with default paths per category
 
-#### Frontend
+### Frontend
 - [ ] Settings page
 - [ ] Plugin management UI (install, enable/disable, configure, logs)
 
-#### Utils
+### Utils
 - [ ] Extraction support (zip, rar, 7z) after download
 
 ## Features
