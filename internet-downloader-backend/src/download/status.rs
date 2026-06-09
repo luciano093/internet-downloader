@@ -110,7 +110,7 @@ impl StateBucketCounters {
     }
 
     pub fn decrement(&mut self, bucket: StatusBucket) {
-        let _ = self.data[bucket as usize].saturating_sub(1);
+        self.data[bucket as usize] = self.data[bucket as usize].saturating_sub(1);
     }
 
     pub fn get(&self, bucket: StatusBucket) -> usize {
