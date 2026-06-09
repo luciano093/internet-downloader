@@ -1692,11 +1692,12 @@ impl DownloadItem for FolderDownload {
 }
 
 fn filename_from_url(url: &str) -> String {
-    url.rsplit('/')
-        .next()
-        .unwrap_or("unknown")
-        .split('?')
-        .next()
-        .unwrap_or("unknown")
-        .to_string()
+    let url_base = url
+        .split('#').next().unwrap_or(url)
+        .split('?').next().unwrap_or(url)
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("unknown");
+
+    url_base.to_string()
 }
