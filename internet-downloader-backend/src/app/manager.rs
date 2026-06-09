@@ -271,19 +271,29 @@ impl AppManager {
                                 self.limiters.global_limit().set_unlimited(true);
                             }
                         },
-                        AppManagerCommand::SetHostSpeedLimit(host, limit) => {
+                        AppManagerCommand::SetHostSpeedLimit(host_str, limit) => {
                             app_settings.host_settings
-                                .entry(host.clone())
+                                .entry(host_str.clone())
                                 .or_default()
                                 .speed_limit = limit;
     
                             self.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                             // host string can either be a host or a url
-                            let host = Url::parse(&host)
+                            let host = Url::parse(&host_str)
                                 .ok()
-                                .and_then(|url| url.host().map(|host| host.to_owned()))
-                                .unwrap_or_else(|| Host::parse(&host).unwrap());
+                                .and_then(|url| url.host().map(|host| host.to_owned()));
+
+                            let host = match host {
+                                Some(host) => host,
+                                None => match Host::parse(&host_str) {
+                                    Ok(host) => host,
+                                    Err(error) => {
+                                        warn!("Invalid host string {}: {}", host_str, error);
+                                        continue;
+                                    }
+                                }
+                            };
         
                             if let Some(weak_limiter) = self.limiters.host_limits().get(&host) {
                                 if let Some(live_limiter) = weak_limiter.upgrade() {
