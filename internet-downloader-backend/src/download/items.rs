@@ -324,7 +324,11 @@ impl Download {
         match value.task_type {
             TaskType::File(file_task) => {
                 root_item = ItemId::File(current_file_id);
-                name = file_task.file_name().clone();
+                name = file_task.file_name()
+                    .map(|file_name| file_name.to_string())
+                    .unwrap_or_else(|| {
+                    filename_from_url(&file_task.url)
+                });
                 files.insert(current_file_id, FileDownload::new(&file_task, &relative_path, current_file_id, None));
             },
             TaskType::Folder(folder_task) => {
@@ -1117,7 +1121,13 @@ impl Debug for FileDownload {
 
 impl FileDownload {
     pub(super) fn new(file_task: &FileTask, relative_path: &Path, id: FileId, parent_id: Option<FolderId>) -> Self {
-        let relative_path = relative_path.join(file_task.file_name());
+        let file_name = file_task.file_name()
+            .map(|file_name| file_name.to_string())
+            .unwrap_or_else(|| {
+            filename_from_url(&file_task.url)
+        });
+        
+        let relative_path = relative_path.join(&file_name);
         
         let url = Url::parse(&file_task.url).unwrap();
         
@@ -1126,7 +1136,7 @@ impl FileDownload {
             id,
             url: Arc::new(file_task.url.clone()),
             host: Arc::new(url.host().unwrap().to_owned()),
-            file_name: file_task.file_name().to_owned(),
+            file_name: file_name,
             relative_path,
             status: FileStatus::Uninitialized,
             is_paused: false,
@@ -1268,6 +1278,10 @@ impl FileDownload {
     }
 
     pub fn set_file_name(&mut self, file_name: String) {
+        if let Some(parent_path) = self.relative_path.parent() {
+            self.relative_path = parent_path.join(&file_name);
+        }
+            
         self.file_name = file_name;
     }
 
@@ -1670,4 +1684,14 @@ impl DownloadItem for FolderDownload {
     fn is_paused(&self) -> bool {
         self.is_paused
     }
+}
+
+fn filename_from_url(url: &str) -> String {
+    url.rsplit('/')
+        .next()
+        .unwrap_or("unknown")
+        .split('?')
+        .next()
+        .unwrap_or("unknown")
+        .to_string()
 }

@@ -64,19 +64,19 @@ impl<'js> FromJs<'js> for TaskType {
 #[derive(Debug, Deserialize)]
 pub struct FileTask {
     pub url: String,
-    pub file_name: String,
+    pub file_name: Option<String>,
 }
 
 impl FileTask {
-    pub fn new(url: impl Into<String>, file_name: String) -> Self {
+    pub fn new(url: impl Into<String>, file_name: Option<String>) -> Self {
         Self { 
             url: url.into(),
             file_name,
         }
     }
 
-    pub const fn file_name(&self) -> &String {
-        &self.file_name
+    pub const fn file_name(&self) -> Option<&String> {
+        self.file_name.as_ref()
     }
 }
 
