@@ -1129,13 +1129,16 @@ impl FileDownload {
         
         let relative_path = relative_path.join(&file_name);
         
-        let url = Url::parse(&file_task.url).unwrap();
+        let host = Url::parse(&file_task.url)
+            .ok()
+            .and_then(|url| url.host().map(|host| host.to_owned()))
+            .unwrap_or_else(|| Host::Domain(format!("unknown-host ({})", file_task.url)));
         
         Self { 
             parent_id,
             id,
             url: Arc::new(file_task.url.clone()),
-            host: Arc::new(url.host().unwrap().to_owned()),
+            host: Arc::new(host),
             file_name: file_name,
             relative_path,
             status: FileStatus::Uninitialized,
@@ -1192,8 +1195,10 @@ impl FileDownload {
             chunk_hashes.resize(expected_chunks as usize, None);
         }
 
-        let url = Url::parse(&row.url).unwrap();
-        let host = url.host().unwrap().to_owned();
+        let host = Url::parse(&row.url)
+            .ok()
+            .and_then(|url| url.host().map(|host| host.to_owned()))
+            .unwrap_or_else(|| Host::Domain(format!("unknown-host ({})", row.url)));
 
         Self {
             parent_id: row.parent_folder_id.map(|id| FolderId(id as usize)),
