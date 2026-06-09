@@ -856,7 +856,7 @@ impl StateManager {
 
         let mut downloads = IndexMap::with_capacity(download_rows.len());
 
-        let mut chunk_hashes = match self.load_chunk_hashes(&file_ids).await {
+        let mut chunk_hashes = match self.load_chunk_hashes(&download_ids).await {
             Ok(chunk_hashes) => chunk_hashes,
             Err(err) => match err.kind() {
                 // We failed to load all the chunks at once due to a corruption somewhere, 
@@ -949,15 +949,15 @@ impl StateManager {
         Ok(map)
     }
 
-    async fn load_chunk_hashes(&self, file_ids: &[i64]) -> Result<HashMap<DownloadId, HashMap<FileId, Vec<Option<[u8; 16]>>>>, DbReadError> {
-        let rows = if file_ids.is_empty() {
+    async fn load_chunk_hashes(&self, download_ids: &[i64]) -> Result<HashMap<DownloadId, HashMap<FileId, Vec<Option<[u8; 16]>>>>, DbReadError> {
+        let rows = if download_ids.is_empty() {
                Vec::new()
         } else {
             let mut builder = QueryBuilder::new(
                 "SELECT * FROM chunk_hashes WHERE download_id IN ("
             );
             let mut separated = builder.separated(", ");
-            for id in file_ids {
+            for id in download_ids {
                 separated.push_bind(id);
             }
             separated.push_unseparated(") ");
