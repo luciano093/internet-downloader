@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use reqwest::Client;
 use tokio::sync::{mpsc, oneshot};
-use tracing::debug;
+use tracing::{debug, warn};
 use url::{Host, Url};
 
 use crate::{app::{limiters::LimiterRegistry, manager::AppManagerCommand, settings::AppSettings}, client_state_manager::UiManagerHandle, download::{hosts::manager::HostHandle, writer::DownloadWriterManager}, utils::network_utils::BandwidthLimiter};
@@ -52,8 +52,11 @@ impl NetworkManager {
                     let mut hosts = HashMap::new();
                     
                     for url in urls {
-                        let url = Url::parse(&url).unwrap();
-                        let host = url.host().unwrap().to_owned();
+                        let host = Url::parse(&url)
+                            .ok()
+                            .and_then(|url| url.host().map(|host| host.to_owned()))
+                            .unwrap_or_else(|| Host::Domain(format!("unknown-host ({})", url)));
+                        
                         let host_handle = self.get_or_spawn_host(host.clone());
 
                         hosts.insert(host, host_handle.clone());
