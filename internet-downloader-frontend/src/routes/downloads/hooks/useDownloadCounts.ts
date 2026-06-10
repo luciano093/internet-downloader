@@ -1,6 +1,6 @@
 import { useDownloadStore } from "@/stores/downloadStore";
 import { useMemo } from "react";
-import { STATE_TO_CATEGORY, type FilterCategory } from "../lib/filters";
+import { getFilterCategory, type FilterCategory } from "../lib/filters";
 
 type Counts = {
   all: number,
@@ -26,7 +26,7 @@ export function useDownloadCounts() {
       const download = downloads[id];
       if (!download) continue;
 
-      const category = STATE_TO_CATEGORY[download.status.state];
+      const category = getFilterCategory(download.status, download.is_paused);
       counts.status[category] = (counts.status[category]) + 1;
     }
 

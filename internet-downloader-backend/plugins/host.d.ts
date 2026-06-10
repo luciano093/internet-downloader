@@ -6,7 +6,7 @@ export interface DownloadTask {
 export type TaskType = 
     | { 
         type: "file", 
-        file_name: string,
+        file_name: string | null,
         url: string;
     }
     | { type: "folder",
@@ -36,5 +36,3 @@ export type Plugin = BasePlugin & (
     | { supports: string[]; supports_regex?: string[] }
     | { supports_regex: string[]; supports?: string[] } 
 );
-
-  

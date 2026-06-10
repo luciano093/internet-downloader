@@ -9,22 +9,34 @@ This project aims to be a modern, lightweight alternative to tools like JDownloa
 <img width="1878" height="969" alt="Image" src="https://github.com/user-attachments/assets/8e32ce25-fd26-4cf3-b769-fba756e65e3c" />
 
 ## Current Status: Early Alpha
-The core download engine and real-time state synchronization are highly functional, but the project is still in early development. Many UI elements are currently placeholders, and basic configuration options are still being wired up. 
+The core download engine is mostly stable and can handle complex downloads (it has been tested with 5k+ file downloads without any major problems), but the project is still in early development. Many UI elements are placeholders, basic configuration options are still being wired up, and the database schema may change without notice.
 
-**Roadmap:**
-* Build out the Settings page
-* Implement dynamic save directory selection
-* Hook up frontend sorting and filtering for the sidebar
-* Refine the JS plugin system for link scraping
+## Roadmap
+
+### Plugin System
+- [ ] Hot reloading for plugins during development
+- [ ] Browser automation API via WebDriver (no bundled browser)
+- [ ] Captcha relay to frontend for manual solving
+
+### Download Engine
+- [ ] Custom save directories per download
+- [ ] Custom download categories with default paths per category
+
+### Frontend
+- [ ] Settings page
+- [ ] Plugin management UI (install, enable/disable, configure, logs)
+
+### Utils
+- [ ] Extraction support (zip, rar, 7z) after download
 
 ## Features
-* Multi-part downloading
-* Throttling. Speed limits can be set globally, per host, per download, or per file (Backend-only at the moment)
-* Nice looking UI
-* Downloads can be paused and resumed, and state is safely persisted to SQLite to survive crashes or restarts.
-* Disk writes are decoupled into a dedicated thread pool to keep the core engine unblocked.
-* The Rust backend can run independently of the React frontend.
-* Uses BLAKE3 chunk hashing to detect file corruption, truncation, or bit-rot, seamlessly re-downloading only the broken or missing pieces.
+* **Multi-part downloading**: files are split in multiple pieces to download many parts of the file in parallel
+* **Multi-host downloads**: downloads can span one or multiple hosts simultaneously (In the future, this will make mirror support for single download possible)
+* **JS plugin system**: plugins can be written in JavaScript (powered by rquickjs) to resolve URLs, add custom scraping, and extend site support
+* **Throttling**: speed limits can be set globally, per host, per download, or per file (Backend-only at the moment)
+* **Crash-safe persistence**: state is safely persisted to SQLite to survive crashes or restarts
+* **Headless-capable**: the Rust backend can run independently of the React frontend. 
+* **Chunked hash verification**: BLAKE3 hashing detects corruption, truncation, or bit-rot inline during download, re-downloading only broken chunks
 
 ## Local Development Setup
 

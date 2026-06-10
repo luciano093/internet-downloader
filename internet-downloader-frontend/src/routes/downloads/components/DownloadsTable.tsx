@@ -8,11 +8,12 @@ import { useDownloadStore } from "@/stores/downloadStore";
 import type { DownloadItem, FileItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import useDownloadSpeed from "../hooks/useDownloadSpeed";
-import { formatDownloadStatus } from "@/lib/status_utils";
+import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
 
 const SpeedCellContent = ({ download }: { download: DownloadItem }) => {
     const stats = getFolderStats(download.files);
-    const speed = useDownloadSpeed(stats.downloadedSize, "downloading");
+    const isDownloading = download.status?.state === "partial";
+    const speed = useDownloadSpeed(stats.downloadedSize, isDownloading ? "downloading" : "idle");
 
     useEffect(() => {
         console.log(`SpeedCell mounted for ${download.name}`);
@@ -127,16 +128,18 @@ function createColumn({
 const columns = [
     createColumn({ id: "name", header: "Name", cell: (download) =>
     {
-        const isDownloading = download.status.state === "in_progress";
+      const isDownloading = download.status.state === "partial";
         return <span className={`font-medium truncate ${isDownloading ? "text-foreground" : ""}`}>{download.name}</span>;
     }}),
     createColumn({ 
         id: "status",
         header: "Status",
         size: 120,
-        cell: (download) => {
-            return <>{download.active_operation ? download.active_operation : formatDownloadStatus(download.status)}</>;
-        }
+      cell: (download) => {
+        if (download.is_paused) return "Paused";
+        
+        return <>{download.active_operation ? formatActiveOperation(download.active_operation) : formatDownloadStatus(download.status)}</>;
+      }
     }),
     createColumn({ 
         id: "size", 

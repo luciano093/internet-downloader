@@ -11,6 +11,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::download::items::ChangedItemOperation;
+use crate::download::items::ChangedItemPause;
+use crate::download::items::ChangedItemStatus;
 use crate::download::items::FileSize;
 use crate::download::items::ActiveOperation;
 use crate::download::items::DownloadId;
@@ -27,7 +30,19 @@ use crate::db::state_manager::StateManager;
 pub enum DownloadUpdate {
     StatusChanged { id: DownloadId, status: DownloadStatus },
     OperationChanged { id: DownloadId, operation: Option<ActiveOperation> },
+    PauseChanged { id: DownloadId, is_paused: bool },
     ItemUpdated { id: DownloadId, item_update: ItemUpdate }, 
+}
+
+impl DownloadUpdate {
+    pub fn id(&self) -> DownloadId {
+        match self {
+            DownloadUpdate::StatusChanged { id, .. } => *id,
+            DownloadUpdate::OperationChanged { id, .. } => *id,
+            DownloadUpdate::PauseChanged { id, .. } => *id,
+            DownloadUpdate::ItemUpdated { id, .. } => *id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -40,6 +55,7 @@ pub enum ItemUpdate {
 pub enum FileUpdate {
     Status { id: FileId, status: FileStatus },
     Operation { id: FileId, operation: Option<ActiveOperation> },
+    Pause { id: FileId, is_paused: bool },
     Hash { id: FileId, hash: u128 },
     FileSize { id: FileId, len: u64 },
     BytesDownloaded { id: FileId, len: u64 },
@@ -50,6 +66,7 @@ impl FileUpdate {
         match self {
             FileUpdate::Status { id, .. } => *id,
             FileUpdate::Operation { id, .. } => *id,
+            FileUpdate::Pause { id, .. } => *id,
             FileUpdate::Hash { id, .. } => *id,
             FileUpdate::FileSize { id, .. } => *id,
             FileUpdate::BytesDownloaded { id, .. } => *id,
@@ -61,6 +78,17 @@ impl FileUpdate {
 pub enum FolderUpdate {
     Status { id: FolderId, status: DownloadStatus },
     Operation { id: FolderId, operation: Option<ActiveOperation> },
+    Pause { id: FolderId, is_paused: bool },
+}
+
+impl FolderUpdate {
+    pub fn id(&self) -> FolderId {
+        match self {
+            FolderUpdate::Status { id, .. } => *id,
+            FolderUpdate::Operation { id, .. } => *id,
+            FolderUpdate::Pause { id, .. } => *id,
+        }
+    }
 }
 
 pub enum UiStateEvent {
@@ -115,7 +143,7 @@ pub struct UiManagerHandle {
 }
 
 impl UiManagerHandle {
-    pub fn new() -> Self {
+    pub fn spawn() -> Self {
         let delta_sender = broadcast::Sender::new(1000);
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
@@ -135,6 +163,87 @@ impl UiManagerHandle {
     
     pub fn add_download(&self, download: Download) {
         let _ = self.event_sender.send(UiStateEvent::AddDownload(download));
+    }
+
+    pub fn update_file(&self, download_id: DownloadId, update: FileUpdate) {
+        let _ = self.event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::File(update) }));
+    }
+    
+    pub fn update_folder(&self, download_id: DownloadId, update: FolderUpdate) {
+        let _ = self.event_sender.send(UiStateEvent::AddUpdate(DownloadUpdate::ItemUpdated { id: download_id, item_update: ItemUpdate::Folder(update) }));
+    }
+    
+    pub fn update_download(&self, update: DownloadUpdate) {
+        let _ = self.event_sender.send(UiStateEvent::AddUpdate(update));
+    }
+
+    pub fn update_statuses(&self, download_id: DownloadId, changed_items: Vec<ChangedItemStatus>) {
+        if changed_items.is_empty() {
+            return;
+        }
+
+        for item in changed_items {
+            match item {
+                ChangedItemStatus::File { id, status } => {
+                    let update = FileUpdate::Status { id, status };
+                    self.update_file(download_id, update);
+                },
+                ChangedItemStatus::Folder { id, status } => {
+                    let update = FolderUpdate::Status { id, status };
+                    self.update_folder(download_id, update);
+                }
+                ChangedItemStatus::Download(status) => {
+                    let update = DownloadUpdate::StatusChanged { id: download_id, status };
+                    self.update_download(update);
+                },
+            }
+        }
+    }
+    
+    pub fn update_operations(&self, download_id: DownloadId, changed_items: Vec<ChangedItemOperation>) {
+        if changed_items.is_empty() {
+            return;
+        }
+
+        for item in changed_items {
+            match item {
+                ChangedItemOperation::File { id, operation } => {
+                    let update = FileUpdate::Operation { id, operation };
+                    self.update_file(download_id, update);
+                },
+                ChangedItemOperation::Folder { id, operation } => {
+                    let update = FolderUpdate::Operation { id, operation };
+                    self.update_folder(download_id, update);
+                }
+                ChangedItemOperation::Download(operation) => {
+                    let update = DownloadUpdate::OperationChanged { id: download_id, operation };
+                    self.update_download(update);
+                },
+            }
+        }
+    }
+    
+    pub fn update_paused_state(&self, download_id: DownloadId, changed_items: Vec<ChangedItemPause>) {
+        if changed_items.is_empty() {
+            return;
+        }
+
+        for item in changed_items {
+            match item {
+                ChangedItemPause::File { id, is_paused } => {
+                    let update = FileUpdate::Pause { id, is_paused };
+                    self.update_file(download_id, update);
+                },
+                ChangedItemPause::Folder { id, is_paused } => {
+                    let update = FolderUpdate::Pause { id, is_paused };
+                    self.update_folder(download_id, update);
+                }
+                ChangedItemPause::Download(is_paused) => {
+                    let update = DownloadUpdate::PauseChanged { id: download_id, is_paused };
+                    self.update_download(update);
+                },
+            }
+        }
     }
     
     pub fn remove_download(&self, download_id: DownloadId) {
@@ -193,13 +302,7 @@ impl UiManager {
                             let _ = self.delta_sender.send(FrontendMessage::DownloadRemoved { id });
                         },
                         UiStateEvent::AddUpdate(download_update) => {
-                            let update_id = match &download_update {
-                                DownloadUpdate::StatusChanged { id, .. } => *id,
-                                DownloadUpdate::ItemUpdated { id, .. } => *id,
-                                DownloadUpdate::OperationChanged { id, .. } => *id,
-                            };
-
-                            if removed_ids.contains(&update_id) {
+                            if removed_ids.contains(&download_update.id()) {
                                 continue;
                             }
 
@@ -230,7 +333,7 @@ impl UiManager {
 }
 
 pub async fn get_snapshot(db_manager: &StateManager) -> IndexMap<DownloadId, Download> {
-    db_manager.load_downloads().await.unwrap()
+    db_manager.load_all_downloads().await.unwrap()
 }
 
 #[derive(Debug, Clone)]
@@ -281,32 +384,24 @@ impl DeltaManager {
                 
                 download_diff.active_operation = Some(operation);
             },
+            DownloadUpdate::PauseChanged { id, is_paused } => {
+                let download_diff = self.deltas.entry(*id).or_default();
+                
+                download_diff.is_paused = Some(is_paused);
+            },
             DownloadUpdate::ItemUpdated { id, item_update } => {
                 let download_diff = self.deltas.entry(*id).or_default();
 
                     match item_update {
                         ItemUpdate::File(file_update) => {
-                            let file_id = match &file_update {
-                                FileUpdate::Status { id, .. } => *id,
-                                FileUpdate::Operation { id, .. } => *id,
-                                FileUpdate::Hash { id, .. } => *id,
-                                FileUpdate::FileSize { id, .. } => *id,
-                                FileUpdate::BytesDownloaded { id, .. } => *id,
-                            };
-
-                            let file_diff = download_diff.files.entry(file_id).or_insert_with(|| {
+                            let file_diff = download_diff.files.entry(file_update.id()).or_insert_with(|| {
                                 FileDiff::new()
                             });
 
                             file_diff.update(file_update);
                         },
                         ItemUpdate::Folder(folder_update) => {
-                            let folder_id = match &folder_update {
-                                FolderUpdate::Status { id, .. } => *id,
-                                FolderUpdate::Operation { id, .. } => *id,
-                            };
-
-                            let folder_diff = download_diff.folders.entry(folder_id).or_insert_with(|| {
+                            let folder_diff = download_diff.folders.entry(folder_update.id()).or_insert_with(|| {
                                 FolderDiff::new()
                             });
 
@@ -330,6 +425,7 @@ pub struct DownloadDiff {
     url: Option<String>,
     relative_path: Option<PathBuf>,
     status: Option<DownloadStatus>,
+    is_paused: Option<bool>,
     active_operation: Option<Option<ActiveOperation>>,
     files: HashMap<FileId, FileDiff>,
     folders: HashMap<FolderId, FolderDiff>,
@@ -348,6 +444,7 @@ pub struct FileDiff {
     parent_id: Option<Option<FolderId>>, 
     status: Option<FileStatus>,
     active_operation: Option<Option<ActiveOperation>>,
+    is_paused: Option<bool>,
     url: Option<String>,
     file_name: Option<String>,
     relative_path: Option<PathBuf>,
@@ -378,6 +475,9 @@ impl FileDiff {
             FileUpdate::BytesDownloaded { len, .. } => {
                 self.bytes_downloaded = Some(len)
             },
+            FileUpdate::Pause { is_paused, .. } => {
+                self.is_paused = Some(is_paused)
+            },
         }
     }
 }
@@ -388,6 +488,7 @@ pub struct FolderDiff {
     parent_id: Option<Option<FolderId>>, 
     status: Option<DownloadStatus>,
     active_operation: Option<Option<ActiveOperation>>,
+    is_paused: Option<bool>,
     folder_name: Option<String>,
     relative_path: Option<PathBuf>,
     child_files: Option<Vec<FileId>>,
@@ -407,6 +508,9 @@ impl FolderDiff {
             FolderUpdate::Operation { operation, .. } => {
                 self.active_operation = Some(operation)
             },
+            FolderUpdate::Pause { is_paused, .. } => {
+                self.is_paused = Some(is_paused)
+            },
         }
     }
 }
@@ -417,6 +521,7 @@ impl From<&FolderDownload> for FolderDiff {
             parent_id: Some(folder.parent_id()),
             status: Some(folder.status()),
             active_operation: Some(folder.active_operation()),
+            is_paused: Some(folder.is_paused()),
             folder_name: Some(folder.name().to_owned()),
             relative_path: Some(folder.relative_path().clone()),
             child_files: Some(folder.child_files().to_owned()),
@@ -432,6 +537,7 @@ pub struct DownloadSnapshot {
     pub url: String,
     pub status: DownloadStatus,
     pub active_operation: Option<ActiveOperation>,
+    pub is_paused: bool,
     pub files: IndexMap<FileId, FileSnapshot>,
     pub folders: IndexMap<FolderId, FolderDownload>,
 }
@@ -446,5 +552,6 @@ pub struct FileSnapshot {
     pub bytes_downloaded: u64,
     pub status: FileStatus,
     pub active_operation: Option<ActiveOperation>,
+    pub is_paused: bool,
     pub url: Arc<String>,
 }

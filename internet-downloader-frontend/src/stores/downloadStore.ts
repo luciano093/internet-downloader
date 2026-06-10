@@ -24,20 +24,43 @@ export const useDownloadStore = create<DownloadState>()(
         selectedId: null,
 
         setSnapshot: (items) => set((state) => {
+          const newIds = new Set(items.map(i => i.id));
+          
+          // Remove stale downloads
+          Object.keys(state.downloads).forEach(id => {
+            if (!newIds.has(Number(id))) {
+              delete state.downloads[Number(id)];
+            }
+          });
+          
           state.downloadIds = items.map(i => i.id);
-          state.downloads = {};
           
           items.forEach(item => {
-              if (!item.files) {
-                item.files = {};
-              }
+            if (!item.files) item.files = {};
+            if (!item.folders) item.folders = {};
+            
+            const existing = state.downloads[item.id];
+            if (existing?.active_operation && !item.active_operation) {
+              item.active_operation = existing.active_operation;
+            }
 
-              if (!item.folders) {
-                item.folders = {};
-              }
+            // Preserve is_paused from existing state if snapshot doesn't have it
+            if (existing && item.is_paused === undefined) {
+              item.is_paused = existing.is_paused;
+            }
 
-              state.downloads[item.id] = item;
-          })
+            // Don't let snapshot regress bytes_downloaded
+            if (existing) {
+              for (const [fileId, fileSnapshot] of Object.entries(item.files)) {
+                const existingFile = existing.files?.[Number(fileId)];
+                if (existingFile && existingFile.bytes_downloaded > (fileSnapshot.bytes_downloaded || 0)) {
+                  fileSnapshot.bytes_downloaded = existingFile.bytes_downloaded;
+                }
+              }
+            }
+            
+            state.downloads[item.id] = item;
+          });
         }),
 
         applyDelta: (delta) => set((state) => {
@@ -64,6 +87,7 @@ export const useDownloadStore = create<DownloadState>()(
                     if (change.url) download.url = change.url;
                     if (change.status) download.status = change.status;
                     if (change.active_operation !== undefined) download.active_operation = change.active_operation;
+                    if (change.is_paused !== undefined) download.is_paused = change.is_paused;
                     if (change.host) download.host = change.host;
 
                   if (change.files) {

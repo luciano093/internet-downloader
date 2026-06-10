@@ -12,6 +12,7 @@ pub struct DownloadRow {
     pub relative_path_raw: Vec<u8>,
     pub relative_path: String,
     pub status: String,
+    pub is_paused: bool,
     pub failure_reason: Option<String>,
 }
 
@@ -30,6 +31,7 @@ pub struct DownloadFolderRow {
     pub relative_path_raw: Vec<u8>,
     pub relative_path: String,
     pub status: String,
+    pub is_paused: bool,
     pub failure_reason: Option<String>,
 }
 
@@ -48,6 +50,7 @@ pub struct DownloadFileRow {
     pub relative_path_raw: Vec<u8>,
     pub relative_path: String,
     pub status: String,
+    pub is_paused: bool,
     pub failure_reason: Option<String>,
     
     // File specific
@@ -58,7 +61,6 @@ pub struct DownloadFileRow {
     pub size_type: Option<String>,
     pub size_bytes: Option<i64>,
     pub retries: i64,
-    pub wait_time: Option<i64>,
 }
 
 impl DownloadFileRow {

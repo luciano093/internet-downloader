@@ -1,4 +1,4 @@
-use std::{fs::File, path::PathBuf};
+use std::{fs::File, path::{Path, PathBuf}};
 use fs4::fs_std::FileExt;
 
 use tracing::warn;
@@ -6,6 +6,7 @@ use tracing::warn;
 #[derive(Debug)]
 pub struct SharedFileMap {
     file: File,
+    path: PathBuf,
     size: u64,
 }
 
@@ -43,7 +44,7 @@ impl SharedFileMap {
             warn!("Could not physically pre-allocate space. OS will fallback to sparse. Error: {}", error);
         }
         
-        Ok(Self { file, size })
+        Ok(Self { file, path, size })
     }
 
     pub fn write_chunk(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
@@ -94,5 +95,9 @@ impl SharedFileMap {
             use std::os::unix::fs::FileExt;
             self.file.write_all_at(data, offset)
         }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }

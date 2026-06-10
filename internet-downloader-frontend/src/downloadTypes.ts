@@ -1,7 +1,11 @@
 export type FileFailureReason = 
-  | { state: "network_error" }
+  | { state: "hash_mismatch" }
   | { state: "disk_error" }
-  | { state: "hash_mismatch" }; 
+  | { state: "client_error" }
+  | { state: "server_error" }
+  | { state: "metadata_fetch_error" }
+  | { state: "bad_path" }
+  | { state: "unknown" };
 
 export type DownloadFailureReason =
   | { state: "hash_mismatch" }
@@ -10,34 +14,34 @@ export type DownloadFailureReason =
   | { state: "server_error" }
   | { state: "metadata_fetch_error" }
   | { state: "multiple_errors" }
-  | { state: "all_files_failed"; value: FileFailureReason };
+  | { state: "all_files_failed"; value: FileFailureReason }
+  | { state: "files_missing_from_disk" }
+  | { state: "state_desynchronized" }
+  | { state: "bad_path" }
+  | { state: "unknown" };
 
 export type FileStatus =
-  | { state: "queued" }
-  | { state: "initializing" }
-  | { state: "fetching_metadata" }
-  | { state: "in_progress" }
+  | { state: "uninitialized" }
+  | { state: "metadata_fetched" }
+  | { state: "partial" }
   | { state: "completed" }
-  | { state: "paused" }
   | { state: "not_found" }
-  | { state: "retrying" }
-  | { state: "waiting"; value: number | null }
   | { state: "failed"; value: FileFailureReason };
 
 export type DownloadStatus =
-  | { state: "queued" }
-  | { state: "initializing" }
-  | { state: "fetching_metadata" }
-  | { state: "in_progress" }
+  | { state: "uninitialized" }
+  | { state: "metadata_fetched" }
+  | { state: "partial" }
   | { state: "completed" }
   | { state: "completed_with_errors" }
-  | { state: "paused" }
   | { state: "not_found" }
-  | { state: "retrying" }
-  | { state: "waiting"; value: number | null }
   | { state: "failed"; value: DownloadFailureReason };
 
-export type ActiveOperation = "verifying";
+export type ActiveOperation = 
+  | { state: "verifying" }
+  | { state: "queued" }
+  | { state: "downloading" }
+  | { state: "waiting"; value: number | null };
 
 export type FileItem = {
   id: number;
@@ -46,6 +50,7 @@ export type FileItem = {
   relative_path: string;
   status: FileStatus;
   active_operation: ActiveOperation | null,
+  is_paused: boolean,
   url: string;
   hash: string | null;
   size: "unknown" | number;
@@ -61,6 +66,7 @@ export type FolderItem = {
   child_folders: number[];
   status: DownloadStatus;
   active_operation: ActiveOperation | null,
+  is_paused: boolean,
 };
 
 export type DownloadNode = FileItem | FolderItem;
@@ -72,6 +78,7 @@ export interface DownloadItem {
   host: string;
   status: DownloadStatus;
   active_operation: ActiveOperation | null,
+  is_paused: boolean,
   
   files: Record<number, FileItem>;
   folders: Record<number, FolderItem>;
@@ -83,6 +90,7 @@ export type FileItemDiff = {
   relative_path?: string;
   status?: FileStatus;
   active_operation?: ActiveOperation | null,
+  is_paused?: boolean,
   url?: string;
   hash?: string | null;
   size?: "unknown" | number;
@@ -94,6 +102,7 @@ export type FolderItemDiff = {
   folder_name?: string;
   status?: DownloadStatus;
   active_operation?: ActiveOperation | null,
+  is_paused?: boolean,
   child_files?: number[];
   child_folders?: number[];
 };
@@ -105,6 +114,7 @@ export interface DownloadItemDiff {
   url?: string,
   status?: DownloadStatus,
   active_operation?: ActiveOperation | null,
+  is_paused?: boolean,
   host?: string,
   relative_path?: string,
   files: Record<number, FileItemDiff>;
