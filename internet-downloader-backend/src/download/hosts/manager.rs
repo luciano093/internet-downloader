@@ -576,12 +576,12 @@ impl HostScheduler {
                 }
             }
     
-            // 1.0 means all permits free (idle)
-            // 0.0 means no permits free (saturated)
-            let free_ratio = 1.0 - (permits_available as f64 / permits_total.max(1) as f64);
+            // 1.0 means no permits are free (saturated)
+            // 0.0 means all permits are free (idle)
+            let busy_ratio = 1.0 - (permits_available as f64 / permits_total.max(1) as f64);
     
-            // If more than half our permits are free, prefer metadata
-            if free_ratio > 0.5 {
+            // If more than half of our permits are taken, prefer metadata
+            if busy_ratio > 0.5 {
                 if let Some(job) = self.take_metadata() {
                     return NextJob::Metadata(job);
                 }
