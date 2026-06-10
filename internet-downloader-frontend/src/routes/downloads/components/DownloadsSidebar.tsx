@@ -9,6 +9,8 @@ export default function DownloadsSidebar() {
   const counts = useDownloadCounts();
   const statusFilter = useDownloadStore(store => store.statusFilter);
   const setStatusFilter = useDownloadStore(store => store.setStatusFilter);
+  const hostFilter = useDownloadStore(store => store.hostFilter);
+  const setHostFilter = useDownloadStore(store => store.setHostFilter);
   
   return (
     <div className="flex flex-col gap-0">
@@ -33,8 +35,17 @@ export default function DownloadsSidebar() {
 
       {/* HOSTS Section */}
       <SidebarGroup title="Hosts">
-        <SidebarItem icon={HardDrive} label="releases.ubuntu.com" badge={1} />
-        <SidebarItem icon={HardDrive} label="github.com" badge={1} />
+        {/* entry2[1] - entry1[1] sorts cost entries by count, descending. An entry has this shape: [host, count] */}
+        {Object.entries(counts.hosts).sort((entry1, entry2) => entry2[1] - entry1[1]).map(([host, count]) => (
+          <SidebarItem
+            key={host}
+            icon={HardDrive}
+            label={host}
+            badge={count}
+            isActive={hostFilter === host}
+            onClick={() => setHostFilter(hostFilter === host ? null : host)}
+          />
+        ))}
       </SidebarGroup>
     </div>
   )

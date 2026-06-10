@@ -20,6 +20,7 @@ function Index() {
   const downloads = useDownloadStore((store) => store.downloads);
   const selectedId = useDownloadStore((store) => store.selectedId);
   const statusFilter = useDownloadStore((store) => store.statusFilter);
+  const hostFilter = useDownloadStore((store) => store.hostFilter);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -69,14 +70,18 @@ function Index() {
       return false;
     }
 
-    const downloadCategory = getFilterCategory(download.status, download.is_paused);
+    const downloadStatusCategory = getFilterCategory(download.status, download.is_paused);
 
     // We either get all downloads that match our current status filter
     // or otherwise, if the statusFilter is not set, we set this to true
-    const matchesStatus = statusFilter === downloadCategory || statusFilter == null;
+    const matchesStatus = statusFilter === downloadStatusCategory || statusFilter == null;
 
-    return matchesStatus;
-  }), [downloadIds, downloads, statusFilter]);
+    const matchesHost = hostFilter == null || Object.values(download.files).some(
+      file => file.host === hostFilter
+    );
+
+    return matchesStatus && matchesHost;
+  }), [downloadIds, downloads, statusFilter, hostFilter]);
 
     return <>
       <AppLayout

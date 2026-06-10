@@ -52,6 +52,7 @@ export type FileItem = {
   active_operation: ActiveOperation | null,
   is_paused: boolean,
   url: string;
+  host: string;
   hash: string | null;
   size: "unknown" | number;
   bytes_downloaded: number;
@@ -75,7 +76,6 @@ export interface DownloadItem {
   id: number,
   name: string,
   url: string;
-  host: string;
   status: DownloadStatus;
   active_operation: ActiveOperation | null,
   is_paused: boolean,
@@ -92,6 +92,7 @@ export type FileItemDiff = {
   active_operation?: ActiveOperation | null,
   is_paused?: boolean,
   url?: string;
+  host?: string;
   hash?: string | null;
   size?: "unknown" | number;
   bytes_downloaded?: number;
@@ -115,7 +116,6 @@ export interface DownloadItemDiff {
   status?: DownloadStatus,
   active_operation?: ActiveOperation | null,
   is_paused?: boolean,
-  host?: string,
   relative_path?: string,
   files: Record<number, FileItemDiff>;
   folders: Record<number, FolderItemDiff>;

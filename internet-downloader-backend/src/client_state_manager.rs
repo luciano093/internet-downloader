@@ -100,7 +100,7 @@ pub enum UiStateEvent {
 #[derive(Debug, Clone)]
 pub enum FrontendMessage {
     // Sent immediately
-    DownloadAdded(Download),
+    DownloadAdded(DownloadSnapshot),
     DownloadRemoved { id: DownloadId },
 
     // Sent on flush interval
@@ -114,7 +114,7 @@ impl Serialize for FrontendMessage {
         match self {
             FrontendMessage::DownloadAdded(download) => {
                 serde_json::json!({
-                    "id": download.id(),
+                    "id": download.id,
                     "action": "added",
                     "download": download,
                 }).serialize(serializer)
@@ -293,7 +293,7 @@ impl UiManager {
                     match event {
                         UiStateEvent::AddDownload(download) => {
                             removed_ids.remove(&download.id());
-                            let _ = self.delta_sender.send(FrontendMessage::DownloadAdded(download));
+                            let _ = self.delta_sender.send(FrontendMessage::DownloadAdded(download.into()));
                         },
                         UiStateEvent::RemoveDownload(id) => {
                             removed_ids.insert(id);
@@ -530,7 +530,7 @@ impl From<&FolderDownload> for FolderDiff {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 pub struct DownloadSnapshot {
     pub id: DownloadId,
     pub name: String,
@@ -542,7 +542,7 @@ pub struct DownloadSnapshot {
     pub folders: IndexMap<FolderId, FolderDownload>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 pub struct FileSnapshot {
     pub id: FileId,
     pub parent_id: Option<FolderId>,
@@ -554,4 +554,5 @@ pub struct FileSnapshot {
     pub active_operation: Option<ActiveOperation>,
     pub is_paused: bool,
     pub url: Arc<String>,
+    pub host: String,
 }

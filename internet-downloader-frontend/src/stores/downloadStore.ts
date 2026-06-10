@@ -15,6 +15,8 @@ export type DownloadState = {
   // Filters
   statusFilter: FilterCategory | null;
   setStatusFilter: (status: FilterCategory | null) => void;
+  hostFilter: string | null;
+  setHostFilter: (host: string | null) => void;
 };
 
 export const useDownloadStore = create<DownloadState>()(
@@ -88,7 +90,6 @@ export const useDownloadStore = create<DownloadState>()(
                     if (change.status) download.status = change.status;
                     if (change.active_operation !== undefined) download.active_operation = change.active_operation;
                     if (change.is_paused !== undefined) download.is_paused = change.is_paused;
-                    if (change.host) download.host = change.host;
 
                   if (change.files) {
                     if (!download.files) {
@@ -145,9 +146,14 @@ export const useDownloadStore = create<DownloadState>()(
 
         // Filters
         statusFilter: null,
+        hostFilter: null,
         
         setStatusFilter: (status) => set((state) => {
           state.statusFilter = status;
+        }),
+        
+        setHostFilter: (host) => set((state) => {
+          state.hostFilter = host;
         }),
     }))
 );
