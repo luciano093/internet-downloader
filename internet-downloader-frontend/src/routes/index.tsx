@@ -92,7 +92,7 @@ function Index() {
           <ResizablePanel>
             <DownloadsTable downloadIds={filteredIds} />
           </ResizablePanel>
-          { selectedId &&
+          { selectedId != null &&
             <>
               <ResizableHandle className="bg-border" />
 

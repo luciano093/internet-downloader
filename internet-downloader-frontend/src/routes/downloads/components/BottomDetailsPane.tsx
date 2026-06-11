@@ -17,12 +17,10 @@ function DetailsPaneTab({ value, children }: { value: string, children: ReactNod
 }
 
 export default function BottomDetailsPane() {
-    const selectedId = useDownloadStore((state) => state.selectedId);
-
-    if (!selectedId) return null;
-
-    const download = useDownloadStore((state) => state.downloads[selectedId]);
-
+    const download = useDownloadStore((state) => 
+      state.selectedId != null ? state.downloads[state.selectedId] : undefined
+    );
+  
     if (!download) return null;
 
     return (
