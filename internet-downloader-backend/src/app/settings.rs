@@ -5,23 +5,23 @@ use serde::{Deserialize, Serialize};
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
 use crate::download::items::{DownloadId, FileId};
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct FileSettings {
     pub speed_limit: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct DownloadSettings {
     pub speed_limit: Option<u64>,
     pub file_settings: HashMap<FileId, FileSettings>, 
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct HostSettings {
     pub speed_limit: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct AppSettings {
     pub global_speed_limit: Option<u64>,
     pub download_settings: HashMap<DownloadId, DownloadSettings>,
