@@ -3,6 +3,7 @@ import { SidebarItem } from "./SidebarItem";
 import { ArrowDownToLine, Settings } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useLocation, useRouter } from "@tanstack/react-router";
+import { useUiStore } from "@/stores/uiStore";
 
 interface AppLayoutProps {
   topBar?: React.ReactNode;
@@ -17,6 +18,14 @@ export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: 
   const router = useRouter();
   const location = useLocation();
 
+  // sizes
+  const sidebarWidth = useUiStore(store => store.sidebarWidth);
+  const setSidebarWidth = useUiStore(store => store.setSidebarWidth);
+  const sidebarTopSize = useUiStore(store => store.sidebarTopPercentage);
+  const setSidebarTopSize = useUiStore(store => store.setSidebarTopPercentage);
+  const bottomPaneSize = useUiStore(store => store.bottomPaneSize);
+  const setBottomPaneSize = useUiStore(store => store.setBottomPaneSize);
+
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
             if (!isResizing.current) return;
@@ -28,13 +37,18 @@ export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: 
                 }
             });
         };
-
+      
         const handleMouseUp = () => {
-        if (isResizing.current) {
-            isResizing.current = false;
-            document.body.style.cursor = "default";
-            document.body.style.userSelect = "auto";
-        }
+          if (!isResizing.current) return;
+          
+          isResizing.current = false;
+          document.body.style.cursor = "default";
+          document.body.style.userSelect = "auto";
+          const width = sidebarRef.current?.style.width;
+          
+          if (width) {
+            setSidebarWidth(parseInt(width));
+          }
         };
 
         window.addEventListener("mousemove", handleMouseMove);
@@ -66,13 +80,23 @@ export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: 
             <div className="flex flex-1 overflow-hidden">
                 <div 
                     ref={sidebarRef}
-                    style={{ width: `200px`, flexShrink: 0 }} 
+                    style={{ width: `${sidebarWidth}px`, flexShrink: 0 }} 
                     className="bg-sidebar flex flex-col h-full"
                 >
-                    <ResizablePanelGroup orientation="vertical">
+                  <ResizablePanelGroup
+                    orientation="vertical"
+                    id="sidebar-vertical"
+                    defaultLayout={{
+                      "sidebar-top": sidebarTopSize,
+                      "sidebar-nav": 100 - sidebarTopSize,
+                    }}
+                    onLayoutChanged={(layout) => {
+                      setSidebarTopSize(layout["sidebar-top"]);
+                    }}
+                  >
                     
                     {/* Dynamic Sidebar (Top of sidebar) */}
-                    <ResizablePanel defaultSize={80} minSize={10}>
+                    <ResizablePanel id="sidebar-top" minSize={10}>
                         <div className="flex-1 overflow-y-auto overflow-x-hidden h-full p-2">
                         {sidebarTop || <div className="text-muted-foreground p-2">Top Content</div>}
                         </div>
@@ -82,7 +106,7 @@ export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: 
                     <ResizableHandle />
                     
                     {/* Global Views Navigation (Bottom of sidebar) */}
-                    <ResizablePanel defaultSize={20} minSize={10}>
+                    <ResizablePanel id="sidebar-nav" minSize={10}>
                         <div className="h-full flex flex-col pt-2">
                         <div className="text-xs font-semibold text-muted-foreground mb-2 px-4">VIEWS</div>
                         <SidebarItem 
@@ -112,17 +136,29 @@ export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: 
 
                 {/* Main content */}
                 <div className="bg-background flex flex-col flex-1 min-w-0">
-                  <ResizablePanelGroup orientation='vertical'>
-                    <ResizablePanel>
-                      {children}
-                    </ResizablePanel>
-                    {bottomPane ?
-                    <>
-                      <ResizableHandle className="bg-border" />
-                        <ResizablePanel>
+                  <ResizablePanelGroup
+                    orientation="vertical"
+                    id="main-bottom"
+                    defaultLayout={{
+                      "main-content": 100 - bottomPaneSize,
+                      "bottom-pane": bottomPaneSize,
+                    }}
+                    onLayoutChanged={(layout) => {
+                      if (bottomPane && layout["bottom-pane"] !== undefined) {
+                        setBottomPaneSize(layout["bottom-pane"]);
+                      }
+                    }}
+                  >
+                    <ResizablePanel id="main-content" minSize={20}>
+                        {children}
+                      </ResizablePanel>
+                    {
+                      bottomPane && <>
+                        <ResizableHandle className="bg-border" />
+                        <ResizablePanel id="bottom-pane" minSize={10}>
                           {bottomPane}
                         </ResizablePanel>
-                      </> : <></>
+                      </>
                     }
                   </ResizablePanelGroup>
                 </div>
