@@ -2,6 +2,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { SidebarItem } from "./SidebarItem";
 import { ArrowDownToLine, Settings } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { useLocation, useRouter } from "@tanstack/react-router";
 
 interface AppLayoutProps {
   topBar?: React.ReactNode;
@@ -10,8 +11,10 @@ interface AppLayoutProps {
 }
 
 export default function AppLayout({ topBar, sidebarTop, children }: AppLayoutProps) {
-    const sidebarRef = useRef<HTMLDivElement>(null);
-    const isResizing = useRef(false);
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const isResizing = useRef(false);
+  const router = useRouter();
+  const location = useLocation();
 
     useEffect(() => {
         const handleMouseMove = (e: MouseEvent) => {
@@ -81,8 +84,18 @@ export default function AppLayout({ topBar, sidebarTop, children }: AppLayoutPro
                     <ResizablePanel defaultSize={20} minSize={10}>
                         <div className="h-full flex flex-col pt-2">
                         <div className="text-xs font-semibold text-muted-foreground mb-2 px-4">VIEWS</div>
-                        <SidebarItem icon={ArrowDownToLine} label="Downloads" isActive={true} />
-                        <SidebarItem icon={Settings} label="Settings" />
+                        <SidebarItem 
+                          icon={ArrowDownToLine} 
+                          label="Downloads" 
+                          isActive={location.pathname === '/'} 
+                          onClick={() => router.navigate({ to: '/' })}
+                        />
+                        <SidebarItem 
+                          icon={Settings} 
+                          label="Settings" 
+                          isActive={location.pathname === '/settings'} 
+                          onClick={() => router.navigate({ to: '/settings' })}
+                        />
                         </div>
                     </ResizablePanel>
 

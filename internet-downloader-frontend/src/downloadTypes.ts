@@ -132,3 +132,9 @@ export type DeltaEvent = {
   action: "changes"
   changes: Record<number, DownloadItemDiff>
 }
+
+export type AppSettings = {
+  global_speed_limit: number | null;
+  download_settings: Record<number, { speed_limit: number | null }>;
+  host_settings: Record<string, { speed_limit: number | null }>;
+};
