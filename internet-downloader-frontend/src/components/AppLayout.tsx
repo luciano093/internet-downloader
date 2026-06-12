@@ -7,10 +7,11 @@ import { useLocation, useRouter } from "@tanstack/react-router";
 interface AppLayoutProps {
   topBar?: React.ReactNode;
   sidebarTop?: React.ReactNode;
+  bottomPane?: React.ReactNode;
   children: React.ReactNode;
 }
 
-export default function AppLayout({ topBar, sidebarTop, children }: AppLayoutProps) {
+export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: AppLayoutProps) {
   const sidebarRef = useRef<HTMLDivElement>(null);
   const isResizing = useRef(false);
   const router = useRouter();
@@ -111,7 +112,19 @@ export default function AppLayout({ topBar, sidebarTop, children }: AppLayoutPro
 
                 {/* Main content */}
                 <div className="bg-background flex flex-col">
-                    {children}
+                  <ResizablePanelGroup orientation='vertical'>
+                    <ResizablePanel>
+                      {children}
+                    </ResizablePanel>
+                    {bottomPane ?
+                    <>
+                      <ResizableHandle className="bg-border" />
+                        <ResizablePanel>
+                          {bottomPane}
+                        </ResizablePanel>
+                      </> : <></>
+                    }
+                  </ResizablePanelGroup>
                 </div>
             </div>
         </div>

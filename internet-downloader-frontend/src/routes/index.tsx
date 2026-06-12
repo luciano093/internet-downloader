@@ -5,7 +5,6 @@ import { useDownloadStore } from '@/stores/downloadStore'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import BottomDetailsPane from './downloads/components/BottomDetailsPane'
 import { getFilterCategory } from './downloads/lib/filters'
 
@@ -84,24 +83,12 @@ function Index() {
   }), [downloadIds, downloads, statusFilter, hostFilter]);
 
     return <>
-      <AppLayout
+      <AppLayout 
         topBar={<DownloadsTopBar />} 
         sidebarTop={<DownloadsSidebar />}
+        bottomPane={selectedId != null ? <BottomDetailsPane /> : undefined}
       >
-        <ResizablePanelGroup orientation='vertical'>
-          <ResizablePanel>
-            <DownloadsTable downloadIds={filteredIds} />
-          </ResizablePanel>
-          { selectedId != null &&
-            <>
-              <ResizableHandle className="bg-border" />
-
-              <ResizablePanel>
-                <BottomDetailsPane />
-              </ResizablePanel>
-            </>
-          }
-       </ResizablePanelGroup>
+        <DownloadsTable downloadIds={filteredIds} />
       </AppLayout>
     </>
 }
