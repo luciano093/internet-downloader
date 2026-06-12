@@ -67,7 +67,7 @@ export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: 
                 <div 
                     ref={sidebarRef}
                     style={{ width: `200px`, flexShrink: 0 }} 
-                    className="bg-sidebar flex flex-col h-full border-r border-border"
+                    className="bg-sidebar flex flex-col h-full"
                 >
                     <ResizablePanelGroup orientation="vertical">
                     
@@ -105,13 +105,13 @@ export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: 
 
                 <div
                     onMouseDown={handleMouseDown}
-                    className="relative w-2 -ml-1 cursor-col-resize group z-10 flex items-center justify-center">
+                    className="relative w-2 -ml-1 -mr-1 cursor-col-resize group z-10 flex items-center justify-center">
                     <div className="absolute inset-y-0 w-4" />
                     <div className="w-[1px] h-full bg-accent" />
                 </div>
 
                 {/* Main content */}
-                <div className="bg-background flex flex-col">
+                <div className="bg-background flex flex-col flex-1 min-w-0">
                   <ResizablePanelGroup orientation='vertical'>
                     <ResizablePanel>
                       {children}
