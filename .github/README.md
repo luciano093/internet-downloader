@@ -2,6 +2,8 @@
 
 # Internet Downloader
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/luciano093/internet-downloader?utm_source=badge)
+
 A fast, cross-platform download manager built with a Rust backend and a React frontend. 
 
 This project aims to be a modern, lightweight alternative to tools like JDownloader2 or IDM. The backend and frontend are decoupled, meaning the download engine can be run entirely headless on a server or NAS and controlled via the web UI.
