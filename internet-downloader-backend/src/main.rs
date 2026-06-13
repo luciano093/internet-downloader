@@ -267,8 +267,5 @@ async fn limit_file(State(manager): State<AppManagerHandle>, Path(path): Path<Fi
 async fn settings(State(manager): State<AppManagerHandle>) -> impl IntoResponse {
     debug!( "Received settings GET request");
 
-    match serde_json::to_string(&manager.get_settings().await) {
-        Ok(json) => (StatusCode::OK, Json(json)).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
+    Json(manager.get_settings().await)
 }
