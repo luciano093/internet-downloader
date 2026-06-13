@@ -24,6 +24,6 @@ export const useUiStore = create<UiState>((set) => ({
   setSidebarWidth: (width) => set({ sidebarWidth: width }),
   sidebarTopPercentage: 80,
   setSidebarTopPercentage: (percent) => set({ sidebarTopPercentage: percent }),
-  bottomPaneSize: 20,
+  bottomPaneSize: 40,
   setBottomPaneSize: (height) => set({ bottomPaneSize: height }),
 }));
