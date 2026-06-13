@@ -48,13 +48,13 @@ pub enum AppManagerCommand {
     SetHostSpeedLimit(String, Option<u64>), // String can be a hostname or url
     SetDownloadSpeedLimit(DownloadId, Option<u64>),
     SetFileSpeedLimit(DownloadId, FileId, Option<u64>),
+    GetSettings(oneshot::Sender<AppSettings>),
 }
 
 pub struct AppManager {
     db_manager: StateManager,
     ui_handle: UiManagerHandle,
     snapshot_manager: AppSnapshotHandler,
-    app_settings: AppSettings,
     sender: mpsc::Sender<AppManagerCommand>,
     receiver: mpsc::Receiver<AppManagerCommand>,
     supervisors: HashMap<DownloadId, DownloadHandle>,
@@ -68,13 +68,11 @@ impl AppManager {
         receiver: mpsc::Receiver<AppManagerCommand>,
         ui_handle: UiManagerHandle,
         snapshot_manager: AppSnapshotHandler,
-        app_settings: AppSettings,
     ) -> Self {
         AppManager {
             db_manager,
             ui_handle,
             snapshot_manager,
-            app_settings,
             sender,
             receiver,
             supervisors: HashMap::new(),
@@ -94,7 +92,13 @@ impl AppManager {
         let network_config = NetworkConfig::default();
         let client = build_global_client(&network_config);
 
-        match self.app_settings.global_speed_limit() {
+        let mut app_settings = self.db_manager
+            .load_app_settings()
+            .await
+            .unwrap()
+            .unwrap_or_else(|| AppSettings::new());
+
+        match app_settings.global_speed_limit() {
             Some(limit) => {
                 self.limiters.global_limit().set_unlimited(false);
                 self.limiters.global_limit().set_limit(limit);
@@ -105,7 +109,7 @@ impl AppManager {
         let writer = DownloadWriterManager::spawn();
         let network_handle = NetworkHandle::spawn(
             client.clone(), 
-            self.app_settings.clone(), 
+            app_settings.clone(), 
             writer.clone(), 
             self.ui_handle.clone(), 
             self.sender.clone(), 
@@ -170,7 +174,7 @@ impl AppManager {
                         AppManagerCommand::DownloadReady(download) => {
                             let download_id = download.id();
     
-                            let download_settings = self.app_settings.get_download_settings(download_id);
+                            let download_settings = app_settings.get_download_settings(download_id);
                             let download_limiter = Arc::new(DownloadLimiterGroup::from_settings(download_settings.as_ref()));
             
                             for (&file_id, _file) in download.files() {
@@ -256,9 +260,9 @@ impl AppManager {
                             break;
                         },
                         AppManagerCommand::SetGlobalSpeedLimit(limit) => {
-                            self.app_settings.set_global_speed_limit(limit);
+                            app_settings.set_global_speed_limit(limit);
     
-                            self.db_manager.write_app_settings(&self.app_settings).await.unwrap();
+                            self.db_manager.write_app_settings(&app_settings).await.unwrap();
     
                             if let Some(limit) = limit {
                                 self.limiters.global_limit().set_unlimited(false);
@@ -268,12 +272,12 @@ impl AppManager {
                             }
                         },
                         AppManagerCommand::SetHostSpeedLimit(host_str, limit) => {
-                            self.app_settings.host_settings
+                            app_settings.host_settings
                                 .entry(host_str.clone())
                                 .or_default()
                                 .speed_limit = limit;
     
-                            self.db_manager.write_app_settings(&self.app_settings).await.unwrap();
+                            self.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                             // host string can either be a host or a url
                             let host = Url::parse(&host_str)
@@ -303,11 +307,11 @@ impl AppManager {
                             }
                         },
                         AppManagerCommand::SetDownloadSpeedLimit(download_id, limit) => {
-                            if let Some(download_settings) = self.app_settings.download_settings.get_mut(&download_id) {
+                            if let Some(download_settings) = app_settings.download_settings.get_mut(&download_id) {
                                 download_settings.speed_limit = limit;
                             }
     
-                            self.db_manager.write_app_settings(&self.app_settings).await.unwrap();
+                            self.db_manager.write_app_settings(&app_settings).await.unwrap();
     
                             if let Some(weak_group) = self.limiters.downloads().get(&download_id) {
                                 if let Some(live_group) = weak_group.upgrade() {
@@ -324,11 +328,11 @@ impl AppManager {
                         },
                         AppManagerCommand::SetFileSpeedLimit(download_id, file_id, limit) => {
                             if self.db_manager.file_exists(download_id, file_id).await {
-                                    let download_settings = self.app_settings.download_settings.entry(download_id).or_default();
+                                    let download_settings = app_settings.download_settings.entry(download_id).or_default();
                                     let file_settings = download_settings.file_settings.entry(file_id).or_default();
                                     file_settings.speed_limit = limit;
     
-                                    app_context.db_manager.write_app_settings(&self.app_settings).await.unwrap();
+                                    app_context.db_manager.write_app_settings(&app_settings).await.unwrap();
                                     
                                     if let Some(weak_group) = self.limiters.downloads().get(&download_id) {
                                         if let Some(live_group) = weak_group.upgrade() {
@@ -346,6 +350,9 @@ impl AppManager {
                                 warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
                             }
                         },
+                        AppManagerCommand::GetSettings(sender) => {
+                            let _ = sender.send(app_settings.clone());
+                        },
                     }
                 
                 }
@@ -359,16 +366,15 @@ pub struct AppManagerHandle {
     sender: mpsc::Sender<AppManagerCommand>,
     ui_handle: UiManagerHandle,
     snapshot_manager: AppSnapshotHandler,
-    app_settings: AppSettings,
 }
 
 impl AppManagerHandle {
-    pub fn spawn(state_manager: StateManager, snapshot_manager: AppSnapshotHandler, app_settings: AppSettings) -> Self {
+    pub fn spawn(state_manager: StateManager, snapshot_manager: AppSnapshotHandler) -> Self {
         let (sender, receiver) = mpsc::channel(1000);
 
         let ui_handle = UiManagerHandle::spawn();
         
-        let app_manager = AppManager::new(state_manager.clone(), sender.clone(), receiver, ui_handle.clone(), snapshot_manager.clone(), app_settings.clone());
+        let app_manager = AppManager::new(state_manager.clone(), sender.clone(), receiver, ui_handle.clone(), snapshot_manager.clone());
 
         tokio::spawn(async move {
             app_manager.run().await;
@@ -378,7 +384,6 @@ impl AppManagerHandle {
             sender,
             ui_handle,
             snapshot_manager,
-            app_settings,
         }
     }
 
@@ -422,8 +427,12 @@ impl AppManagerHandle {
         self.sender.send(AppManagerCommand::SetFileSpeedLimit(download_id, file_id, limit)).await
     }
 
-    pub fn get_settings(&self) -> &AppSettings {
-        &self.app_settings
+    pub async fn get_settings(&self) -> AppSettings {
+        let (sender, receiver) = oneshot::channel();
+        
+        let _ = self.sender.send(AppManagerCommand::GetSettings(sender)).await;
+
+        receiver.await.unwrap()
     }
 }
 

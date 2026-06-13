@@ -9,7 +9,6 @@ use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, put};
 use internet_downloader_backend::app::manager::AppManagerHandle;
-use internet_downloader_backend::app::settings::AppSettings;
 use internet_downloader_backend::app::snapshot::AppSnapshotHandler;
 use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
@@ -61,14 +60,8 @@ async fn main() {
     let state_manager = StateManager::new("mydb.sqlite3").await.unwrap();
     state_manager.create_tables().await.unwrap();
 
-    let app_settings = state_manager
-        .load_app_settings()
-        .await
-        .unwrap()
-        .unwrap_or_else(|| AppSettings::new());
-
     let snapshot_manager = AppSnapshotHandler::spawn(state_manager.clone());
-    let app_manager = AppManagerHandle::spawn(state_manager, snapshot_manager, app_settings);
+    let app_manager = AppManagerHandle::spawn(state_manager, snapshot_manager);
 
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS, Method::PUT])
@@ -274,7 +267,7 @@ async fn limit_file(State(manager): State<AppManagerHandle>, Path(path): Path<Fi
 async fn settings(State(manager): State<AppManagerHandle>) -> impl IntoResponse {
     debug!( "Received settings GET request");
 
-    match serde_json::to_string(manager.get_settings()) {
+    match serde_json::to_string(&manager.get_settings().await) {
         Ok(json) => (StatusCode::OK, Json(json)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
