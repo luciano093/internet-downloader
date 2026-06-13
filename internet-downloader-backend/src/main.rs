@@ -71,7 +71,7 @@ async fn main() {
     let app_manager = AppManagerHandle::spawn(state_manager, snapshot_manager, app_settings);
 
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS, Method::PUT])
         .allow_origin(cors::Any)
         .allow_headers(Any);
 
