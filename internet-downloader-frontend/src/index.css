@@ -81,7 +81,7 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
-    --brand: oklch(0.68 0.22 250);
+    --brand: oklch(55.1% 0.027 264.364);
     --brand-foreground: oklch(0.98 0 0);
     --brand-muted: oklch(0.68 0.22 250 / 15%);
     --brand-border: oklch(0.68 0.22 250 / 35%);

@@ -4,11 +4,17 @@ import TopBarSearch from "@/components/TopBarSearch";
 import { useUiStore } from "@/stores/uiStore";
 import { useDownloadStore } from "@/stores/downloadStore";
 import { useMutation } from "@tanstack/react-query";
+import { useSettings } from "@/stores/settingsStore";
 
 export default function DownloadsTopBar() {
     const openModal = useUiStore((state) => state.openModal);
     const selectedId = useDownloadStore((state) => state.selectedId);
+    const { data: settings } = useSettings();
+  
+    const globalSpeedLimit = settings?.global_speed_limit ?? null;
 
+    const globalSpeedLimitMbs = globalSpeedLimit ? (globalSpeedLimit / (1024 * 1024)).toFixed(1) : null;
+  
     const pauseMutation = useMutation({
         mutationFn: async (id: number) => {
             return fetch(`http://localhost:3211/downloads/${id}/pause`, {
@@ -81,7 +87,7 @@ export default function DownloadsTopBar() {
             </div>
             <div className="flex items-center gap-2">
             <Globe className="h-4 w-4 text-gray-500" />
-            <span>No Limit</span>
+            <span>{globalSpeedLimitMbs || "No Limit"}</span>
             </div>
         </div>
 
