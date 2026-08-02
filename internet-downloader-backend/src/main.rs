@@ -252,6 +252,12 @@ async fn apply_app_settings(State(manager): State<AppManagerHandle>, Json(settin
 }
 
 async fn apply_app_patch(manager: AppManagerHandle, settings: AppSettingsPatch) -> Result<(), (StatusCode, String)> {
+    match settings.global_speed_limit {
+        PatchValue::Unchanged => Ok(()),
+        PatchValue::Clear => manager.set_global_limit(None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        PatchValue::Set(speed_limit) => manager.set_global_limit(Some(speed_limit)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+    }?;
+    
     if let Some(host_settings_map) = settings.host_settings {
         for (host, host_settings) in host_settings_map {
             apply_host_patch(manager.clone(), host, host_settings).await?;
