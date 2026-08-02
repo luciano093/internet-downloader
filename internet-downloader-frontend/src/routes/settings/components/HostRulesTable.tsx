@@ -1,20 +1,16 @@
 import { useSettings, useSetHostSettings } from '@/stores/settingsStore';
 import { useEffect, useRef, useState } from 'react';
-import { formatLimit } from '../lib/utils';
 import EditableBytesLimit from '@/components/EditableLimit';
 
-export function HostRulesTable() {
-  const { data: settings } = useSettings();
-  const setHostLimit = useSetHostSettings();
+interface AddHostRuleRowProps {
+  onAdd: (host: string, speed_limit: number | null) => void,
+  onCancel: () => void,
+}
 
-  const [editingHost, setEditingHost] = useState<string | null>(null);
-  const [addingHost, setAddingHost] = useState(false);
+function AddHostRuleRow({ onAdd, onCancel }: AddHostRuleRowProps) {
+  const addRowRef = useRef<HTMLTableRowElement>(null);
   const [newHostName, setNewHostName] = useState("");
   const [newHostLimit, setNewHostLimit] = useState("");
-
-  const addRowRef = useRef<HTMLTableRowElement>(null);
-
-  const hostSettings = settings?.host_settings ?? {};
 
   const commitAddHost = () => {
     if (!newHostName.trim()) {
@@ -23,12 +19,12 @@ export function HostRulesTable() {
     }
     const megabytes = parseFloat(newHostLimit);
     const limit = isNaN(megabytes) || megabytes <= 0 ? null : Math.round(megabytes * 1024 * 1024);
-    setHostLimit.mutate({ host: newHostName, speed_limit: limit });
+    onAdd(newHostName, limit);
     cancelAddHost();
   }
 
   const cancelAddHost = () => {
-    setAddingHost(false);
+    onCancel();
     setNewHostName("");
     setNewHostLimit("");
   };
@@ -38,18 +34,93 @@ export function HostRulesTable() {
     if (event.key === 'Escape') cancelAddHost();
   };
 
-  useEffect(() => {
-    if (!addingHost) return;
+  const commitRef = useRef(commitAddHost);
+  commitRef.current = commitAddHost;
 
-    const handleClickOutside = (e: MouseEvent) => {
-      if (addRowRef.current && !addRowRef.current.contains(e.target as Node)) {
-        commitAddHost()
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (addRowRef.current && !addRowRef.current.contains(event.target as Node)) {
+        commitRef.current();
       }
     };
 
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [addingHost, newHostName, newHostLimit]);
+  }, []);
+
+  return <>
+    <tr ref={addRowRef} className="border-t border-border">
+      <td className="py-1.5 px-3 border-r border-border">
+        <input
+          type="text"
+          placeholder="e.g. github.com"
+          value={newHostName}
+          onChange={(event) => setNewHostName(event.target.value)}
+          autoFocus
+          className="w-full bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
+          onKeyDown={handleAddKeyDown}
+        />
+      </td>
+      <td className="py-1.5 px-3 text-right">
+        <div className="inline-flex items-center gap-1.5 whitespace-nowrap justify-end">
+          <input
+            type="number"
+            min="0"
+            step="0.1"
+            placeholder="∞"
+            value={newHostLimit}
+            onChange={(event) => setNewHostLimit(event.target.value)}
+            onKeyDown={handleAddKeyDown}
+            className="w-20 bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
+          />
+          <span className="text-muted text-[11px]">MB/s</span>
+        </div>
+      </td>
+    </tr>
+  </>
+}
+
+function HostRuleRow({ host, speedLimit, onCommit }: {
+  host: string;
+  speedLimit: number | null;
+  onCommit: (host: string, speedLimit: number | null) => void;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+
+  return (
+    <tr key={host} className="border-t border-border hover:bg-[#2a2d2e]">
+      <td className="py-1.5 px-3 border-r border-border text-foreground">{host}</td>
+      
+      <td className="py-1.5 px-3 text-right">
+        <EditableBytesLimit
+          value={speedLimit}
+          editing={isEditing}
+          onEditingChange={setIsEditing}
+          editingUnit="MB/s"
+          bytesPerUnit={1024 * 1024}
+          onCommit={(bytes) => onCommit(host, bytes)}
+          commitOnBlur
+        />
+      </td>
+    </tr>
+  );
+}
+
+export function HostRulesTable() {
+  const { data: settings } = useSettings();
+  const setHostLimit = useSetHostSettings();
+  
+  const [addingHost, setAddingHost] = useState(false);
+
+  const hostSettings = settings?.host_settings ?? {};
+
+  const onAdd = (host: string, speed_limit: number | null) => {
+    setHostLimit.mutate({ host, speed_limit });
+  };
+  
+  const onCancel = () => {
+    setAddingHost(false);
+  };
 
   return (
     <section>
@@ -84,62 +155,14 @@ export function HostRulesTable() {
           )}
 
           {addingHost && (
-            <tr ref={addRowRef} className="border-t border-border">
-              <td className="py-1.5 px-3 border-r border-border">
-                <input
-                  type="text"
-                  placeholder="e.g. github.com"
-                  value={newHostName}
-                  onChange={(e) => setNewHostName(e.target.value)}
-                  autoFocus
-                  className="w-full bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
-                  onKeyDown={handleAddKeyDown}
-                />
-              </td>
-              <td className="py-1.5 px-3 text-right">
-                <div className="inline-flex items-center gap-1.5 whitespace-nowrap justify-end">
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.1"
-                    placeholder="∞"
-                    value={newHostLimit}
-                    onChange={(e) => setNewHostLimit(e.target.value)}
-                    onKeyDown={handleAddKeyDown}
-                    className="w-20 bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
-                  />
-                  <span className="text-muted text-[11px]">MB/s</span>
-                </div>
-              </td>
-            </tr>
+            <AddHostRuleRow
+              onAdd={onAdd}
+              onCancel={onCancel}
+            />
           )}
           
           {Object.entries(hostSettings).map(([host, hostSetting]) => (
-            <tr key={host} className="border-t border-border hover:bg-[#2a2d2e]">
-              <td className="py-1.5 px-3 border-r border-border text-foreground">
-                {host}
-              </td>
-              <td className="py-1.5 px-3 text-right">
-                {editingHost === host ? (
-                  <EditableBytesLimit
-                    value={hostSetting.speed_limit}
-                    editing={editingHost === host}
-                    onEditingChange={(nowEditing) => setEditingHost(nowEditing ? host : null)}
-                    editingUnit="MB/s"
-                    bytesPerUnit={1024 * 1024}
-                    onCommit={(bytes) => {
-                      setHostLimit.mutate({ host, speed_limit: bytes });
-                      setEditingHost(null);
-                    }}
-                    commitOnBlur
-                  />
-                ) : (
-                  <span onClick={() => setEditingHost(host)}>
-                    {formatLimit(hostSetting.speed_limit)}
-                  </span>
-                )}
-              </td>
-            </tr>
+            <HostRuleRow host={host} speedLimit={hostSetting.speed_limit} onCommit={onAdd} />
           ))}
         </tbody>
       </table>
