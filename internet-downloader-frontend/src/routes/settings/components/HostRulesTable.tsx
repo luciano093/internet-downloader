@@ -57,7 +57,7 @@ export function HostRulesTable() {
         <h3 className="text-foreground font-semibold">Per-Host Rules</h3>
         <button
           onClick={() => setAddingHost(true)}
-          className="text-brand hover:opacity-80 flex items-center gap-1 text-xs"
+          className="text-brand hover:opacity-80 flex items-center gap-1 text-xs cursor-pointer"
         >
           + Add Host Rule
         </button>
