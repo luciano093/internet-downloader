@@ -1,9 +1,9 @@
-import { useSettings, useSetGlobalLimit } from "@/stores/settingsStore";
+import { useSettings, useSetGlobalSettings } from "@/stores/settingsStore";
 import { useState } from "react";
 
 export default function GlobalSpeedLimit() {
   const { data: settings } = useSettings();
-  const setGlobalLimit = useSetGlobalLimit();
+  const setGlobalLimit = useSetGlobalSettings();
 
   const currentLimit = settings?.global_speed_limit ?? null;
   const displayMb = currentLimit ? (currentLimit / (1024 * 1024)).toFixed(1) : null;

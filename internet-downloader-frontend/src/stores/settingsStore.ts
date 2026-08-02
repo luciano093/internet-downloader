@@ -10,29 +10,29 @@ export function useSettings() {
   });
 }
 
-export function useSetGlobalLimit() {
+export function useSetGlobalSettings() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: (bandwidth_limit: number | null) => {
-      return fetch(`${API_BASE}/limit`, {
-        method: "PUT",
+    mutationFn: (speed_limit: number | null) => {
+      return fetch(`${API_BASE}/settings`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bandwidth_limit }),
+        body: JSON.stringify({ global_speed_limit: speed_limit }),
       })
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
   });
 }
 
-export function useSetHostLimit() {
+export function useSetHostSettings() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ host, bandwidth_limit }: { host: string; bandwidth_limit: number | null }) =>
-      fetch(`${API_BASE}/hosts/${host}/limit`, {
-        method: "PUT",
+    mutationFn: ({ host, speed_limit }: { host: string; speed_limit: number | null }) =>
+      fetch(`${API_BASE}/hosts/${host}/settings`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ host, bandwidth_limit }),
+        body: JSON.stringify({ speed_limit }),
       }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
   });

@@ -175,7 +175,7 @@ impl AppManager {
                             let download_id = download.id();
     
                             let download_settings = app_settings.get_download_settings(download_id);
-                            let download_limiter = Arc::new(DownloadLimiterGroup::from_settings(download_settings.as_ref()));
+                            let download_limiter = Arc::new(DownloadLimiterGroup::from_settings(download_settings));
             
                             for (&file_id, _file) in download.files() {
                                 let limiter = BandwidthLimiter::new(0);

@@ -1,11 +1,11 @@
-import { useSettings, useSetHostLimit } from '@/stores/settingsStore';
+import { useSettings, useSetHostSettings } from '@/stores/settingsStore';
 import { useEffect, useRef, useState } from 'react';
 import { formatLimit } from '../lib/utils';
 import EditableBytesLimit from '@/components/EditableLimit';
 
 export function HostRulesTable() {
   const { data: settings } = useSettings();
-  const setHostLimit = useSetHostLimit();
+  const setHostLimit = useSetHostSettings();
 
   const [editingHost, setEditingHost] = useState<string | null>(null);
   const [addingHost, setAddingHost] = useState(false);
@@ -31,7 +31,7 @@ export function HostRulesTable() {
         // host typed = commit
         const mb = parseFloat(newHostLimit);
         const limit = isNaN(mb) || mb <= 0 ? null : Math.round(mb * 1024 * 1024);
-        setHostLimit.mutate({ host: newHostName, bandwidth_limit: limit });
+        setHostLimit.mutate({ host: newHostName, speed_limit: limit });
         setAddingHost(false);
         setNewHostName("");
         setNewHostLimit("");
@@ -95,7 +95,7 @@ export function HostRulesTable() {
                       }
                       const mb = parseFloat(newHostLimit);
                       const limit = isNaN(mb) || mb <= 0 ? null : Math.round(mb * 1024 * 1024);
-                      setHostLimit.mutate({ host: newHostName, bandwidth_limit: limit });
+                      setHostLimit.mutate({ host: newHostName, speed_limit: limit });
                       setAddingHost(false);
                       setNewHostName("");
                       setNewHostLimit("");
@@ -128,7 +128,7 @@ export function HostRulesTable() {
                         
                         const mb = parseFloat(newHostLimit);
                         const limit = isNaN(mb) || mb <= 0 ? null : Math.round(mb * 1024 * 1024);
-                        setHostLimit.mutate({ host: newHostName, bandwidth_limit: limit });
+                        setHostLimit.mutate({ host: newHostName, speed_limit: limit });
                         setAddingHost(false);
                         setNewHostName("");
                         setNewHostLimit("");
@@ -161,7 +161,7 @@ export function HostRulesTable() {
                     editingUnit="MB/s"
                     bytesPerUnit={1024 * 1024}
                     onCommit={(bytes) => {
-                      setHostLimit.mutate({ host, bandwidth_limit: bytes });
+                      setHostLimit.mutate({ host, speed_limit: bytes });
                       setEditingHost(null);
                     }}
                     commitOnBlur

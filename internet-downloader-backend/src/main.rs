@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::Duration;
 use std::process::exit;
@@ -7,7 +8,7 @@ use axum::extract::Path;
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, put};
+use axum::routing::{delete, get, patch};
 use internet_downloader_backend::app::manager::AppManagerHandle;
 use internet_downloader_backend::app::snapshot::AppSnapshotHandler;
 use internet_downloader_backend::client_state_manager::DownloadSnapshot;
@@ -75,17 +76,20 @@ async fn main() {
                 .route("/", delete(delete_download))
                 .route("/pause", post(pause_download))
                 .route("/resume", post(resume_download))
-                .route("/limit", put(limit_download))
+                .route("/settings", get(download_settings))
+                .route("/settings", patch(apply_download_settings))
                 .nest("/files/{file_id}", Router::new()
-                    .route("/limit", put(limit_file))
+                    .route("/settings", get(file_settings))
+                    .route("/settings", patch(apply_file_settings))
                 )
             )
         )
         .nest("/hosts/{host_name}", Router::new()
-            .route("/limit", put(limit_host))
+            .route("/settings", get(host_settings))
+            .route("/settings", patch(apply_host_settings))
         )
-        .route("/limit", put(limit_network))
-        .route("/settings", get(settings))
+        .route("/settings", get(app_settings))
+        .route("/settings", patch(apply_app_settings))
         .with_state(app_manager)
         .layer(cors);
 
@@ -208,64 +212,165 @@ async fn resume_download(State(manager): State<AppManagerHandle>, Path(path): Pa
     let _ = manager.resume_download(path.download_id).await;
 }
 
-#[derive(Deserialize, Debug)]
-struct LimitNetworkSettings {
-    bandwidth_limit: Option<u64>,
+#[derive(Debug, Clone, Default, PartialEq)]
+enum PatchValue<T> {
+    #[default]
+    Unchanged,
+    Clear,
+    Set(T),
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for PatchValue<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match Option::<T>::deserialize(d)? {
+            Some(v) => PatchValue::Set(v),
+            None => PatchValue::Clear,
+        })
+    }
 }
 
 #[axum::debug_handler] 
-async fn limit_network(State(manager): State<AppManagerHandle>, Json(json): Json<LimitNetworkSettings>) -> impl IntoResponse {
-    debug!(bandwidth_limit = ?json.bandwidth_limit, "Received network limit");
-
-    let _ = manager.set_global_limit(json.bandwidth_limit).await;
-}
-
-#[derive(Deserialize, Debug)]
-struct LimitHostSettings {
-    host: String,
-    bandwidth_limit: Option<u64>,
-}
-
-#[axum::debug_handler] 
-async fn limit_host(State(manager): State<AppManagerHandle>, Json(json): Json<LimitHostSettings>) -> impl IntoResponse {
-    debug!(bandwidth_limit = ?json.bandwidth_limit, host = json.host, "Received network limit");
-
-    let _ = manager.set_host_limit(json.host, json.bandwidth_limit).await;
-}
-
-#[derive(Deserialize, Debug)]
-struct LimitDownloadSettings {
-    bandwidth_limit: Option<u64>,
-}
-
-#[axum::debug_handler] 
-async fn limit_download(State(manager): State<AppManagerHandle>, Path(path): Path<DownloadPath>, Json(json): Json<LimitDownloadSettings>) -> impl IntoResponse {
-    debug!(bandwidth_limit = ?json.bandwidth_limit, download_id = *path.download_id, "Received network limit");
-
-    let _ = manager.set_download_limit(path.download_id, json.bandwidth_limit).await;
-}
-
-#[derive(Deserialize, Debug)]
-struct FilePath {
-    download_id: DownloadId,
-    file_id: FileId,
-}
-
-#[derive(Deserialize, Debug)]
-struct LimitFileSettings {
-    bandwidth_limit: Option<u64>,
-}
-
-#[axum::debug_handler] 
-async fn limit_file(State(manager): State<AppManagerHandle>, Path(path): Path<FilePath>, Json(json): Json<LimitFileSettings>) -> impl IntoResponse {
-    debug!(bandwidth_limit = ?json.bandwidth_limit, download = *path.download_id, file_id = *path.file_id, "Received network limit");
-
-    let _ = manager.set_file_limit(path.download_id, path.file_id, json.bandwidth_limit).await;
-}
-
-#[axum::debug_handler] 
-async fn settings(State(manager): State<AppManagerHandle>) -> impl IntoResponse {
-    debug!( "Received settings GET request");
+async fn app_settings(State(manager): State<AppManagerHandle>) -> impl IntoResponse {
+    debug!( "Received app settings GET request");
 
     Json(manager.get_settings().await)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct AppSettingsPatch {
+    global_speed_limit: PatchValue<u64>,
+    host_settings: Option<HashMap<String, HostSettingsPatch>>,
+    download_settings: Option<HashMap<DownloadId, DownloadSettingsPatch>>,
+}
+
+#[axum::debug_handler] 
+async fn apply_app_settings(State(manager): State<AppManagerHandle>, Json(settings): Json<AppSettingsPatch>) -> impl IntoResponse {
+    debug!( "Received app settings PATCH request");
+
+    apply_app_patch(manager, settings).await
+}
+
+async fn apply_app_patch(manager: AppManagerHandle, settings: AppSettingsPatch) -> Result<(), (StatusCode, String)> {
+    if let Some(host_settings_map) = settings.host_settings {
+        for (host, host_settings) in host_settings_map {
+            apply_host_patch(manager.clone(), host, host_settings).await?;
+        }
+    }
+
+    if let Some(download_settings_map) = settings.download_settings {
+        for (download_id, download_settings) in download_settings_map {
+            apply_download_patch(manager.clone(), download_id, download_settings).await?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Deserialize, Default, Debug)]
+struct HostSettingsPatch {
+    speed_limit: PatchValue<u64>,
+}
+
+#[axum::debug_handler] 
+async fn apply_host_settings(State(manager): State<AppManagerHandle>, Path(host): Path<String>, Json(settings): Json<HostSettingsPatch>) -> impl IntoResponse {
+    debug!(speed_limit = ?settings.speed_limit, host, "Received network limit");
+
+    apply_host_patch(manager, host, settings).await
+}
+
+async fn apply_host_patch(manager: AppManagerHandle, host: String, settings: HostSettingsPatch) -> Result<(), (StatusCode, String)> {
+    match settings.speed_limit {
+        PatchValue::Unchanged => Ok(()),
+        PatchValue::Clear    => manager.set_host_limit(host, None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        PatchValue::Set(value)   => manager.set_host_limit(host, Some(value)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+    }
+}
+
+#[axum::debug_handler] 
+async fn host_settings(State(manager): State<AppManagerHandle>, Path(host): Path<String>) -> impl IntoResponse {
+    debug!( "Received host settings GET request");
+
+    match manager.get_settings().await.get_host_settings(&host) {
+        Some(host_settings) => Json(host_settings).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(Deserialize, Default, Debug)]
+struct DownloadSettingsPatch {
+    speed_limit: PatchValue<u64>,
+    file_settings: Option<HashMap<FileId, FileSettingsPatch>>,
+}
+
+#[axum::debug_handler] 
+async fn apply_download_settings(State(manager): State<AppManagerHandle>, Path(download_id): Path<DownloadId>, Json(settings): Json<DownloadSettingsPatch>) -> impl IntoResponse {
+    debug!(speed_limit = ?settings.speed_limit, download_id = (*download_id) as usize, "Received download limit");
+
+    apply_download_patch(manager, download_id, settings).await
+}
+
+async fn apply_download_patch(manager: AppManagerHandle, download_id: DownloadId, settings: DownloadSettingsPatch) -> Result<(), (StatusCode, String)> {
+    match settings.speed_limit {
+        PatchValue::Unchanged => Ok(()),
+        PatchValue::Clear    => manager.set_download_limit(download_id, None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        PatchValue::Set(value)   => manager.set_download_limit(download_id, Some(value)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+    }?;
+
+    if let Some(file_settings_map) = settings.file_settings {
+        for (file_id, file_settings) in file_settings_map {
+            apply_file_patch(manager.clone(), download_id, file_id, file_settings).await?;
+        }
+    }
+
+    Ok(())
+}
+
+#[axum::debug_handler] 
+async fn download_settings(State(manager): State<AppManagerHandle>, Path(download_id): Path<DownloadId>) -> impl IntoResponse {
+    debug!( "Received download settings GET request");
+
+    match manager.get_settings().await.get_download_settings(download_id) {
+        Some(download_settings) => Json(download_settings).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[derive(Deserialize, Default, Debug)]
+struct FileSettingsPatch {
+    speed_limit: PatchValue<u64>,
+}
+
+#[axum::debug_handler] 
+async fn apply_file_settings(State(manager): State<AppManagerHandle>, Path((download_id, file_id)): Path<(DownloadId, FileId)>, Json(settings): Json<FileSettingsPatch>) -> impl IntoResponse {
+    debug!(speed_limit = ?settings.speed_limit, download_id = (*download_id) as usize, "Received download limit");
+
+    apply_file_patch(manager, download_id, file_id, settings).await
+}
+
+async fn apply_file_patch(manager: AppManagerHandle, download_id: DownloadId, file_id: FileId, settings: FileSettingsPatch) -> Result<(), (StatusCode, String)> {
+    let result: Result<(), (StatusCode, String)> = match settings.speed_limit {
+        PatchValue::Unchanged => Ok(()),
+        PatchValue::Clear    => manager.set_file_limit(download_id, file_id, None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        PatchValue::Set(value)   => manager.set_file_limit(download_id, file_id, Some(value)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+    };
+    
+    result
+}
+
+#[axum::debug_handler] 
+async fn file_settings(State(manager): State<AppManagerHandle>, Path((download_id, file_id)): Path<(DownloadId, FileId)>) -> impl IntoResponse {
+    debug!( "Received file settings GET request");
+
+    let app_settings = manager.get_settings().await;
+    let file_settings = app_settings
+        .get_download_settings(download_id)
+        .and_then(|download_settings| {
+            download_settings.get_file_settings(&file_id)
+        });
+
+    match file_settings {
+        Some(file_settings) => Json(file_settings).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }

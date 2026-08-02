@@ -16,6 +16,12 @@ pub struct DownloadSettings {
     pub file_settings: HashMap<FileId, FileSettings>, 
 }
 
+impl DownloadSettings {
+    pub fn get_file_settings(&self, file_id: &FileId) -> Option<&FileSettings> {
+        self.file_settings.get(file_id)
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct HostSettings {
     pub speed_limit: Option<u64>,
@@ -45,8 +51,12 @@ impl AppSettings {
         self.global_speed_limit = new_speed_limit;
     }
 
-    pub fn get_download_settings(&self, download_id: DownloadId) -> Option<DownloadSettings> {
-        self.download_settings.get(&download_id).cloned()
+    pub fn get_host_settings(&self, host: &str) -> Option<&HostSettings> {
+        self.host_settings.get(host)
+    }
+    
+    pub fn get_download_settings(&self, download_id: DownloadId) -> Option<&DownloadSettings> {
+        self.download_settings.get(&download_id)
     }
 
     pub fn from_db(global_settings_row: GlobalSettingsRow, host_settings_rows: Vec<HostSettingsRow>, joined_download_settings: Vec<JoinedDownloadSettingsRow>) -> Self {

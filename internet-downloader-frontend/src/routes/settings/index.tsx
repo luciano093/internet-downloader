@@ -1,7 +1,6 @@
 import AppLayout from '@/components/AppLayout';
 import { createFileRoute } from '@tanstack/react-router'
-import { useUiStore } from '@/stores/uiStore';
-import { useSettings, useSetGlobalLimit } from '@/stores/settingsStore';
+import { useSettings, useSetGlobalSettings } from '@/stores/settingsStore';
 import { useState } from 'react';
 import { HostRulesTable } from './components/HostRulesTable';
 import EditableBytesLimit from '@/components/EditableLimit';
@@ -12,7 +11,7 @@ export const Route = createFileRoute('/settings/')({
 
 function Settings() {
   const { data: settings } = useSettings();
-  const setGlobalLimit = useSetGlobalLimit();
+  const setGlobalLimit = useSetGlobalSettings();
   const [editing, setEditing] = useState(false);
 
   const globalLimit = settings?.global_speed_limit ?? null;
