@@ -16,25 +16,34 @@ export function HostRulesTable() {
 
   const hostSettings = settings?.host_settings ?? {};
 
+  const commitAddHost = () => {
+    if (!newHostName.trim()) {
+      cancelAddHost();
+      return;
+    }
+    const megabytes = parseFloat(newHostLimit);
+    const limit = isNaN(megabytes) || megabytes <= 0 ? null : Math.round(megabytes * 1024 * 1024);
+    setHostLimit.mutate({ host: newHostName, speed_limit: limit });
+    cancelAddHost();
+  }
+
+  const cancelAddHost = () => {
+    setAddingHost(false);
+    setNewHostName("");
+    setNewHostLimit("");
+  };
+
+  const handleAddKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === 'Enter') commitAddHost();
+    if (event.key === 'Escape') cancelAddHost();
+  };
+
   useEffect(() => {
     if (!addingHost) return;
 
     const handleClickOutside = (e: MouseEvent) => {
       if (addRowRef.current && !addRowRef.current.contains(e.target as Node)) {
-        if (!newHostName.trim()) {
-          // no host typed = just cancel
-          setAddingHost(false);
-          setNewHostName("");
-          setNewHostLimit("");
-          return;
-        }
-        // host typed = commit
-        const mb = parseFloat(newHostLimit);
-        const limit = isNaN(mb) || mb <= 0 ? null : Math.round(mb * 1024 * 1024);
-        setHostLimit.mutate({ host: newHostName, speed_limit: limit });
-        setAddingHost(false);
-        setNewHostName("");
-        setNewHostLimit("");
+        commitAddHost()
       }
     };
 
@@ -84,28 +93,7 @@ export function HostRulesTable() {
                   onChange={(e) => setNewHostName(e.target.value)}
                   autoFocus
                   className="w-full bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      if (!newHostName.trim()) {
-                        // blank hostname = cancel
-                        setAddingHost(false);
-                        setNewHostName("");
-                        setNewHostLimit("");
-                        return;
-                      }
-                      const mb = parseFloat(newHostLimit);
-                      const limit = isNaN(mb) || mb <= 0 ? null : Math.round(mb * 1024 * 1024);
-                      setHostLimit.mutate({ host: newHostName, speed_limit: limit });
-                      setAddingHost(false);
-                      setNewHostName("");
-                      setNewHostLimit("");
-                    }
-                    if (e.key === 'Escape') {
-                      setAddingHost(false);
-                      setNewHostName("");
-                      setNewHostLimit("");
-                    }
-                  }}
+                  onKeyDown={handleAddKeyDown}
                 />
               </td>
               <td className="py-1.5 px-3 text-right">
@@ -117,28 +105,7 @@ export function HostRulesTable() {
                     placeholder="∞"
                     value={newHostLimit}
                     onChange={(e) => setNewHostLimit(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        if (!newHostName.trim()) {
-                          setAddingHost(false);
-                          setNewHostName("");
-                          setNewHostLimit("");
-                          return;
-                        }
-                        
-                        const mb = parseFloat(newHostLimit);
-                        const limit = isNaN(mb) || mb <= 0 ? null : Math.round(mb * 1024 * 1024);
-                        setHostLimit.mutate({ host: newHostName, speed_limit: limit });
-                        setAddingHost(false);
-                        setNewHostName("");
-                        setNewHostLimit("");
-                      }
-                      if (e.key === 'Escape') {
-                        setAddingHost(false);
-                        setNewHostName("");
-                        setNewHostLimit("");
-                      }
-                    }}
+                    onKeyDown={handleAddKeyDown}
                     className="w-20 bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
                   />
                   <span className="text-muted text-[11px]">MB/s</span>
