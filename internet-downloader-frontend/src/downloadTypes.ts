@@ -135,6 +135,7 @@ export type DeltaEvent = {
 
 export type AppSettings = {
   global_speed_limit: number | null;
+  default_save_path: string | null;
   download_settings: Record<number, { speed_limit: number | null }>;
   host_settings: Record<string, { speed_limit: number | null }>;
 };

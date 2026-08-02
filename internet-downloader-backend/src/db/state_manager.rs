@@ -512,7 +512,8 @@ impl StateManager {
             -- AppSettings
             CREATE TABLE IF NOT EXISTS app_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                global_speed_limit INTEGER
+                global_speed_limit INTEGER,
+                default_save_path TEXT
             );
 
             -- HostSettings
@@ -546,11 +547,12 @@ impl StateManager {
 
         sqlx::query(
             r#"
-            INSERT OR IGNORE INTO app_settings (id, global_speed_limit) 
-            VALUES (1, ?)
+            INSERT OR IGNORE INTO app_settings (id, global_speed_limit, default_save_path) 
+            VALUES (1, ?, ?)
             "#
         )
         .bind(default_settings.global_speed_limit.map(|speed| speed as i64))
+        .bind(default_settings.default_save_path)
         .execute(&self.pool)
         .await
         .map_err(DbWriteError::with_msg("Failed to insert default app settings to database"))?;
@@ -1023,7 +1025,7 @@ impl StateManager {
     }
 
     pub async fn load_app_settings(&self) -> Result<Option<AppSettings>, DbReadError> {
-        let Some(global_row) = sqlx::query_as::<_, GlobalSettingsRow>("SELECT global_speed_limit FROM app_settings WHERE id = 1")
+        let Some(global_row) = sqlx::query_as::<_, GlobalSettingsRow>("SELECT global_speed_limit, default_save_path FROM app_settings WHERE id = 1")
             .fetch_optional(&self.pool)
             .await
             .map_err(DbReadError::with_msg("Failed to fetch the global app settings from database"))?
@@ -1065,12 +1067,14 @@ impl StateManager {
             .map_err(DbWriteError::with_msg("Failed to initialize PRAGMA defer_foreign_keys when trying to save app settings to database"))?;
 
         sqlx::query(r#"
-            INSERT INTO app_settings (id, global_speed_limit)
-            VALUES (1, ?)
+            INSERT INTO app_settings (id, global_speed_limit, default_save_path)
+            VALUES (1, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
-                global_speed_limit = excluded.global_speed_limit
+                global_speed_limit = excluded.global_speed_limit,
+                default_save_path = excluded.default_save_path
         "#)
         .bind(app_settings.global_speed_limit.map(|speed_limit| speed_limit as i64))
+        .bind(&app_settings.default_save_path)
         .execute(&mut *transaction)
         .await
         .map_err(DbWriteError::with_msg("Failed to insert app settings to database"))?;

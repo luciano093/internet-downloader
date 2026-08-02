@@ -89,6 +89,7 @@ impl DownloadFileRow {
 #[derive(sqlx::FromRow)]
 pub struct GlobalSettingsRow {
     pub global_speed_limit: Option<i64>,
+    pub default_save_path: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

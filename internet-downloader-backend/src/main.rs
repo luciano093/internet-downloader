@@ -240,6 +240,7 @@ async fn app_settings(State(manager): State<AppManagerHandle>) -> impl IntoRespo
 #[serde(default)]
 struct AppSettingsPatch {
     global_speed_limit: PatchValue<u64>,
+    default_save_path: PatchValue<String>,
     host_settings: Option<HashMap<String, HostSettingsPatch>>,
     download_settings: Option<HashMap<DownloadId, DownloadSettingsPatch>>,
 }
@@ -256,6 +257,12 @@ async fn apply_app_patch(manager: AppManagerHandle, settings: AppSettingsPatch) 
         PatchValue::Unchanged => Ok(()),
         PatchValue::Clear => manager.set_global_limit(None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
         PatchValue::Set(speed_limit) => manager.set_global_limit(Some(speed_limit)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+    }?;
+
+    match settings.default_save_path {
+        PatchValue::Unchanged => Ok(()),
+        PatchValue::Clear => manager.set_default_save_path(None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        PatchValue::Set(default_save_path) => manager.set_default_save_path(Some(default_save_path)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
     }?;
     
     if let Some(host_settings_map) = settings.host_settings {

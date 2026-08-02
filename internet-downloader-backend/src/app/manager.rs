@@ -45,6 +45,7 @@ pub enum AppManagerCommand {
     ResumeDownload(DownloadId),
     Shutdown,
     SetGlobalSpeedLimit(Option<u64>),
+    SetDefaultSavePath(Option<String>),
     SetHostSpeedLimit(String, Option<u64>), // String can be a hostname or url
     SetDownloadSpeedLimit(DownloadId, Option<u64>),
     SetFileSpeedLimit(DownloadId, FileId, Option<u64>),
@@ -353,6 +354,11 @@ impl AppManager {
                         AppManagerCommand::GetSettings(sender) => {
                             let _ = sender.send(app_settings.clone());
                         },
+                        AppManagerCommand::SetDefaultSavePath(default_save_path) => {
+                            app_settings.set_default_save_path(default_save_path);
+    
+                            self.db_manager.write_app_settings(&app_settings).await.unwrap();
+                        },
                     }
                 
                 }
@@ -413,6 +419,10 @@ impl AppManagerHandle {
 
     pub async fn set_global_limit(&self, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
         self.sender.send(AppManagerCommand::SetGlobalSpeedLimit(limit)).await
+    }
+    
+    pub async fn set_default_save_path(&self, default_save_path: Option<String>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::SetDefaultSavePath(default_save_path)).await
     }
 
     pub async fn set_host_limit(&self, host: String, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {

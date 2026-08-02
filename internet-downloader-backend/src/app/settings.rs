@@ -30,6 +30,7 @@ pub struct HostSettings {
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct AppSettings {
     pub global_speed_limit: Option<u64>,
+    pub default_save_path: Option<String>,
     pub download_settings: HashMap<DownloadId, DownloadSettings>,
     pub host_settings: HashMap<String, HostSettings>
 }
@@ -38,6 +39,7 @@ impl AppSettings {
     pub fn new() -> Self {
         Self {
             global_speed_limit: None,
+            default_save_path: None,
             download_settings: HashMap::new(),
             host_settings: HashMap::new(),
         }
@@ -49,6 +51,10 @@ impl AppSettings {
 
     pub fn set_global_speed_limit(&mut self, new_speed_limit: Option<u64>) {
         self.global_speed_limit = new_speed_limit;
+    }
+
+    pub fn set_default_save_path(&mut self, new_default_save_path: Option<String>) {
+        self.default_save_path = new_default_save_path;
     }
 
     pub fn get_host_settings(&self, host: &str) -> Option<&HostSettings> {
@@ -88,6 +94,7 @@ impl AppSettings {
 
         Self {
             global_speed_limit: global_settings_row.global_speed_limit.map(|speed_limit| speed_limit as u64),
+            default_save_path: global_settings_row.default_save_path,
             download_settings: download_settings,
             host_settings: host_settings,
         }

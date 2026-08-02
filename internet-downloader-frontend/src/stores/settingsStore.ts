@@ -14,11 +14,11 @@ export function useSetGlobalSettings() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: (speed_limit: number | null) => {
+    mutationFn: ({ speed_limit, default_save_path }: { speed_limit?: number | null, default_save_path?: string | null }) => {
       return fetch(`${API_BASE}/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ global_speed_limit: speed_limit }),
+        body: JSON.stringify({ global_speed_limit: speed_limit, default_save_path }),
       })
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),

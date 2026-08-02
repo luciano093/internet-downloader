@@ -3,7 +3,7 @@ import { useState } from "react";
 
 export default function GlobalSpeedLimit() {
   const { data: settings } = useSettings();
-  const setGlobalLimit = useSetGlobalSettings();
+  const setGlobalSettings = useSetGlobalSettings();
 
   const currentLimit = settings?.global_speed_limit ?? null;
   const displayMb = currentLimit ? (currentLimit / (1024 * 1024)).toFixed(1) : null;
@@ -26,13 +26,13 @@ export default function GlobalSpeedLimit() {
         onClick={() => {
           const mb = parseFloat(inputMb);
           if (isNaN(mb) || mb <= 0) {
-            setGlobalLimit.mutate(null);
+            setGlobalSettings.mutate({ speed_limit: null });
             setInputMb("");
           } else {
-            setGlobalLimit.mutate(mb * 1024 * 1024);
+            setGlobalSettings.mutate({ speed_limit: mb * 1024 * 1024 });
           }
         }}
-        disabled={setGlobalLimit.isPending}
+        disabled={setGlobalSettings.isPending}
         className="h-8 px-3 rounded-sm bg-accent text-[13px] text-foreground hover:bg-accent-foreground/15 transition-colors cursor-pointer disabled:opacity-50"
       >
         Apply
@@ -40,10 +40,10 @@ export default function GlobalSpeedLimit() {
       {currentLimit && (
         <button
           onClick={() => {
-            setGlobalLimit.mutate(null);
+            setGlobalSettings.mutate({ speed_limit: null });
             setInputMb("");
           }}
-          disabled={setGlobalLimit.isPending}
+          disabled={setGlobalSettings.isPending}
           className="h-8 px-3 rounded-sm text-[13px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer disabled:opacity-50"
         >
           Remove limit
