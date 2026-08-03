@@ -183,7 +183,7 @@ export function HostRulesTable() {
         <tbody>
           {Object.keys(hostSettings).length === 0 && !addingHost && (
             <tr>
-              <td colSpan={2} className="py-4 text-center text-muted">
+              <td colSpan={3} className="py-4 text-center text-muted">
                 No host rules defined.
               </td>
             </tr>
