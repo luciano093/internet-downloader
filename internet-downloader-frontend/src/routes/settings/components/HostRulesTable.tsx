@@ -1,4 +1,4 @@
-import { useSettings, useSetHostSettings } from '@/stores/settingsStore';
+import { useSettings, useSetHostSettings, useRemoveHostSettings } from '@/stores/settingsStore';
 import { useEffect, useRef, useState } from 'react';
 import EditableBytesLimit from '@/components/EditableLimit';
 
@@ -80,18 +80,19 @@ function AddHostRuleRow({ onAdd, onCancel }: AddHostRuleRowProps) {
   </>
 }
 
-function HostRuleRow({ host, speedLimit, onCommit }: {
+function HostRuleRow({ host, speedLimit, onCommit, onDelete }: {
   host: string;
   speedLimit: number | null;
   onCommit: (host: string, speedLimit: number | null) => void;
+  onDelete: (host: string) => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
 
   return (
-    <tr key={host} className="border-t border-border hover:bg-[#2a2d2e]">
+    <tr key={host} className="group border-t border-border hover:text-foreground hover:bg-accent">
       <td className="py-1.5 px-3 border-r border-border text-foreground">{host}</td>
       
-      <td className="py-1.5 px-3 text-right">
+      <td className="py-1.5 px-3 text-right border-r border-border">
         <EditableBytesLimit
           value={speedLimit}
           editing={isEditing}
@@ -100,7 +101,16 @@ function HostRuleRow({ host, speedLimit, onCommit }: {
           bytesPerUnit={1024 * 1024}
           onCommit={(bytes) => onCommit(host, bytes)}
           commitOnBlur
-        />
+      />
+      </td>
+      <td className='text-center'>
+        <button
+          onClick={() => onDelete(host)}
+          className="opacity-0 group-hover:opacity-100 text-muted hover:text-accent-foreground text-xs cursor-pointer"
+          title="Remove rule"
+        >
+          x
+        </button>
       </td>
     </tr>
   );
@@ -109,6 +119,7 @@ function HostRuleRow({ host, speedLimit, onCommit }: {
 export function HostRulesTable() {
   const { data: settings } = useSettings();
   const setHostLimit = useSetHostSettings();
+  const removeHostLimit = useRemoveHostSettings();
   
   const [addingHost, setAddingHost] = useState(false);
 
@@ -120,6 +131,10 @@ export function HostRulesTable() {
   
   const onCancel = () => {
     setAddingHost(false);
+  };
+
+  const onDelete = (host: string) => {
+    removeHostLimit.mutate(host);
   };
 
   return (
@@ -140,8 +155,11 @@ export function HostRulesTable() {
             <th className="font-normal py-1.5 px-3 border-r border-border">
               Hostname
             </th>
-            <th className="font-normal py-1.5 px-3 w-32 text-right">
+            <th className="font-normal py-1.5 px-3 w-32 text-right border-r border-border">
               Limit
+            </th>
+            <th className="font-normal px-3 w-3 text-center">
+              {/* Remove button */}
             </th>
           </tr>
         </thead>
@@ -162,7 +180,7 @@ export function HostRulesTable() {
           )}
           
           {Object.entries(hostSettings).map(([host, hostSetting]) => (
-            <HostRuleRow host={host} speedLimit={hostSetting.speed_limit} onCommit={onAdd} />
+            <HostRuleRow host={host} speedLimit={hostSetting.speed_limit} onCommit={onAdd}  onDelete={onDelete} />
           ))}
         </tbody>
       </table>

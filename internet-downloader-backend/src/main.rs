@@ -87,6 +87,7 @@ async fn main() {
         .nest("/hosts/{host_name}", Router::new()
             .route("/settings", get(host_settings))
             .route("/settings", patch(apply_host_settings))
+            .route("/settings", delete(delete_host_settings))
         )
         .route("/settings", get(app_settings))
         .route("/settings", patch(apply_app_settings))
@@ -298,6 +299,13 @@ async fn apply_host_patch(manager: AppManagerHandle, host: String, settings: Hos
         PatchValue::Clear    => manager.set_host_limit(host, None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
         PatchValue::Set(value)   => manager.set_host_limit(host, Some(value)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
     }
+}
+
+#[axum::debug_handler] 
+async fn delete_host_settings(State(manager): State<AppManagerHandle>, Path(host): Path<String>) -> impl IntoResponse {
+    debug!(host, "Received DELETE for host settings");
+
+    manager.remove_host_limit(host).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
 #[axum::debug_handler] 

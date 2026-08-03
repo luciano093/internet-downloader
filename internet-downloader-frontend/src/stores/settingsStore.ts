@@ -37,3 +37,12 @@ export function useSetHostSettings() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
   });
 }
+
+export function useRemoveHostSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (host: string) =>
+      fetch(`${API_BASE}/hosts/${host}/settings`, { method: "DELETE" }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
+  });
+}

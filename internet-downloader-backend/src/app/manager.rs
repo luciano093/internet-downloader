@@ -50,6 +50,7 @@ pub enum AppManagerCommand {
     SetDownloadSpeedLimit(DownloadId, Option<u64>),
     SetFileSpeedLimit(DownloadId, FileId, Option<u64>),
     GetSettings(oneshot::Sender<AppSettings>),
+    RemoveHostSpeedLimit(String), // String can be a hostname or url
 }
 
 pub struct AppManager {
@@ -359,6 +360,32 @@ impl AppManager {
     
                             self.db_manager.write_app_settings(&app_settings).await.unwrap();
                         },
+                        AppManagerCommand::RemoveHostSpeedLimit(host_str) => {
+                            if let None = app_settings.host_settings.remove(&host_str) {
+                                warn!("Host string {} didn't have a saved speed limit", host_str);
+                            }
+                            self.db_manager.write_app_settings(&app_settings).await.unwrap();
+
+                            let host = Url::parse(&host_str)
+                                .ok()
+                                .and_then(|url| url.host().map(|host| host.to_owned()));
+                            
+                            let host = match host {
+                                Some(host) => host,
+                                None => match Host::parse(&host_str) {
+                                    Ok(host) => host,
+                                    Err(error) => { 
+                                        warn!("Invalid host string {}: {}", host_str, error); 
+                                        continue;
+                                    }
+                                }
+                            };
+                            if let Some(weak_limiter) = self.limiters.host_limits().get(&host) {
+                                if let Some(live_limiter) = weak_limiter.upgrade() {
+                                    live_limiter.set_unlimited(true);
+                                }
+                            }
+                        },
                     }
                 
                 }
@@ -427,6 +454,10 @@ impl AppManagerHandle {
 
     pub async fn set_host_limit(&self, host: String, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
         self.sender.send(AppManagerCommand::SetHostSpeedLimit(host, limit)).await
+    }
+
+    pub async fn remove_host_limit(&self, host: String) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::RemoveHostSpeedLimit(host)).await
     }
 
     pub async fn set_download_limit(&self, download_id: DownloadId, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
