@@ -7,6 +7,7 @@ interface SidebarItemProps {
   badge?: number | string;
   isActive?: boolean;
   onClick?: () => void;
+  onMouseEnter?: () => void;
 }
 
 export function SidebarItem({ 
@@ -14,11 +15,13 @@ export function SidebarItem({
   label, 
   badge, 
   isActive, 
-  onClick 
+  onClick,
+  onMouseEnter,
 }: SidebarItemProps) {
   return (
     <button
       onClick={onClick}
+      onMouseEnter={onMouseEnter}
       className={cn(
         "w-full flex items-center gap-2 px-2 py-0.5 text-[13px] cursor-pointer transition-colors text-muted-foreground hover:bg-accent hover:text-accent-foreground",
         

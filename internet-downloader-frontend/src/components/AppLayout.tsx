@@ -114,12 +114,14 @@ export default function AppLayout({ topBar, sidebarTop, bottomPane, children }: 
                           label="Downloads" 
                           isActive={location.pathname === '/'} 
                           onClick={() => router.navigate({ to: '/' })}
+                          onMouseEnter={() => router.preloadRoute({ to: '/' })}
                         />
                         <SidebarItem 
                           icon={Settings} 
                           label="Settings" 
                           isActive={location.pathname === '/settings'} 
                           onClick={() => router.navigate({ to: '/settings' })}
+                          onMouseEnter={() => router.preloadRoute({ to: '/settings' })}
                         />
                         </div>
                     </ResizablePanel>
