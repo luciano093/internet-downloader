@@ -14,12 +14,14 @@ export function useSetGlobalSettings() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: ({ speed_limit, default_save_path }: { speed_limit?: number | null, default_save_path?: string | null }) => {
-      return fetch(`${API_BASE}/settings`, {
+    mutationFn: async ({ speed_limit, default_save_path }: { speed_limit?: number | null, default_save_path?: string | null }) => {
+      const response = await fetch(`${API_BASE}/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ global_speed_limit: speed_limit, default_save_path }),
-      })
+      });
+
+      if (!response.ok) throw new Error(`Failed to update settings (${response.status})`);
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
   });
@@ -28,12 +30,15 @@ export function useSetGlobalSettings() {
 export function useSetHostSettings() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ host, speed_limit }: { host: string; speed_limit: number | null }) =>
-      fetch(`${API_BASE}/hosts/${host}/settings`, {
+    mutationFn: async ({ host, speed_limit }: { host: string; speed_limit: number | null }) => {
+      const response = await fetch(`${API_BASE}/hosts/${host}/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ speed_limit }),
-      }),
+      });
+
+      if (!response.ok) throw new Error(`Failed to update host settings (${response.status})`);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
   });
 }
@@ -41,8 +46,11 @@ export function useSetHostSettings() {
 export function useRemoveHostSettings() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (host: string) =>
-      fetch(`${API_BASE}/hosts/${host}/settings`, { method: "DELETE" }),
+    mutationFn: async (host: string) => {
+      const response = await fetch(`${API_BASE}/hosts/${host}/settings`, { method: "DELETE" });
+
+      if (!response.ok) throw new Error(`Failed to remove host settings (${response.status})`);
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
   });
 }
