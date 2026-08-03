@@ -11,14 +11,22 @@ export function AddDownloadModal() {
     const isAddModalOpen = activeModal === 'add';
 
     const [urls, setUrls] = useState("");
-    const[savePath, setSavePath] = useState("");
+    const [savePath, setSavePath] = useState("");
+    const [editedSavePath, setEditedSavePath] = useState(false);
     const [startNow, setStartNow] = useState(true);
   
-    const settingsSavePath = settings?.default_save_path ?? "";
-  
     useEffect(() => {
-      setSavePath(settingsSavePath);
-    }, [settingsSavePath]);
+      if (!editedSavePath) {
+        setSavePath(settings?.default_save_path ?? "");
+      }
+    }, [settings?.default_save_path]);
+
+    useEffect(() => {
+      if (isAddModalOpen) {
+        setEditedSavePath(false);
+        setSavePath(settings?.default_save_path ?? "");
+      }
+    }, [isAddModalOpen]);
 
     const handleDownload = () => {
         const linkArray = urls.split('\n').filter(link => link.trim() !== '');
@@ -71,8 +79,11 @@ export function AddDownloadModal() {
                     <input
                         type="text"
                         value={savePath}
-                        onChange={(e) => setSavePath(e.target.value)}
-                        defaultValue="/downloads/completed/"
+                        onChange={(event) => {
+                          setEditedSavePath(true);
+                          setSavePath(event.target.value);
+                        }}
+                        defaultValue={savePath}
                         className="h-8 w-full rounded-sm bg-[#1A1C1E] border border-border px-2.5 text-[13px] text-foreground focus:border-gray-500 focus:outline-none"
                     />
                     </div>
