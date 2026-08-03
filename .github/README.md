@@ -23,7 +23,7 @@ The core download engine is mostly stable and can handle complex downloads (it h
 - [ ] Custom download categories with default paths per category
 
 ### Frontend
-- [ ] Settings page
+- [x] Settings page
 - [ ] Plugin management UI (install, enable/disable, configure, logs)
 
 ### Utils
