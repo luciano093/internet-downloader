@@ -133,12 +133,15 @@ async fn download_stream(State(manager): State<AppManagerHandle>) -> impl IntoRe
     let stream = async_stream::stream! {
         let downloads = manager.get_snapshot().await;
     
-        let snapshot: Vec<DownloadSnapshot> = downloads
+        let mut snapshot: Vec<DownloadSnapshot> = downloads
             .into_iter()
             .map(|(_id, download_snapshot)| {
                 download_snapshot
             })
             .collect();
+
+        // Retaining order is important
+        snapshot.sort_by_key(|download| download.id);
         
         let snapshot_json = serde_json::to_string(&snapshot).unwrap();
 
@@ -165,10 +168,11 @@ async fn download_stream(State(manager): State<AppManagerHandle>) -> impl IntoRe
                 }
                 _ = snapshot_interval.tick() => {
                     let downloads = manager.get_snapshot().await;
-                    let snapshot: Vec<DownloadSnapshot> = downloads
+                    let mut snapshot: Vec<DownloadSnapshot> = downloads
                         .into_iter()
                         .map(|(_id, download_snapshot)| download_snapshot)
                         .collect();
+                    snapshot.sort_by_key(|download| download.id);
 
                     let snapshot_json = serde_json::to_string(&snapshot).unwrap();
 
