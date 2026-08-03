@@ -78,7 +78,9 @@ export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: nu
 
         {/* Search Bar */}
         <div className="absolute inset-0 flex items-center justify-center h-full pointer-events-none">
+          <div className="w-full max-w-md pointer-events-auto">
             <TopBarSearch />
+          </div>
         </div>
 
         {/* Stats */}
