@@ -14,7 +14,7 @@ use crate::app::settings::AppSettings;
 use crate::app::snapshot::AppSnapshotHandler;
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiManagerHandle};
 use crate::app::context::AppContext;
-use crate::download::hosts::DownloadTask;
+use crate::download::hosts::{DownloadTask, parse_host_or_url};
 use crate::download::items::{Download, DownloadId, DownloadItem, FileId};
 use crate::download::supervisor::DownloadHandle;
 use crate::download::verifier::VerifierHandle;
@@ -282,19 +282,12 @@ impl AppManager {
                             self.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                             // host string can either be a host or a url
-                            let host = Url::parse(&host_str)
-                                .ok()
-                                .and_then(|url| url.host().map(|host| host.to_owned()));
-
-                            let host = match host {
-                                Some(host) => host,
-                                None => match Host::parse(&host_str) {
-                                    Ok(host) => host,
-                                    Err(error) => {
-                                        warn!("Invalid host string {}: {}", host_str, error);
-                                        continue;
-                                    }
-                                }
+                            let host = match parse_host_or_url(&host_str) {
+                                Ok(host) => host,
+                                Err(err) => {
+                                    warn!("{}", err);
+                                    continue;
+                                },
                             };
         
                             if let Some(weak_limiter) = self.limiters.host_limits().get(&host) {
@@ -366,20 +359,14 @@ impl AppManager {
                             }
                             self.db_manager.write_app_settings(&app_settings).await.unwrap();
 
-                            let host = Url::parse(&host_str)
-                                .ok()
-                                .and_then(|url| url.host().map(|host| host.to_owned()));
-                            
-                            let host = match host {
-                                Some(host) => host,
-                                None => match Host::parse(&host_str) {
-                                    Ok(host) => host,
-                                    Err(error) => { 
-                                        warn!("Invalid host string {}: {}", host_str, error); 
-                                        continue;
-                                    }
-                                }
+                            let host = match parse_host_or_url(&host_str) {
+                                Ok(host) => host,
+                                Err(err) => {
+                                    warn!("{}", err);
+                                    continue;
+                                },
                             };
+                            
                             if let Some(weak_limiter) = self.limiters.host_limits().get(&host) {
                                 if let Some(live_limiter) = weak_limiter.upgrade() {
                                     live_limiter.set_unlimited(true);
