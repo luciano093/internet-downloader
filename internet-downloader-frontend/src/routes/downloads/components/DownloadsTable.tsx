@@ -3,17 +3,17 @@
 import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from "@tanstack/react-table";
 import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@/components/ui/table";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { cn } from "@/lib/utils";
+import { cn, getDownloadStats } from "@/lib/utils";
 import { useDownloadStore } from "@/stores/downloadStore";
-import type { DownloadItem, FileItem } from "@/downloadTypes";
+import type { DownloadItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import useDownloadSpeed from "../hooks/useDownloadSpeed";
 import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
 
 const SpeedCellContent = ({ download }: { download: DownloadItem }) => {
-    const stats = getFolderStats(download.files);
+    const stats = getDownloadStats(download);
     const isDownloading = download.status?.state === "partial";
-    const speed = useDownloadSpeed(stats.downloadedSize, isDownloading ? "downloading" : "idle");
+    const speed = useDownloadSpeed(stats.downloadedSize, isDownloading);
 
     useEffect(() => {
         console.log(`SpeedCell mounted for ${download.name}`);
@@ -40,36 +40,6 @@ export function formatBytes(bytes: number, decimals = 2) {
     const value = bytes / Math.pow(k, i);
     
     return `${value.toFixed(dm).replace(/\.00$/, '')} ${sizes[i]}`;
-}
-
-    
-export function getFolderStats(files: Record<number, FileItem>) {
-    const allFiles = Object.values(files);
-
-    if (allFiles.length === 0) {
-        return { progress: 0, totalSize: 0, downloadedSize: 0 };
-    }
-
-    let totalBytes = 0;
-    let downloadedBytes = 0;
-
-    allFiles.forEach(file => {
-        const size = typeof file.size === 'number' ? file.size : 0;
-        const downloaded = file.bytes_downloaded || 0;
-
-        totalBytes += size;
-        downloadedBytes += downloaded;
-    });
-
-    const effectiveTotal = Math.max(totalBytes, downloadedBytes);
-
-    const percentage = effectiveTotal === 0 ? 0 : (downloadedBytes / effectiveTotal) * 100;
-
-    return {
-        progress: percentage,
-        totalSize: totalBytes,
-        downloadedSize: downloadedBytes
-    };
 }
 
 const DownloadCell = ({ 
@@ -147,7 +117,7 @@ const columns = [
         size: 100, 
         className: "text-right",
         cell: (download) => {
-            const stats = getFolderStats(download.files);
+            const stats = getDownloadStats(download);
             return <>{formatBytes(stats.totalSize)}</>;
         }
     }),
@@ -156,7 +126,7 @@ const columns = [
         header: "Progress",
         size: 200,
         cell: (download) => {
-            const stats = getFolderStats(download.files);
+            const stats = getDownloadStats(download);
             const displayVal = Math.round(stats.progress); 
 
             return (

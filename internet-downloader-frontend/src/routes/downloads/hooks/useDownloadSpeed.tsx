@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 
-export default function useDownloadSpeed(downloadedSize: number, status: string) {
+export default function useDownloadSpeed(downloadedSize: number, downloading: boolean) {
     const [downloadSpeed, setDownloadSpeed] = useState(0);
     
     const currentSizeRef = useRef(downloadedSize);
-    const statusRef = useRef(status);
+    const statusRef = useRef(downloading);
 
     useEffect(() => {
         currentSizeRef.current = downloadedSize;
-        statusRef.current = status;
-    }, [downloadedSize, status]);
+        statusRef.current = downloading;
+    }, [downloadedSize, downloading]);
 
     const statsHistoryRef = useRef<{time: number, size: number}[]>([]); 
 
@@ -41,7 +41,7 @@ export default function useDownloadSpeed(downloadedSize: number, status: string)
         }, TICK_RATE);
 
         return () => clearInterval(interval);
-    }, [status]);
+    }, [downloading]);
 
     return downloadSpeed;
 }

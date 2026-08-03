@@ -5,15 +5,29 @@ import { useUiStore } from "@/stores/uiStore";
 import { useDownloadStore } from "@/stores/downloadStore";
 import { useMutation } from "@tanstack/react-query";
 import { useSettings } from "@/stores/settingsStore";
+import { getDownloadStats } from "@/lib/utils";
+import useDownloadSpeed from "../hooks/useDownloadSpeed";
 
 export default function DownloadsTopBar() {
     const openModal = useUiStore((state) => state.openModal);
+    const downloads = useDownloadStore(store => store.downloads);
     const selectedId = useDownloadStore((state) => state.selectedId);
     const { data: settings } = useSettings();
   
     const globalSpeedLimit = settings?.global_speed_limit ?? null;
 
     const globalSpeedLimitMbs = globalSpeedLimit ? (globalSpeedLimit / (1024 * 1024)).toFixed(1) : null;
+  
+    const totalDownloadedBytes = Object.values(downloads).reduce((sum, download) => {
+      return sum + getDownloadStats(download).downloadedSize;
+    }, 0);
+
+    const anyDownloading = Object.values(downloads).some(
+      download => download.status?.state === "partial"
+    );
+  
+    const aggregateSpeed = useDownloadSpeed(totalDownloadedBytes, anyDownloading);
+    const speedMbs = aggregateSpeed > 0 ? (aggregateSpeed / (1024 * 1024)).toFixed(1) : null;
   
     const pauseMutation = useMutation({
         mutationFn: async (id: number) => {
@@ -83,7 +97,7 @@ export default function DownloadsTopBar() {
         <div className="flex items-center gap-6 text-[13px] text-gray-400">
             <div className="flex items-center gap-2">
             <ArrowDown className="h-4 w-4 text-blue-500" />
-            <span>16 MB/s</span>
+            <span>{speedMbs ? `${speedMbs} MB/s` : "0 MB/s"}</span>
             </div>
             <div className="flex items-center gap-2">
             <Globe className="h-4 w-4 text-gray-500" />
