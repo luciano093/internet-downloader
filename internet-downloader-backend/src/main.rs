@@ -293,6 +293,7 @@ async fn apply_app_patch(manager: AppManagerHandle, settings: AppSettingsPatch) 
 }
 
 #[derive(Deserialize, Default, Debug)]
+#[serde(default)]
 struct HostSettingsPatch {
     speed_limit: PatchValue<u64>,
 }
@@ -329,6 +330,7 @@ async fn host_settings(State(manager): State<AppManagerHandle>, Path(host): Path
 }
 
 #[derive(Deserialize, Default, Debug)]
+#[serde(default)]
 struct DownloadSettingsPatch {
     speed_limit: PatchValue<u64>,
     file_settings: Option<HashMap<FileId, FileSettingsPatch>>,
@@ -367,6 +369,7 @@ async fn download_settings(State(manager): State<AppManagerHandle>, Path(downloa
 }
 
 #[derive(Deserialize, Default, Debug)]
+#[serde(default)]
 struct FileSettingsPatch {
     speed_limit: PatchValue<u64>,
 }
