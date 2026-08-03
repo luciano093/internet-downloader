@@ -165,11 +165,9 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
             }
 
             if (tableContainerRef.current.contains(event.target as Node)) {
-                console.log("table focused");
                 setTableFocused(true);
             } else {
                 setTableFocused(false);
-                console.log("table not focused");
             }
         };
 

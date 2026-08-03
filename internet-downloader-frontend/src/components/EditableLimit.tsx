@@ -15,7 +15,6 @@ interface EditableBytesLimitProps {
 
 export default function EditableBytesLimit({ value, editing, onEditingChange, onCommit, commitOnBlur: commitOnBlur, placeholder, editingUnit, bytesPerUnit = 1 }: EditableBytesLimitProps) {
   const [draft, setDraft] = useState<string>("");
-  console.log(value)
 
   const start = () => {
     setDraft(value == null ? "" : String(value / bytesPerUnit));

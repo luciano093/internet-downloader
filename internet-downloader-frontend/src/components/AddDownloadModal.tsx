@@ -22,9 +22,6 @@ export function AddDownloadModal() {
 
     const handleDownload = () => {
         const linkArray = urls.split('\n').filter(link => link.trim() !== '');
-        
-        const payload = { urls: linkArray, savePath, startNow };
-        console.log("Ready to send to API:", payload);
 
         for (let url of linkArray) {
             fetch(`http://localhost:3211/downloads`, {
