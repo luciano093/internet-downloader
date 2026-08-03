@@ -1,16 +1,24 @@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useSettings } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export function AddDownloadModal() {
+    const { data: settings } = useSettings();
     const activeModal = useUiStore((state) => state.activeModal);
     const closeModal = useUiStore((state) => state.closeModal);
 
     const isAddModalOpen = activeModal === 'add';
 
     const [urls, setUrls] = useState("");
-    const[savePath, setSavePath] = useState("/downloads/completed/");
+    const[savePath, setSavePath] = useState("");
     const [startNow, setStartNow] = useState(true);
+  
+    const settingsSavePath = settings?.default_save_path ?? "";
+  
+    useEffect(() => {
+      setSavePath(settingsSavePath);
+    }, [settingsSavePath]);
 
     const handleDownload = () => {
         const linkArray = urls.split('\n').filter(link => link.trim() !== '');
