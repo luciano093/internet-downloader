@@ -381,6 +381,14 @@ impl AppManager {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum GetSettingsError {
+    #[error("app manager is unreachable")]
+    ManagerUnreachable,
+    #[error("app manager did not respond")]
+    NoResponse,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppManagerHandle {
     sender: mpsc::Sender<AppManagerCommand>,
@@ -455,12 +463,15 @@ impl AppManagerHandle {
         self.sender.send(AppManagerCommand::SetFileSpeedLimit(download_id, file_id, limit)).await
     }
 
-    pub async fn get_settings(&self) -> AppSettings {
+    pub async fn get_settings(&self) -> Result<AppSettings, GetSettingsError> {
         let (sender, receiver) = oneshot::channel();
         
-        let _ = self.sender.send(AppManagerCommand::GetSettings(sender)).await;
-
-        receiver.await.unwrap()
+        self.sender
+            .send(AppManagerCommand::GetSettings(sender))
+            .await
+            .map_err(|_| GetSettingsError::ManagerUnreachable)?;
+    
+        receiver.await.map_err(|_| GetSettingsError::NoResponse)
     }
 }
 

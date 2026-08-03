@@ -10,13 +10,14 @@ use axum::response::{IntoResponse, Sse};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch};
 use internet_downloader_backend::app::manager::AppManagerHandle;
+use internet_downloader_backend::app::settings::AppSettings;
 use internet_downloader_backend::app::snapshot::AppSnapshotHandler;
 use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
 
 use internet_downloader_backend::download::items::{DownloadId, FileId};
 use reqwest::Method;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tokio::{fs::File, signal};
@@ -238,7 +239,13 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for PatchValue<T> 
 async fn app_settings(State(manager): State<AppManagerHandle>) -> impl IntoResponse {
     debug!( "Received app settings GET request");
 
-    Json(manager.get_settings().await)
+    match manager.get_settings().await {
+        Ok(settings) => Json(settings).into_response(),
+        Err(error) => {
+            tracing::error!("Failed to get settings: {}", error);
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -316,10 +323,9 @@ async fn delete_host_settings(State(manager): State<AppManagerHandle>, Path(host
 async fn host_settings(State(manager): State<AppManagerHandle>, Path(host): Path<String>) -> impl IntoResponse {
     debug!( "Received host settings GET request");
 
-    match manager.get_settings().await.get_host_settings(&host) {
-        Some(host_settings) => Json(host_settings).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    with_settings(&manager, move |settings| {
+        settings.get_host_settings(&host).cloned()
+    }).await
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -355,10 +361,9 @@ async fn apply_download_patch(manager: AppManagerHandle, download_id: DownloadId
 async fn download_settings(State(manager): State<AppManagerHandle>, Path(download_id): Path<DownloadId>) -> impl IntoResponse {
     debug!( "Received download settings GET request");
 
-    match manager.get_settings().await.get_download_settings(download_id) {
-        Some(download_settings) => Json(download_settings).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    with_settings(&manager, move |settings| {
+        settings.get_download_settings(download_id).cloned()
+    }).await
 }
 
 #[derive(Deserialize, Default, Debug)]
@@ -387,15 +392,28 @@ async fn apply_file_patch(manager: AppManagerHandle, download_id: DownloadId, fi
 async fn file_settings(State(manager): State<AppManagerHandle>, Path((download_id, file_id)): Path<(DownloadId, FileId)>) -> impl IntoResponse {
     debug!( "Received file settings GET request");
 
-    let app_settings = manager.get_settings().await;
-    let file_settings = app_settings
-        .get_download_settings(download_id)
-        .and_then(|download_settings| {
-            download_settings.get_file_settings(&file_id)
-        });
+    with_settings(&manager, move |settings| {
+        settings
+            .get_download_settings(download_id)
+            .and_then(move |download_settings| {
+                download_settings.get_file_settings(&file_id).cloned()
+            })
+    }).await
+}
 
-    match file_settings {
-        Some(file_settings) => Json(file_settings).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+async fn with_settings<F, T>(manager: &AppManagerHandle, f: F) -> impl IntoResponse + use<F, T>
+where
+    T: Serialize,
+    F: FnOnce(&AppSettings) -> Option<T>,
+{
+    match manager.get_settings().await {
+        Ok(settings) => match f(&settings) {
+            Some(value) => Json(value).into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        },
+        Err(error) => {
+            tracing::error!("Failed to get settings: {}", error);
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
     }
 }
