@@ -5,9 +5,11 @@ import EditableBytesLimit from '@/components/EditableLimit';
 interface AddHostRuleRowProps {
   onAdd: (host: string, speed_limit: number | null) => void,
   onCancel: () => void,
+  isPending?: boolean,
+  error?: string,
 }
 
-function AddHostRuleRow({ onAdd, onCancel }: AddHostRuleRowProps) {
+function AddHostRuleRow({ onAdd, onCancel, isPending, error }: AddHostRuleRowProps) {
   const addRowRef = useRef<HTMLTableRowElement>(null);
   const [newHostName, setNewHostName] = useState("");
   const [newHostLimit, setNewHostLimit] = useState("");
@@ -49,6 +51,13 @@ function AddHostRuleRow({ onAdd, onCancel }: AddHostRuleRowProps) {
   }, []);
 
   return <>
+    {error && (
+      <tr>
+        <td colSpan={3} className="py-1 px-3 text-[11px] text-destructive">
+          {error}
+        </td>
+      </tr>
+    )}
     <tr ref={addRowRef} className="border-t border-border">
       <td className="py-1.5 px-3 border-r border-border">
         <input
@@ -59,6 +68,7 @@ function AddHostRuleRow({ onAdd, onCancel }: AddHostRuleRowProps) {
           autoFocus
           className="w-full bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
           onKeyDown={handleAddKeyDown}
+          disabled={isPending}
         />
       </td>
       <td className="py-1.5 px-3 text-right">
@@ -71,6 +81,7 @@ function AddHostRuleRow({ onAdd, onCancel }: AddHostRuleRowProps) {
             value={newHostLimit}
             onChange={(event) => setNewHostLimit(event.target.value)}
             onKeyDown={handleAddKeyDown}
+            disabled={isPending}
             className="w-20 bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
           />
           <span className="text-muted text-[11px]">MB/s</span>
@@ -80,18 +91,24 @@ function AddHostRuleRow({ onAdd, onCancel }: AddHostRuleRowProps) {
   </>
 }
 
-function HostRuleRow({ host, speedLimit, onCommit, onDelete }: {
+function HostRuleRow({ host, speedLimit, onCommit, onDelete, isDeleting, deleteError }: {
   host: string;
   speedLimit: number | null;
   onCommit: (host: string, speedLimit: number | null) => void;
   onDelete: (host: string) => void;
+  isDeleting?: boolean;
+  deleteError?: string;
 }) {
   const [isEditing, setIsEditing] = useState(false);
 
   return (
     <tr key={host} className="group border-t border-border hover:text-foreground hover:bg-accent">
-      <td className="py-1.5 px-3 border-r border-border text-foreground">{host}</td>
-      
+      <td className="py-1.5 px-3 border-r border-border text-foreground">
+        {host}
+        {deleteError && (
+          <span className="ml-2 text-[11px] text-destructive">Failed to remove</span>
+        )}
+      </td>
       <td className="py-1.5 px-3 text-right border-r border-border">
         <EditableBytesLimit
           value={speedLimit}
@@ -109,7 +126,7 @@ function HostRuleRow({ host, speedLimit, onCommit, onDelete }: {
           className="opacity-0 group-hover:opacity-100 text-muted hover:text-accent-foreground text-xs cursor-pointer"
           title="Remove rule"
         >
-          x
+          {isDeleting ? "..." : "x"}
         </button>
       </td>
     </tr>
@@ -176,11 +193,20 @@ export function HostRulesTable() {
             <AddHostRuleRow
               onAdd={onAdd}
               onCancel={onCancel}
+              isPending={setHostLimit.isPending}
+              error={setHostLimit.error?.message}
             />
           )}
           
           {Object.entries(hostSettings).map(([host, hostSetting]) => (
-            <HostRuleRow host={host} speedLimit={hostSetting.speed_limit} onCommit={onAdd}  onDelete={onDelete} />
+            <HostRuleRow
+              host={host}
+              speedLimit={hostSetting.speed_limit}
+              onCommit={onAdd}
+              onDelete={onDelete}
+              isDeleting={removeHostLimit.isPending && removeHostLimit.variables === host}
+              deleteError={removeHostLimit.isError && removeHostLimit.variables === host ? removeHostLimit.error?.message : undefined}
+            />
           ))}
         </tbody>
       </table>
