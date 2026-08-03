@@ -48,7 +48,7 @@ export function useSetHostSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ host, speed_limit }: { host: string; speed_limit: number | null }) => {
-      const response = await fetch(`${API_BASE}/hosts/${host}/settings`, {
+      const response = await fetch(`${API_BASE}/hosts/${encodeURIComponent(host)}/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ speed_limit }),
@@ -64,7 +64,7 @@ export function useRemoveHostSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (host: string) => {
-      const response = await fetch(`${API_BASE}/hosts/${host}/settings`, { method: "DELETE" });
+      const response = await fetch(`${API_BASE}/hosts/${encodeURIComponent(host)}/settings`, { method: "DELETE" });
 
       if (!response.ok) throw new Error(`Failed to remove host settings (${response.status})`);
     },
