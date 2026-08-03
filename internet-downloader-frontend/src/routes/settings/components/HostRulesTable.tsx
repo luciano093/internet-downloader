@@ -200,6 +200,7 @@ export function HostRulesTable() {
           
           {Object.entries(hostSettings).map(([host, hostSetting]) => (
             <HostRuleRow
+              key={host}
               host={host}
               speedLimit={hostSetting.speed_limit}
               onCommit={onAdd}
