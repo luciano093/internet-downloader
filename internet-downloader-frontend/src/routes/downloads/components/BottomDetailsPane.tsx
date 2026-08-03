@@ -2,8 +2,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
 import { useDownloadStore } from "@/stores/downloadStore";
 import type { ReactNode } from "react";
-import { formatBytes, getFolderStats } from "./DownloadsTable";
+import { formatBytes } from "./DownloadsTable";
 import FileTree from "./FileTree";
+import { getDownloadStats } from "@/lib/utils";
 
 function DetailsPaneTab({ value, children }: { value: string, children: ReactNode }) {
     return <>
@@ -60,7 +61,7 @@ export default function BottomDetailsPane() {
                         </div>
 
                         <div className="text-right pr-6 text-foreground/50 font-medium">Size:</div>
-                        <div className="text-foreground">{formatBytes(getFolderStats(download.files).totalSize)}</div>
+                        <div className="text-foreground">{formatBytes(getDownloadStats(download).totalSize)}</div>
                         
                         <div className="text-right pr-6 text-foreground/50 font-medium">Save Path:</div>
                         <div className="text-foreground truncate">/downloads/completed/</div>

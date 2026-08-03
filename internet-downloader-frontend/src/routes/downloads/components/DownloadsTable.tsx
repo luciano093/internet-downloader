@@ -7,21 +7,7 @@ import { cn, getDownloadStats } from "@/lib/utils";
 import { useDownloadStore } from "@/stores/downloadStore";
 import type { DownloadItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import useDownloadSpeed from "../hooks/useDownloadSpeed";
 import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
-
-const SpeedCellContent = ({ download }: { download: DownloadItem }) => {
-    const stats = getDownloadStats(download);
-    const isDownloading = download.status?.state === "partial";
-    const speed = useDownloadSpeed(stats.downloadedSize, isDownloading);
-
-    useEffect(() => {
-        console.log(`SpeedCell mounted for ${download.name}`);
-        return () => console.log(`SpeedCell unmounted for ${download.name}`);
-    },[]);
-
-    return <span>{formatBytes(speed)}/s</span>;
-};
 
 export function formatBytes(bytes: number, decimals = 2) {
     if (bytes === 0) return '0 B';
@@ -95,7 +81,7 @@ function createColumn({
   });
 }
 
-const columns = [
+const columns = (speeds: Record<number, number>) => [
     createColumn({ id: "name", header: "Name", cell: (download) =>
     {
       const isDownloading = download.status.state === "partial";
@@ -144,16 +130,18 @@ const columns = [
         header: "Speed", 
         size: 120, 
         className: "text-right",
-        cell: (download) => <SpeedCellContent download={download} />
+        cell: (download) => <span>{formatBytes(speeds[download.id] ?? 0)}/s</span>
     }),
     createColumn({ id: "eta", header: "ETA", size: 120, className: "text-right"}),
     createColumn({ id: "limit", header: "Limit", size: 120, className: "text-right"}),
 ];
 
-export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
+export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[]; speeds: Record<number, number> }) {
+  const memoizedColumns = useMemo(() => columns(speeds), [speeds]);
+  
   const table = useReactTable({
     data: downloadIds,
-    columns,
+    columns: memoizedColumns,
     getCoreRowModel: getCoreRowModel(),
     columnResizeMode: "onChange",
     getRowId: (originalRow) => String(originalRow)

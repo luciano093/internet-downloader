@@ -7,6 +7,7 @@ import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
 import BottomDetailsPane from './downloads/components/BottomDetailsPane'
 import { getFilterCategory } from './downloads/lib/filters'
+import { useDownloadSpeeds } from './downloads/hooks/useDownloadSpeeds'
 
 export const Route = createFileRoute('/')({
   component: Index,
@@ -20,6 +21,7 @@ function Index() {
   const selectedId = useDownloadStore((store) => store.selectedId);
   const statusFilter = useDownloadStore((store) => store.statusFilter);
   const hostFilter = useDownloadStore((store) => store.hostFilter);
+  const speedTracker = useDownloadSpeeds();
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -84,11 +86,11 @@ function Index() {
 
     return <>
       <AppLayout 
-        topBar={<DownloadsTopBar />} 
+        topBar={<DownloadsTopBar aggregateSpeed={speedTracker.aggregateSpeed} />} 
         sidebarTop={<DownloadsSidebar />}
         bottomPane={selectedId != null ? <BottomDetailsPane /> : undefined}
       >
-        <DownloadsTable downloadIds={filteredIds} />
+        <DownloadsTable downloadIds={filteredIds} speeds={speedTracker.speeds} />
       </AppLayout>
     </>
 }
