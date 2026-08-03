@@ -1,4 +1,4 @@
-import { Plus, Play, Pause, X, ArrowDown, Globe } from "lucide-react";
+import { Plus, Play, Pause, X, Globe, Download } from "lucide-react";
 import { TopBarButton } from "@/components/TopBarButton";
 import TopBarSearch from "@/components/TopBarSearch";
 import { useUiStore } from "@/stores/uiStore";
@@ -84,7 +84,7 @@ export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: nu
         {/* Stats */}
         <div className="flex items-center gap-6 text-[13px] text-gray-400">
             <div className="flex items-center gap-2">
-            <ArrowDown className="h-4 w-4 text-blue-500" />
+            <Download className="h-4 w-4 text-blue-500" />
             <span>{speedMbs ? `${speedMbs} MB/s` : "0 MB/s"}</span>
             </div>
             <div className="flex items-center gap-2">
