@@ -16,10 +16,13 @@ function Settings() {
   const setGlobalSettings = useSetGlobalSettings();
 
   const [savePath, setSavePath] = useState(settings?.default_save_path);
-  const [editing, setEditing] = useState(false);
+  const [editingLimit, setEditingLimit] = useState(false);
+  const [editingSavePath, setEditingSavePath] = useState(false);
 
   useEffect(() => {
-    setSavePath(settings?.default_save_path);
+    if (!editingSavePath) {
+      setSavePath(settings?.default_save_path);
+    }
   }, [settings?.default_save_path]);
 
   const globalLimit = settings?.global_speed_limit ?? null;
@@ -40,8 +43,8 @@ function Settings() {
                 <span className="text-foreground">Global Bandwidth Limit</span>
                 <EditableBytesLimit
                   value={globalLimit}
-                  editing={editing}
-                  onEditingChange={setEditing}
+                  editing={editingLimit}
+                  onEditingChange={setEditingLimit}
                   editingUnit='MB/s'
                   bytesPerUnit={1024 * 1024}
                   onCommit={(bytes) => setGlobalSettings.mutate({ speed_limit: bytes })}
@@ -62,12 +65,21 @@ function Settings() {
                   <input
                     type="text"
                     value={savePath ?? ""}
-                    onChange={(event) => setSavePath(event.target.value)}
+                    onChange={(event) => {
+                      setEditingSavePath(true);
+                      setSavePath(event.target.value);
+                    }}
+                    onBlur={() => {
+                      setEditingSavePath(false);
+                    }}
                     placeholder="/downloads/completed/"
                     className="w-48 bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 rounded-sm text-xs font-mono"
                   />
                   <button
-                    onClick={() => setGlobalSettings.mutate({ default_save_path: savePath })}
+                    onClick={() => {
+                      setEditingSavePath(false);
+                      setGlobalSettings.mutate({ default_save_path: savePath });
+                    }}
                     className="text-brand hover:opacity-80 text-[11px] cursor-pointer"
                   >
                     Save
