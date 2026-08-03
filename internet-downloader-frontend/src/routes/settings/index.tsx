@@ -1,7 +1,7 @@
 import AppLayout from '@/components/AppLayout';
 import { createFileRoute } from '@tanstack/react-router'
 import { useSettings, useSetGlobalSettings } from '@/stores/settingsStore';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { HostRulesTable } from './components/HostRulesTable';
 import EditableBytesLimit from '@/components/EditableLimit';
 import SettingsSidebar from './components/SettingsSidebar';
@@ -17,6 +17,10 @@ function Settings() {
 
   const [savePath, setSavePath] = useState(settings?.default_save_path);
   const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    setSavePath(settings?.default_save_path);
+  }, [settings?.default_save_path]);
 
   const globalLimit = settings?.global_speed_limit ?? null;
 
