@@ -27,6 +27,23 @@ export function useSetGlobalSettings() {
   });
 }
 
+export function useSetDefaultSavePath() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: async (default_save_path: string | null) => {
+      const response = await fetch(`${API_BASE}/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ default_save_path }),
+      });
+
+      if (!response.ok) throw new Error(`Failed to update default save path (${response.status})`);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
+  });
+}
+
 export function useSetHostSettings() {
   const queryClient = useQueryClient();
   return useMutation({

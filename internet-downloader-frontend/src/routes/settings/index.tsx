@@ -1,6 +1,6 @@
 import AppLayout from '@/components/AppLayout';
 import { createFileRoute } from '@tanstack/react-router'
-import { useSettings, useSetGlobalSettings } from '@/stores/settingsStore';
+import { useSettings, useSetGlobalSettings, useSetDefaultSavePath } from '@/stores/settingsStore';
 import { useEffect, useState } from 'react';
 import { HostRulesTable } from './components/HostRulesTable';
 import EditableBytesLimit from '@/components/EditableLimit';
@@ -14,14 +14,15 @@ export const Route = createFileRoute('/settings/')({
 function Settings() {
   const { data: settings } = useSettings();
   const setGlobalSettings = useSetGlobalSettings();
+  const setDefaultSavePath = useSetDefaultSavePath();
 
-  const [savePath, setSavePath] = useState(settings?.default_save_path);
+  const [savePath, setSavePath] = useState(settings?.default_save_path ?? null);
   const [editingLimit, setEditingLimit] = useState(false);
   const [editingSavePath, setEditingSavePath] = useState(false);
 
   useEffect(() => {
     if (!editingSavePath) {
-      setSavePath(settings?.default_save_path);
+      setSavePath(settings?.default_save_path ?? null);
     }
   }, [settings?.default_save_path]);
 
@@ -50,6 +51,11 @@ function Settings() {
                   onCommit={(bytes) => setGlobalSettings.mutate({ speed_limit: bytes })}
                   commitOnBlur />
               </div>
+              {setGlobalSettings.isError && (
+                <p className="text-[11px] text-destructive mt-1">
+                  Failed to save limit. {setGlobalSettings.error?.message}
+                </p>
+              )}
               <p className="text-[11px] text-muted mt-1">
                 {globalLimit ? "Click the value to change or remove the limit." : "Click the value to set a global download speed limit."}
               </p>
@@ -78,14 +84,20 @@ function Settings() {
                   <button
                     onClick={() => {
                       setEditingSavePath(false);
-                      setGlobalSettings.mutate({ default_save_path: savePath });
+                      setDefaultSavePath.mutate(savePath);
                     }}
                     className="text-brand hover:opacity-80 text-[11px] cursor-pointer"
+                    disabled={setDefaultSavePath.isPending}
                   >
                     Save
                   </button>
                 </div>
               </div>
+              {setDefaultSavePath.isError && (
+                <p className="text-[11px] text-destructive mt-1">
+                  Failed to save path. {setDefaultSavePath.error?.message}
+                </p>
+              )}
               <p className="text-[11px] text-muted mt-1">Default location where files will be downloaded.</p>
             </div>
           </section>
