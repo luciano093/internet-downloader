@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { HostRulesTable } from './components/HostRulesTable';
 import EditableBytesLimit from '@/components/EditableLimit';
 import SettingsSidebar from './components/SettingsSidebar';
+import SettingsTopBar from './components/SettingsTopBar';
 
 export const Route = createFileRoute('/settings/')({
   component: Settings,
@@ -20,7 +21,7 @@ function Settings() {
   const globalLimit = settings?.global_speed_limit ?? null;
 
   return (
-    <AppLayout sidebarTop={<SettingsSidebar />}>
+    <AppLayout topBar={<SettingsTopBar />} sidebarTop={<SettingsSidebar />}>
       <div className="flex-1 overflow-auto bg-background">
         <div className="max-w-4xl mx-auto p-6 space-y-8 text-xs">
           

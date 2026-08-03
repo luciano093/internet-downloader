@@ -31,11 +31,11 @@ export default function DownloadsTopBar() {
         },
     });
 
-    return (
-        <div className="flex w-full items-center h-full">
+  return (
+      <div className="flex w-full items-center h-full relative">
         
         {/* Buttons */}
-        <div className="flex items-center h-full">
+        <div className="flex flex-1 items-center h-full">
             <TopBarButton 
             icon={<Plus className="h-4 w-4"/>} 
             label="Add" 
@@ -75,7 +75,7 @@ export default function DownloadsTopBar() {
         </div>
 
         {/* Search Bar */}
-        <div className="flex flex-1 items-center justify-center h-full">
+        <div className="absolute inset-0 flex items-center justify-center h-full pointer-events-none">
             <TopBarSearch />
         </div>
 
@@ -91,6 +91,6 @@ export default function DownloadsTopBar() {
             </div>
         </div>
 
-        </div>
+      </div>
     );
 }
