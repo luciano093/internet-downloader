@@ -67,9 +67,13 @@ export const useDownloadStore = create<DownloadState>()(
 
         applyDelta: (delta) => set((state) => {
             if (delta.action === "added") {
-                state.downloads[delta.id] = delta.download as DownloadItem;
+              if (!state.downloadIds.includes(delta.id)) {
                 state.downloadIds.push(delta.id);
-                return;
+              }   
+              
+              state.downloads[delta.id] = delta.download as DownloadItem;
+              
+              return;
             }
 
             if (delta.action === "deleted") {
