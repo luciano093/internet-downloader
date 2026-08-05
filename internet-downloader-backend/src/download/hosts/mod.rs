@@ -6,6 +6,7 @@ use reqwest::Client;
 use rquickjs::{Class, Ctx, FromJs, JsLifetime, prelude::This};
 use serde::Deserialize;
 use tracing::debug;
+use url::{Host, Url};
 
 #[derive(Debug)]
 pub struct DownloadTask {
@@ -210,4 +211,28 @@ impl Utils {
     pub fn log(&self, msg: String) {
         debug!("[PLUGIN] {}", msg);
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum HostParseError {
+    #[error("invalid host or URL string: {0}")]
+    InvalidHost(String),
+}
+
+pub fn parse_host_or_url(host_str: &str) -> Result<Host, HostParseError> {
+    let host = Url::parse(&host_str)
+        .ok()
+        .and_then(|url| url.host().map(|host| host.to_owned()));
+    
+    let host = match host {
+        Some(host) => host,
+        None => match Host::parse(&host_str) {
+            Ok(host) => host,
+            Err(error) => { 
+                return Err(HostParseError::InvalidHost(error.to_string()));
+            }
+        }
+    };
+
+    Ok(host)
 }

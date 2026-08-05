@@ -5,9 +5,9 @@ import { useDownloadStore } from '@/stores/downloadStore'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import BottomDetailsPane from './downloads/components/BottomDetailsPane'
 import { getFilterCategory } from './downloads/lib/filters'
+import { useDownloadSpeeds } from './downloads/hooks/useDownloadSpeeds'
 
 export const Route = createFileRoute('/')({
   component: Index,
@@ -20,6 +20,8 @@ function Index() {
   const downloads = useDownloadStore((store) => store.downloads);
   const selectedId = useDownloadStore((store) => store.selectedId);
   const statusFilter = useDownloadStore((store) => store.statusFilter);
+  const hostFilter = useDownloadStore((store) => store.hostFilter);
+  const speedTracker = useDownloadSpeeds();
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
@@ -69,34 +71,26 @@ function Index() {
       return false;
     }
 
-    const downloadCategory = getFilterCategory(download.status, download.is_paused);
+    const downloadStatusCategory = getFilterCategory(download.status, download.is_paused);
 
     // We either get all downloads that match our current status filter
     // or otherwise, if the statusFilter is not set, we set this to true
-    const matchesStatus = statusFilter === downloadCategory || statusFilter == null;
+    const matchesStatus = statusFilter === downloadStatusCategory || statusFilter == null;
 
-    return matchesStatus;
-  }), [downloadIds, downloads, statusFilter]);
+    const matchesHost = hostFilter == null || Object.values(download.files).some(
+      file => file.host === hostFilter
+    );
+
+    return matchesStatus && matchesHost;
+  }), [downloadIds, downloads, statusFilter, hostFilter]);
 
     return <>
-      <AppLayout
-        topBar={<DownloadsTopBar />} 
+      <AppLayout 
+        topBar={<DownloadsTopBar aggregateSpeed={speedTracker.aggregateSpeed} />} 
         sidebarTop={<DownloadsSidebar />}
+        bottomPane={selectedId != null ? <BottomDetailsPane /> : undefined}
       >
-        <ResizablePanelGroup orientation='vertical'>
-          <ResizablePanel>
-            <DownloadsTable downloadIds={filteredIds} />
-          </ResizablePanel>
-          { selectedId &&
-            <>
-              <ResizableHandle className="bg-border" />
-
-              <ResizablePanel>
-                <BottomDetailsPane />
-              </ResizablePanel>
-            </>
-          }
-       </ResizablePanelGroup>
+        <DownloadsTable downloadIds={filteredIds} speeds={speedTracker.speeds} />
       </AppLayout>
     </>
 }

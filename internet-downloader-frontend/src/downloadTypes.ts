@@ -52,6 +52,7 @@ export type FileItem = {
   active_operation: ActiveOperation | null,
   is_paused: boolean,
   url: string;
+  host: string;
   hash: string | null;
   size: "unknown" | number;
   bytes_downloaded: number;
@@ -75,7 +76,6 @@ export interface DownloadItem {
   id: number,
   name: string,
   url: string;
-  host: string;
   status: DownloadStatus;
   active_operation: ActiveOperation | null,
   is_paused: boolean,
@@ -92,6 +92,7 @@ export type FileItemDiff = {
   active_operation?: ActiveOperation | null,
   is_paused?: boolean,
   url?: string;
+  host?: string;
   hash?: string | null;
   size?: "unknown" | number;
   bytes_downloaded?: number;
@@ -115,7 +116,6 @@ export interface DownloadItemDiff {
   status?: DownloadStatus,
   active_operation?: ActiveOperation | null,
   is_paused?: boolean,
-  host?: string,
   relative_path?: string,
   files: Record<number, FileItemDiff>;
   folders: Record<number, FolderItemDiff>;
@@ -132,3 +132,10 @@ export type DeltaEvent = {
   action: "changes"
   changes: Record<number, DownloadItemDiff>
 }
+
+export type AppSettings = {
+  global_speed_limit: number | null;
+  default_save_path: string | null;
+  download_settings: Record<number, { speed_limit: number | null }>;
+  host_settings: Record<string, { speed_limit: number | null }>;
+};

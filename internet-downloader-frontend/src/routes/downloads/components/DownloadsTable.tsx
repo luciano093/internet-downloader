@@ -3,25 +3,11 @@
 import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from "@tanstack/react-table";
 import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@/components/ui/table";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { cn } from "@/lib/utils";
+import { cn, getDownloadStats } from "@/lib/utils";
 import { useDownloadStore } from "@/stores/downloadStore";
-import type { DownloadItem, FileItem } from "@/downloadTypes";
+import type { DownloadItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import useDownloadSpeed from "../hooks/useDownloadSpeed";
 import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
-
-const SpeedCellContent = ({ download }: { download: DownloadItem }) => {
-    const stats = getFolderStats(download.files);
-    const isDownloading = download.status?.state === "partial";
-    const speed = useDownloadSpeed(stats.downloadedSize, isDownloading ? "downloading" : "idle");
-
-    useEffect(() => {
-        console.log(`SpeedCell mounted for ${download.name}`);
-        return () => console.log(`SpeedCell unmounted for ${download.name}`);
-    },[]);
-
-    return <span>{formatBytes(speed)}/s</span>;
-};
 
 export function formatBytes(bytes: number, decimals = 2) {
     if (bytes === 0) return '0 B';
@@ -40,36 +26,6 @@ export function formatBytes(bytes: number, decimals = 2) {
     const value = bytes / Math.pow(k, i);
     
     return `${value.toFixed(dm).replace(/\.00$/, '')} ${sizes[i]}`;
-}
-
-    
-export function getFolderStats(files: Record<number, FileItem>) {
-    const allFiles = Object.values(files);
-
-    if (allFiles.length === 0) {
-        return { progress: 0, totalSize: 0, downloadedSize: 0 };
-    }
-
-    let totalBytes = 0;
-    let downloadedBytes = 0;
-
-    allFiles.forEach(file => {
-        const size = typeof file.size === 'number' ? file.size : 0;
-        const downloaded = file.bytes_downloaded || 0;
-
-        totalBytes += size;
-        downloadedBytes += downloaded;
-    });
-
-    const effectiveTotal = Math.max(totalBytes, downloadedBytes);
-
-    const percentage = effectiveTotal === 0 ? 0 : (downloadedBytes / effectiveTotal) * 100;
-
-    return {
-        progress: percentage,
-        totalSize: totalBytes,
-        downloadedSize: downloadedBytes
-    };
 }
 
 const DownloadCell = ({ 
@@ -125,7 +81,7 @@ function createColumn({
   });
 }
 
-const columns = [
+const columns = (speeds: Record<number, number>) => [
     createColumn({ id: "name", header: "Name", cell: (download) =>
     {
       const isDownloading = download.status.state === "partial";
@@ -147,7 +103,7 @@ const columns = [
         size: 100, 
         className: "text-right",
         cell: (download) => {
-            const stats = getFolderStats(download.files);
+            const stats = getDownloadStats(download);
             return <>{formatBytes(stats.totalSize)}</>;
         }
     }),
@@ -156,7 +112,7 @@ const columns = [
         header: "Progress",
         size: 200,
         cell: (download) => {
-            const stats = getFolderStats(download.files);
+            const stats = getDownloadStats(download);
             const displayVal = Math.round(stats.progress); 
 
             return (
@@ -174,16 +130,19 @@ const columns = [
         header: "Speed", 
         size: 120, 
         className: "text-right",
-        cell: (download) => <SpeedCellContent download={download} />
+        cell: (download) => <span>{formatBytes(speeds[download.id] ?? 0)}/s</span>
     }),
     createColumn({ id: "eta", header: "ETA", size: 120, className: "text-right"}),
     createColumn({ id: "limit", header: "Limit", size: 120, className: "text-right"}),
 ];
 
-export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
+export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[]; speeds: Record<number, number> }) {
+  const memoizedColumns = useMemo(() => columns(speeds), [speeds]);
+  const columnCount = memoizedColumns.length;
+  
   const table = useReactTable({
     data: downloadIds,
-    columns,
+    columns: memoizedColumns,
     getCoreRowModel: getCoreRowModel(),
     columnResizeMode: "onChange",
     getRowId: (originalRow) => String(originalRow)
@@ -207,11 +166,9 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
             }
 
             if (tableContainerRef.current.contains(event.target as Node)) {
-                console.log("table focused");
                 setTableFocused(true);
             } else {
                 setTableFocused(false);
-                console.log("table not focused");
             }
         };
 
@@ -387,7 +344,7 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
         <TableBody>
             {paddingTop > 0 && (
                 <TableRow>
-                <TableCell style={{ height: `${paddingTop}px` }} colSpan={columns.length} />
+                <TableCell style={{ height: `${paddingTop}px` }} colSpan={columnCount} />
                 </TableRow>
             )}
 
@@ -434,7 +391,7 @@ export function DownloadsTable({ downloadIds }: { downloadIds: number[] }) {
 
           {paddingBottom > 0 && (
             <TableRow>
-              <TableCell style={{ height: `${paddingBottom}px` }} colSpan={columns.length} />
+              <TableCell style={{ height: `${paddingBottom}px` }} colSpan={columnCount} />
             </TableRow>
           )}
         </TableBody>

@@ -47,9 +47,6 @@ export default function FileTree({ download }: { download: DownloadItem }) {
     // Downloads always have exactly one root folder or one root file, never multiple ones
     const rootFolder = Object.values(download.folders).filter(folder => folder.parent_id == null)[0];
     const rootFile = Object.values(download.files).filter(file => file.parent_id == null)[0];
-
-    console.log(rootFolder);
-    console.log(rootFile);
     
     const stack: VirtualDownloadItem[] = [];
     
@@ -119,10 +116,7 @@ export default function FileTree({ download }: { download: DownloadItem }) {
           }}
         >
           {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-            console.log(virtualRow);
             const item = virtualFileList[virtualRow.index];
-            console.log(item);
-            
 
             if (item.type === "folder") {
               const folder = download.folders[item.id];

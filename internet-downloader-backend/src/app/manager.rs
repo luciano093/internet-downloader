@@ -14,7 +14,7 @@ use crate::app::settings::AppSettings;
 use crate::app::snapshot::AppSnapshotHandler;
 use crate::client_state_manager::{DownloadSnapshot, FrontendMessage, UiManagerHandle};
 use crate::app::context::AppContext;
-use crate::download::hosts::DownloadTask;
+use crate::download::hosts::{DownloadTask, parse_host_or_url};
 use crate::download::items::{Download, DownloadId, DownloadItem, FileId};
 use crate::download::supervisor::DownloadHandle;
 use crate::download::verifier::VerifierHandle;
@@ -45,9 +45,12 @@ pub enum AppManagerCommand {
     ResumeDownload(DownloadId),
     Shutdown,
     SetGlobalSpeedLimit(Option<u64>),
+    SetDefaultSavePath(Option<String>),
     SetHostSpeedLimit(String, Option<u64>), // String can be a hostname or url
     SetDownloadSpeedLimit(DownloadId, Option<u64>),
     SetFileSpeedLimit(DownloadId, FileId, Option<u64>),
+    GetSettings(oneshot::Sender<AppSettings>),
+    RemoveHostSpeedLimit(String), // String can be a hostname or url
 }
 
 pub struct AppManager {
@@ -91,7 +94,6 @@ impl AppManager {
         let network_config = NetworkConfig::default();
         let client = build_global_client(&network_config);
 
-        // We load the stored app settings
         let mut app_settings = self.db_manager
             .load_app_settings()
             .await
@@ -175,7 +177,7 @@ impl AppManager {
                             let download_id = download.id();
     
                             let download_settings = app_settings.get_download_settings(download_id);
-                            let download_limiter = Arc::new(DownloadLimiterGroup::from_settings(download_settings.as_ref()));
+                            let download_limiter = Arc::new(DownloadLimiterGroup::from_settings(download_settings));
             
                             for (&file_id, _file) in download.files() {
                                 let limiter = BandwidthLimiter::new(0);
@@ -280,19 +282,12 @@ impl AppManager {
                             self.db_manager.write_app_settings(&app_settings).await.unwrap();
 
                             // host string can either be a host or a url
-                            let host = Url::parse(&host_str)
-                                .ok()
-                                .and_then(|url| url.host().map(|host| host.to_owned()));
-
-                            let host = match host {
-                                Some(host) => host,
-                                None => match Host::parse(&host_str) {
-                                    Ok(host) => host,
-                                    Err(error) => {
-                                        warn!("Invalid host string {}: {}", host_str, error);
-                                        continue;
-                                    }
-                                }
+                            let host = match parse_host_or_url(&host_str) {
+                                Ok(host) => host,
+                                Err(err) => {
+                                    warn!("{}", err);
+                                    continue;
+                                },
                             };
         
                             if let Some(weak_limiter) = self.limiters.host_limits().get(&host) {
@@ -350,12 +345,48 @@ impl AppManager {
                                 warn!("Tried to set the file speed limit for a non-existent file. Download id: {}, file id: {}", download_id, file_id);
                             }
                         },
+                        AppManagerCommand::GetSettings(sender) => {
+                            let _ = sender.send(app_settings.clone());
+                        },
+                        AppManagerCommand::SetDefaultSavePath(default_save_path) => {
+                            app_settings.set_default_save_path(default_save_path);
+    
+                            self.db_manager.write_app_settings(&app_settings).await.unwrap();
+                        },
+                        AppManagerCommand::RemoveHostSpeedLimit(host_str) => {
+                            if let None = app_settings.host_settings.remove(&host_str) {
+                                warn!("Host string {} didn't have a saved speed limit", host_str);
+                            }
+                            self.db_manager.write_app_settings(&app_settings).await.unwrap();
+
+                            let host = match parse_host_or_url(&host_str) {
+                                Ok(host) => host,
+                                Err(err) => {
+                                    warn!("{}", err);
+                                    continue;
+                                },
+                            };
+                            
+                            if let Some(weak_limiter) = self.limiters.host_limits().get(&host) {
+                                if let Some(live_limiter) = weak_limiter.upgrade() {
+                                    live_limiter.set_unlimited(true);
+                                }
+                            }
+                        },
                     }
                 
                 }
             }
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GetSettingsError {
+    #[error("app manager is unreachable")]
+    ManagerUnreachable,
+    #[error("app manager did not respond")]
+    NoResponse,
 }
 
 #[derive(Debug, Clone)]
@@ -411,9 +442,17 @@ impl AppManagerHandle {
     pub async fn set_global_limit(&self, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
         self.sender.send(AppManagerCommand::SetGlobalSpeedLimit(limit)).await
     }
+    
+    pub async fn set_default_save_path(&self, default_save_path: Option<String>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::SetDefaultSavePath(default_save_path)).await
+    }
 
     pub async fn set_host_limit(&self, host: String, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
         self.sender.send(AppManagerCommand::SetHostSpeedLimit(host, limit)).await
+    }
+
+    pub async fn remove_host_limit(&self, host: String) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::RemoveHostSpeedLimit(host)).await
     }
 
     pub async fn set_download_limit(&self, download_id: DownloadId, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
@@ -422,6 +461,17 @@ impl AppManagerHandle {
 
     pub async fn set_file_limit(&self, download_id: DownloadId, file_id: FileId, limit: Option<u64>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
         self.sender.send(AppManagerCommand::SetFileSpeedLimit(download_id, file_id, limit)).await
+    }
+
+    pub async fn get_settings(&self) -> Result<AppSettings, GetSettingsError> {
+        let (sender, receiver) = oneshot::channel();
+        
+        self.sender
+            .send(AppManagerCommand::GetSettings(sender))
+            .await
+            .map_err(|_| GetSettingsError::ManagerUnreachable)?;
+    
+        receiver.await.map_err(|_| GetSettingsError::NoResponse)
     }
 }
 

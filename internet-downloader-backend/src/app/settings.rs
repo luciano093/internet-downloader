@@ -5,25 +5,32 @@ use serde::{Deserialize, Serialize};
 use crate::db::rows::{GlobalSettingsRow, HostSettingsRow, JoinedDownloadSettingsRow};
 use crate::download::items::{DownloadId, FileId};
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct FileSettings {
     pub speed_limit: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct DownloadSettings {
     pub speed_limit: Option<u64>,
     pub file_settings: HashMap<FileId, FileSettings>, 
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+impl DownloadSettings {
+    pub fn get_file_settings(&self, file_id: &FileId) -> Option<&FileSettings> {
+        self.file_settings.get(file_id)
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct HostSettings {
     pub speed_limit: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct AppSettings {
     pub global_speed_limit: Option<u64>,
+    pub default_save_path: Option<String>,
     pub download_settings: HashMap<DownloadId, DownloadSettings>,
     pub host_settings: HashMap<String, HostSettings>
 }
@@ -32,6 +39,7 @@ impl AppSettings {
     pub fn new() -> Self {
         Self {
             global_speed_limit: None,
+            default_save_path: None,
             download_settings: HashMap::new(),
             host_settings: HashMap::new(),
         }
@@ -45,8 +53,16 @@ impl AppSettings {
         self.global_speed_limit = new_speed_limit;
     }
 
-    pub fn get_download_settings(&self, download_id: DownloadId) -> Option<DownloadSettings> {
-        self.download_settings.get(&download_id).cloned()
+    pub fn set_default_save_path(&mut self, new_default_save_path: Option<String>) {
+        self.default_save_path = new_default_save_path;
+    }
+
+    pub fn get_host_settings(&self, host: &str) -> Option<&HostSettings> {
+        self.host_settings.get(host)
+    }
+    
+    pub fn get_download_settings(&self, download_id: DownloadId) -> Option<&DownloadSettings> {
+        self.download_settings.get(&download_id)
     }
 
     pub fn from_db(global_settings_row: GlobalSettingsRow, host_settings_rows: Vec<HostSettingsRow>, joined_download_settings: Vec<JoinedDownloadSettingsRow>) -> Self {
@@ -78,6 +94,7 @@ impl AppSettings {
 
         Self {
             global_speed_limit: global_settings_row.global_speed_limit.map(|speed_limit| speed_limit as u64),
+            default_save_path: global_settings_row.default_save_path,
             download_settings: download_settings,
             host_settings: host_settings,
         }

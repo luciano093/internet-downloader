@@ -1,22 +1,35 @@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useSettings } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export function AddDownloadModal() {
+    const { data: settings } = useSettings();
     const activeModal = useUiStore((state) => state.activeModal);
     const closeModal = useUiStore((state) => state.closeModal);
 
     const isAddModalOpen = activeModal === 'add';
 
     const [urls, setUrls] = useState("");
-    const[savePath, setSavePath] = useState("/downloads/completed/");
+    const [savePath, setSavePath] = useState("");
+    const [editedSavePath, setEditedSavePath] = useState(false);
     const [startNow, setStartNow] = useState(true);
+  
+    useEffect(() => {
+      if (!editedSavePath) {
+        setSavePath(settings?.default_save_path ?? "");
+      }
+    }, [settings?.default_save_path]);
+
+    useEffect(() => {
+      if (isAddModalOpen) {
+        setEditedSavePath(false);
+        setSavePath(settings?.default_save_path ?? "");
+      }
+    }, [isAddModalOpen]);
 
     const handleDownload = () => {
         const linkArray = urls.split('\n').filter(link => link.trim() !== '');
-        
-        const payload = { urls: linkArray, savePath, startNow };
-        console.log("Ready to send to API:", payload);
 
         for (let url of linkArray) {
             fetch(`http://localhost:3211/downloads`, {
@@ -66,8 +79,11 @@ export function AddDownloadModal() {
                     <input
                         type="text"
                         value={savePath}
-                        onChange={(e) => setSavePath(e.target.value)}
-                        defaultValue="/downloads/completed/"
+                        onChange={(event) => {
+                          setEditedSavePath(true);
+                          setSavePath(event.target.value);
+                        }}
+                        defaultValue={savePath}
                         className="h-8 w-full rounded-sm bg-[#1A1C1E] border border-border px-2.5 text-[13px] text-foreground focus:border-gray-500 focus:outline-none"
                     />
                     </div>

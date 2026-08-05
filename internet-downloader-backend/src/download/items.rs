@@ -1377,7 +1377,8 @@ impl From<FileDownload> for FileSnapshot {
             status: file.status,
             active_operation: file.active_operation,
             is_paused: file.is_paused,
-            url: file.url
+            url: file.url,
+            host: file.host.to_string(),
         }
     }
 }
@@ -1395,6 +1396,7 @@ impl From<&FileDownload> for FileSnapshot {
             active_operation: file.active_operation,
             is_paused: file.is_paused,
             url: Arc::clone(&file.url),
+            host: file.host.to_string(),
         }
     }
 }
