@@ -223,7 +223,7 @@ impl Verifier {
 
                 match hash {
                     Ok(Ok(hash)) => {
-                        if Some(hash) != file.hash() {
+                        if let Some(file_hash) = file.hash() && hash != file_hash {
                             new_status = Some(FileStatus::Failed(FileFailureReason::HashMismatch));
                         }
                     }   
