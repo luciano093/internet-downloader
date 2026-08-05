@@ -29,7 +29,7 @@ export function useDownloadSpeeds() {
       for (const download of Object.values(currentDownloads)) {
         const id = download.id;
         const downloadedSize = getDownloadStats(download).downloadedSize;
-        const isDownloading = download.status?.state === "partial";
+        const isDownloading = download.status?.state === "partial" && !download.is_paused;
 
         if (!isDownloading) {
           // not downloading, speed is 0, clear history so it resets
