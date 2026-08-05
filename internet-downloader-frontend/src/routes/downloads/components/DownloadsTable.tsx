@@ -138,6 +138,7 @@ const columns = (speeds: Record<number, number>) => [
 
 export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[]; speeds: Record<number, number> }) {
   const memoizedColumns = useMemo(() => columns(speeds), [speeds]);
+  const columnCount = memoizedColumns.length;
   
   const table = useReactTable({
     data: downloadIds,
@@ -343,7 +344,7 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
         <TableBody>
             {paddingTop > 0 && (
                 <TableRow>
-                <TableCell style={{ height: `${paddingTop}px` }} colSpan={columns.length} />
+                <TableCell style={{ height: `${paddingTop}px` }} colSpan={columnCount} />
                 </TableRow>
             )}
 
@@ -390,7 +391,7 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
 
           {paddingBottom > 0 && (
             <TableRow>
-              <TableCell style={{ height: `${paddingBottom}px` }} colSpan={columns.length} />
+              <TableCell style={{ height: `${paddingBottom}px` }} colSpan={columnCount} />
             </TableRow>
           )}
         </TableBody>
