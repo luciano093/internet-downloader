@@ -34,7 +34,8 @@ export default function EditableBytesLimit({ value, editing, onEditingChange, on
 
   if (!editing) {
     return (
-      <span
+      <button
+        type="button"
         className={cn(
           "cursor-pointer",
           displayClassName ?? "font-mono text-brand hover:bg-accent px-1 py-0.5"
@@ -42,7 +43,7 @@ export default function EditableBytesLimit({ value, editing, onEditingChange, on
         onClick={start}
       >
         {formatLimit(value)}
-      </span>
+      </button>
     );
   }
 
