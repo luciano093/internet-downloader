@@ -118,7 +118,7 @@ function HostRuleRow({ host, speedLimit, onCommit, onDelete, isDeleting, deleteE
       <td className='text-center'>
         <button
           onClick={() => onDelete(host)}
-          className="opacity-0 group-hover:opacity-100 text-muted hover:text-accent-foreground text-xs cursor-pointer"
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-muted hover:text-accent-foreground text-xs cursor-pointer"
           title="Remove rule"
         >
           {isDeleting ? "..." : "x"}
