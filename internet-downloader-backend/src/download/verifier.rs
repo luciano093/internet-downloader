@@ -213,7 +213,9 @@ impl Verifier {
 
             // Then we check if the download is completed, and if so, we check the stored hash
             // against the hash of the file in disk
-            else if file.status() == FileStatus::Completed  {
+            // Chunked files have no full file hash (yet), so they skip this branch to have the
+            // hashes of their chunks checked instead.
+            else if file.status() == FileStatus::Completed && file.chunk_hashes().is_empty()  {
                 let path = file.relative_path().to_path_buf();
                 let task_cancel_flag = task_cancel_flag.clone();
 
@@ -223,7 +225,7 @@ impl Verifier {
 
                 match hash {
                     Ok(Ok(hash)) => {
-                        if Some(hash) != file.hash() {
+                        if let Some(file_hash) = file.hash() && hash != file_hash {
                             new_status = Some(FileStatus::Failed(FileFailureReason::HashMismatch));
                         }
                     }   
