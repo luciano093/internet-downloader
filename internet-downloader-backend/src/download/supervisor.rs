@@ -127,7 +127,7 @@ impl DownloadSupervisor {
             
         loop {
             tokio::select! {
-                _ = save_interval.tick(), if self.download.active_operation().is_none() => {
+                _ = save_interval.tick(), if self.download.active_operation().is_some() => {
                     self.app_context.db_manager.write_download(&self.download).await.unwrap();
                 }
                 _ = self.snapshot_signal_receiver.recv() => {
@@ -305,7 +305,7 @@ impl DownloadSupervisor {
         
         loop {
             tokio::select! {
-                _ = save_interval.tick(), if self.download.active_operation().is_none() => {
+                _ = save_interval.tick(), if self.download.active_operation().is_some() => {
                     self.app_context.db_manager.write_download(&self.download).await.unwrap();
                 }
                 _ = self.snapshot_signal_receiver.recv() => {
