@@ -1,6 +1,7 @@
 import { formatLimit } from "@/routes/settings/lib/utils";
 import { useState } from "react";
 import { LimitInput } from "./LimitInput";
+import { cn } from "@/lib/utils";
 
 interface EditableBytesLimitProps {
   value: number | null,
@@ -11,9 +12,10 @@ interface EditableBytesLimitProps {
   placeholder?: string,
   editingUnit: string,
   bytesPerUnit?: number,
+  displayClassName?: string,
 }
 
-export default function EditableBytesLimit({ value, editing, onEditingChange, onCommit, commitOnBlur: commitOnBlur, placeholder, editingUnit, bytesPerUnit = 1 }: EditableBytesLimitProps) {
+export default function EditableBytesLimit({ value, editing, onEditingChange, onCommit, commitOnBlur: commitOnBlur, placeholder, editingUnit, bytesPerUnit = 1, displayClassName }: EditableBytesLimitProps) {
   const [draft, setDraft] = useState<string>("");
 
   const start = () => {
@@ -33,7 +35,10 @@ export default function EditableBytesLimit({ value, editing, onEditingChange, on
   if (!editing) {
     return (
       <span
-        className="font-mono text-brand cursor-pointer hover:bg-accent px-1 py-0.5"
+        className={cn(
+          "cursor-pointer",
+          displayClassName ?? "font-mono text-brand hover:bg-accent px-1 py-0.5"
+        )}
         onClick={start}
       >
         {formatLimit(value)}

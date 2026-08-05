@@ -1,19 +1,14 @@
-import { Plus, Play, Pause, X, Globe, Download } from "lucide-react";
+import { Plus, Play, Pause, X, Download } from "lucide-react";
 import { TopBarButton } from "@/components/TopBarButton";
 import TopBarSearch from "@/components/TopBarSearch";
 import { useUiStore } from "@/stores/uiStore";
 import { useDownloadStore } from "@/stores/downloadStore";
 import { useMutation } from "@tanstack/react-query";
-import { useSettings } from "@/stores/settingsStore";
+import GlobalSpeedLimit from "@/components/GlobalSpeedLimit";
 
 export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: number }) {
     const openModal = useUiStore((state) => state.openModal);
     const selectedId = useDownloadStore((state) => state.selectedId);
-    const { data: settings } = useSettings();
-  
-    const globalSpeedLimit = settings?.global_speed_limit ?? null;
-
-    const globalSpeedLimitMbs = globalSpeedLimit ? (globalSpeedLimit / (1024 * 1024)).toFixed(2) : null;
   
     const speedMbs = aggregateSpeed > 0 ? (aggregateSpeed / (1024 * 1024)).toFixed(2) : null;
   
@@ -89,10 +84,7 @@ export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: nu
             <Download className="h-4 w-4 text-blue-500" />
             <span>{speedMbs ? `${speedMbs} MB/s` : "0 MB/s"}</span>
             </div>
-            <div className="flex items-center gap-2">
-            <Globe className="h-4 w-4 text-gray-500" />
-            <span>{globalSpeedLimitMbs || "No Limit"}</span>
-            </div>
+            <GlobalSpeedLimit />
         </div>
 
       </div>
