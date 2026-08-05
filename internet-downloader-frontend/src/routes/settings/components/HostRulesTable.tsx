@@ -1,6 +1,7 @@
 import { useSettings, useSetHostSettings, useRemoveHostSettings } from '@/stores/settingsStore';
 import { useEffect, useRef, useState } from 'react';
-import EditableBytesLimit from '@/components/EditableLimit';
+import EditableBytesLimit, { parseLimit } from '@/components/EditableLimit';
+import { LimitInput } from '@/components/LimitInput';
 
 interface AddHostRuleRowProps {
   onAdd: (host: string, speed_limit: number | null) => void,
@@ -19,8 +20,8 @@ function AddHostRuleRow({ onAdd, onCancel, isPending, error }: AddHostRuleRowPro
       cancelAddHost();
       return;
     }
-    const megabytes = parseFloat(newHostLimit);
-    const limit = isNaN(megabytes) || megabytes <= 0 ? null : Math.round(megabytes * 1024 * 1024);
+    
+    const limit = parseLimit(newHostLimit, 1024 * 1024);
     onAdd(newHostName, limit);
     cancelAddHost();
   }
@@ -72,20 +73,14 @@ function AddHostRuleRow({ onAdd, onCancel, isPending, error }: AddHostRuleRowPro
         />
       </td>
       <td className="py-1.5 px-3 text-right">
-        <div className="inline-flex items-center gap-1.5 whitespace-nowrap justify-end">
-          <input
-            type="number"
-            min="0"
-            step="0.1"
-            placeholder="∞"
-            value={newHostLimit}
-            onChange={(event) => setNewHostLimit(event.target.value)}
-            onKeyDown={handleAddKeyDown}
-            disabled={isPending}
-            className="w-20 bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 text-xs font-mono"
-          />
-          <span className="text-muted text-[11px]">MB/s</span>
-        </div>
+        <LimitInput
+          value={newHostLimit}
+          onValueChange={setNewHostLimit}
+          onEnter={commitAddHost}
+          onEscape={cancelAddHost}
+          placeholder="∞"
+          unit="MB/s"
+        />
       </td>
     </tr>
   </>
