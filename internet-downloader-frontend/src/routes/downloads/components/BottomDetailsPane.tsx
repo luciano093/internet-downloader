@@ -21,7 +21,7 @@ function DetailsPaneTab({ value, children }: { value: string, children: ReactNod
 export default function BottomDetailsPane() {
   const selection = useDownloadDataStore((state) => state.selection);
 
-  const selectedId = useSelection(selection, (selection) => selection.getFirstSelected());
+  const selectedId = useSelection(selection, (selection) => selection.getFocused());
 
   console.log("selectedId: ", selectedId);
 

@@ -24,7 +24,7 @@ function Index() {
   const speedTracker = useDownloadSpeeds();
 
   const selection = useDownloadDataStore((state) => state.selection);
-  const selectedId = useSelection(selection, (selection) => selection.getFirstSelected());
+  const selectedId = useSelection(selection, (selection) => selection.getFocused());
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);

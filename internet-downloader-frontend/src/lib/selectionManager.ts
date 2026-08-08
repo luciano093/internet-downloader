@@ -134,8 +134,8 @@ export class RangeSelectionManager {
     return this.cachedSelected;
   }
   
-  public getFirstSelected(): number | null {
-    return this.anchorId;
+  public getFocused(): number | null {
+    return this.leadId ?? this.anchorId;
   }
 
   public clear() {
