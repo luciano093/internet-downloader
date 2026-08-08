@@ -148,7 +148,6 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
     columnResizeMode: "onChange",
     getRowId: (originalRow) => String(originalRow)
   });
-  const [isTableFocused, setTableFocused] = useState(false);
 
   const selection = useDownloadDataStore((state) => state.selection);
   const selectedIds = useSelection(selection, (manager) => manager.getSelected());
@@ -156,42 +155,15 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
   const { rows } = table.getRowModel();
   const tableContainerRef = useRef<HTMLDivElement>(null);
 
-    // Table focus logic
-    useEffect(() => {
-        const handleClick = (event: MouseEvent) => {
-            if (!tableContainerRef.current) return;
-
-            const target = event.target as HTMLElement;
-
-            // We ignore the click if the header was clicked
-            if (target.closest("thead") || target.closest("th")) {
-                return; 
-            }
-
-            if (tableContainerRef.current.contains(event.target as Node)) {
-                setTableFocused(true);
-            } else {
-                setTableFocused(false);
-            }
-        };
-
-        // We add a global listener
-        document.addEventListener("mousedown", handleClick);
-
-        // When this component is unmounted, we remove the event listener
-        return () => {
-            document.removeEventListener("mousedown", handleClick);
-        };
-    }, []); // Only runs once when component is mounted
-
   const downloadIdsRef = useRef(downloadIds);
   downloadIdsRef.current = downloadIds;
   
   // Keyboard logic (Moving through table with up and down arrows)
   useEffect(() => {
-
+    const container = tableContainerRef.current;
+    if (!container) return;
+    
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!isTableFocused) return;
       console.log(event.key);
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       if (downloadIdsRef.current.length === 0) return;
@@ -205,16 +177,14 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
       } else {
           selection.moveSelection(direction, downloadIdsRef.current);
       }
-
-      setTableFocused(true);
     };
 
-    document.addEventListener("keydown", handleKeyDown);
+    container.addEventListener("keydown", handleKeyDown);
 
     return () => {
-      document.removeEventListener("keydown", handleKeyDown);
+      container.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isTableFocused, selection]); 
+  }, [selection]);
 
   const rowVirtualizer = useVirtualizer({
     count: rows.length,
@@ -241,7 +211,7 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
   const columnSizingState = table.getState().columnSizing;
   
   return (
-    <div ref={tableContainerRef} className="w-full overflow-auto">
+    <div ref={tableContainerRef} tabIndex={0} className="w-full overflow-auto [&:focus-within_.row-selected]:bg-[#37373d] [&:focus-within_.row-selected:hover]:bg-[#37373d]">
       <Table 
         className="table-fixed w-full" 
         style={{ 
@@ -358,8 +328,8 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
                     }}
                     className={cn(
                         `text-xs hover:bg-[#2a2d2e] transition-none`,
-                        selectedIds.includes(row.original) && "outline text-foreground -outline-offset-1 outline-dotted outline-[#919191] bg-background",
-                        selectedIds.includes(row.original) && isTableFocused && "bg-[#37373d] hover:bg-[#37373d]",
+                        selectedIds.includes(row.original) && "row-selected outline text-foreground -outline-offset-1 outline-dotted outline-[#919191] bg-background",
+                        selectedIds.includes(row.original) && "bg-[#37373d] hover:bg-[#37373d]",
                     )}
                 >
                     {row.getVisibleCells().map((cell, index, array) => {
