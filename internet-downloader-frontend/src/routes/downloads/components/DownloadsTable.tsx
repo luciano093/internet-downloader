@@ -4,10 +4,11 @@ import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from "
 import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@/components/ui/table";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn, getDownloadStats } from "@/lib/utils";
-import { useDownloadStore } from "@/stores/downloadStore";
+import { useDownloadDataStore, useDownloadStore } from "@/stores/downloadStore";
 import type { DownloadItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
+import useSelection from "@/hooks/useSelection";
 
 export function formatBytes(bytes: number, decimals = 2) {
     if (bytes === 0) return '0 B';
@@ -147,85 +148,50 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
     columnResizeMode: "onChange",
     getRowId: (originalRow) => String(originalRow)
   });
-  const [isTableFocused, setTableFocused] = useState(false);
-  const { selectedId, setSelectedId } = useDownloadStore();
+
+  const [isFocused, setIsFocused] = useState(false);
+
+  const selection = useDownloadDataStore((state) => state.selection);
+  const selectedIds = useSelection(selection, (manager) => manager.getSelected());
+  const leadId = useSelection(selection, (manager) => manager.getLead());
 
   const { rows } = table.getRowModel();
   const tableContainerRef = useRef<HTMLDivElement>(null);
 
-    // Table focus logic
-    useEffect(() => {
-        const handleClick = (event: MouseEvent) => {
-            if (!tableContainerRef.current) return;
+  const downloadIdsRef = useRef(downloadIds);
+  downloadIdsRef.current = downloadIds;
+  
+  // Keyboard logic (Moving through table with up and down arrows)
+  useEffect(() => {
+    const container = tableContainerRef.current;
+    if (!container) return;
+    
+    const handleKeyDown = (event: KeyboardEvent) => {
+      console.log(event.key);
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      if (downloadIdsRef.current.length === 0) return;
 
-            const target = event.target as HTMLElement;
+      event.preventDefault();
 
-            // We ignore the click if the header was clicked
-            if (target.closest("thead") || target.closest("th")) {
-                return; 
-            }
+      const direction = event.key === "ArrowDown" ? 1 : -1;
 
-            if (tableContainerRef.current.contains(event.target as Node)) {
-                setTableFocused(true);
-            } else {
-                setTableFocused(false);
-            }
-        };
+      if (event.shiftKey) {
+          selection.extendSelection(direction, downloadIdsRef.current);
+      }  else if (event.ctrlKey || event.metaKey) {
+        selection.moveLead(direction, downloadIdsRef.current);
+      } else {
+          selection.moveSelection(direction, downloadIdsRef.current);
+      }
+    };
 
-        // We add a global listener
-        document.addEventListener("mousedown", handleClick);
+    container.addEventListener("keydown", handleKeyDown);
 
-        // When this component is unmounted, we remove the event listener
-        return () => {
-            document.removeEventListener("mousedown", handleClick);
-        };
-    }, []); // Only runs once when component is mounted
+    return () => {
+      container.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [selection]);
 
-    // Keyboard logic (Moving through table with up and down arrows)
-    useEffect(() => {
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (!selectedId) return;
-
-            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                event.preventDefault(); 
-
-                // If nothing is selected yet, select the first item and stop
-                if (!selectedId && downloadIds.length > 0) {
-                    setTableFocused(true);
-                    setSelectedId(downloadIds[0]);
-                    return;
-                }
-
-                const currentIndex = downloadIds.indexOf(selectedId!);
-
-                if (currentIndex === -1) return; 
-
-                if (event.key === "ArrowDown") {
-                    // Check if we are already at the bottom
-                    if (currentIndex < downloadIds.length - 1) {
-                        setSelectedId(downloadIds[currentIndex + 1]);
-                    }
-                } 
-                
-                else if (event.key === "ArrowUp") {
-                    // Check if we are already at the top
-                    if (currentIndex > 0) {
-                        setSelectedId(downloadIds[currentIndex - 1]);
-                    }
-                }
-
-                setTableFocused(true);
-            }
-        };
-
-        document.addEventListener("keydown", handleKeyDown);
-
-        return () => {
-            document.removeEventListener("keydown", handleKeyDown);
-        };
-    }, [isTableFocused, selectedId, downloadIds]); 
-
-    const rowVirtualizer = useVirtualizer({
+  const rowVirtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => tableContainerRef.current,
     estimateSize: () => 53,
@@ -250,7 +216,16 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
   const columnSizingState = table.getState().columnSizing;
   
   return (
-    <div ref={tableContainerRef} className="w-full overflow-auto">
+    <div ref={tableContainerRef} tabIndex={0}
+      onFocus={() => setIsFocused(true)}
+      onBlur={() => setIsFocused(false)}
+      className="w-full h-full overflow-auto"
+      onClick={(event) => {
+        // Clear the selection if the click didn't hit a row
+        if (!(event.target as HTMLElement).closest('tr[data-index]')) {
+          selection.deselectAll();
+        }
+      }}>
       <Table 
         className="table-fixed w-full" 
         style={{ 
@@ -356,11 +331,25 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
                     key={row.original}
                     ref={rowVirtualizer.measureElement} 
                     data-index={virtualRow.index}       
-                    onClick={() => setSelectedId(row.original)}
+                    onClick={(event) => {
+                      if (event.shiftKey) {
+                          selection.selectRange(row.original, downloadIdsRef.current);
+                      } else if (event.ctrlKey || event.metaKey) {
+                          selection.toggleSelect(row.original);
+                      } else {
+                          selection.selectSingle(row.original);
+                      }
+                    }}
                     className={cn(
-                        `text-xs hover:bg-[#2a2d2e] transition-none`,
-                        selectedId == row.original && "outline text-foreground -outline-offset-1 outline-dotted outline-[#919191] bg-background",
-                        selectedId == row.original && isTableFocused && "bg-[#37373d] hover:bg-[#37373d]",
+                      `text-xs hover:bg-[#2a2d2e] transition-none`,
+                      // Lead row: always has an outline
+                      row.original === leadId && "outline text-foreground -outline-offset-1 outline-dotted outline-[#919191]",
+                      // Selected rows: always have a background and an outline
+                      selectedIds.includes(row.original) && "outline text-foreground -outline-offset-1 outline-dotted bg-background",
+                      // Lead outside selected rows: dimmer for all selected rows
+                      selectedIds.includes(row.original) && isFocused && leadId !== null && !selectedIds.includes(leadId) && "outline-[#555555] bg-[#2a2a2e]",
+                      // Lead inside selected rows (or no lead): normal strength when focused
+                      selectedIds.includes(row.original) && isFocused && (leadId === null || selectedIds.includes(leadId)) && "outline-[#919191] bg-[#37373d] hover:bg-[#37373d]",
                     )}
                 >
                     {row.getVisibleCells().map((cell, index, array) => {

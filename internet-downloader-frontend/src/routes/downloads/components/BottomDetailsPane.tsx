@@ -1,10 +1,11 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
-import { useDownloadStore } from "@/stores/downloadStore";
 import type { ReactNode } from "react";
+import { useDownloadDataStore, useDownloadStore } from "@/stores/downloadStore";
 import { formatBytes } from "./DownloadsTable";
 import FileTree from "./FileTree";
 import { getDownloadStats } from "@/lib/utils";
+import useSelection from "@/hooks/useSelection";
 
 function DetailsPaneTab({ value, children }: { value: string, children: ReactNode }) {
     return <>
@@ -18,11 +19,17 @@ function DetailsPaneTab({ value, children }: { value: string, children: ReactNod
 }
 
 export default function BottomDetailsPane() {
-    const download = useDownloadStore((state) => 
-      state.selectedId != null ? state.downloads[state.selectedId] : undefined
-    );
+  const selection = useDownloadDataStore((state) => state.selection);
+
+  const selectedId = useSelection(selection, (selection) => selection.getFocused());
+
+  console.log("selectedId: ", selectedId);
+
+  const download = useDownloadStore((state) =>
+    selectedId != null ? state.downloads[selectedId] : undefined
+  );
   
-    if (!download) return null;
+  if (!download) return null;
 
     return (
         <div className="w-full h-full bg-background flex flex-col -mt-[2px]">

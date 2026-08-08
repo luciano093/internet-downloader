@@ -2,15 +2,14 @@ import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import type { DeltaEvent, DownloadItem, FileItem, FolderItem } from '../downloadTypes';
 import type { FilterCategory } from '@/routes/downloads/lib/filters';
+import { RangeSelectionManager } from '@/lib/selectionManager';
 
 export type DownloadState = {
   downloads: Record<number, DownloadItem>;
-  downloadIds: number[];
-  selectedId: number | null;
+  downloadIds: number[]; // deduplicated
 
   setSnapshot: (items: DownloadItem[]) => void;
   applyDelta: (delta: DeltaEvent) => void;
-  setSelectedId: (id: number | null) => void;
 
   // Filters
   statusFilter: FilterCategory | null;
@@ -23,7 +22,6 @@ export const useDownloadStore = create<DownloadState>()(
     immer((set) => ({
         downloads: {},
         downloadIds: [],
-        selectedId: null,
 
         setSnapshot: (items) => set((state) => {
           const newIds = new Set(items.map(i => i.id));
@@ -34,6 +32,14 @@ export const useDownloadStore = create<DownloadState>()(
               delete state.downloads[Number(id)];
             }
           });
+
+          // Remove ids from datastore
+          const removedIds = Object.keys(state.downloads)
+            .filter(id => !newIds.has(Number(id)))
+            .map(Number);
+          if (removedIds.length > 0) {
+            useDownloadDataStore.getState().selection.removeDeleted(removedIds);
+          }
           
           state.downloadIds = items.map(i => i.id);
           
@@ -80,6 +86,7 @@ export const useDownloadStore = create<DownloadState>()(
                 delete state.downloads[delta.id];
                 const index = state.downloadIds.indexOf(delta.id);
                 state.downloadIds.splice(index, 1);
+                useDownloadDataStore.getState().selection.removeDeleted([delta.id]);
                 return;
             }
 
@@ -143,11 +150,7 @@ export const useDownloadStore = create<DownloadState>()(
                 });
             }
         }),
-
-        setSelectedId: (id) => set((state) => {
-            state.selectedId = id;
-        }),
-
+        
         // Filters
         statusFilter: null,
         hostFilter: null,
@@ -161,3 +164,11 @@ export const useDownloadStore = create<DownloadState>()(
         }),
     }))
 );
+
+export type DownloadDataState = {
+  selection: RangeSelectionManager,
+};
+
+export const useDownloadDataStore = create<DownloadDataState>(() => ({
+  selection: new RangeSelectionManager(),
+}));

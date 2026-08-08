@@ -1,45 +1,59 @@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useDownloadStore } from "@/stores/downloadStore";
+import { useDownloadDataStore } from "@/stores/downloadStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useMutation } from "@tanstack/react-query";
 import { Checkbox } from "./ui/checkbox";
 import { Field, FieldContent, FieldLabel } from "./ui/field";
 import { useState } from "react";
+import useSelection from "@/hooks/useSelection";
 
 export function RemoveDownloadModal() {
     const activeModal = useUiStore((state) => state.activeModal);
     const closeModal = useUiStore((state) => state.closeModal);
     const [deleteChecked, setDeleteChecked] = useState(false);
     
-    const selectedId = useDownloadStore((state) => state.selectedId);
-    const setSelectedId = useDownloadStore((state) => state.setSelectedId);
+    const selection = useDownloadDataStore((state) => state.selection);
+    const selectedIds = useSelection(selection, (selection) => selection.getSelected());
 
     const isOpen = activeModal === 'remove';
 
     const removeMutation = useMutation({
-        mutationFn: async ({ id, from_disk }: { id: number; from_disk: boolean }) => {
-            return fetch(`http://localhost:3211/downloads/${id}`, {
-                method: "DELETE",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    from_disk: from_disk
-                }),
+        mutationFn: async ({ ids, from_disk }: { ids: number[]; from_disk: boolean }) => {
+          const promises = ids.map(async (id) => {
+            const response = await fetch(`http://localhost:3211/downloads/${id}`, {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ from_disk }),
             });
+            
+            if (!response.ok) throw new Error(`Failed to delete download ${id}`);
+            
+            return response;
+          });
+      
+          const results = await Promise.allSettled(promises);
+    
+          const failed = results.filter((r) => r.status === "rejected");
+          if (failed.length > 0) {
+            if (failed.length === 1) {
+              throw new Error(`${failed.length} download failed to be removed`);
+            } else {
+              throw new Error(`${failed.length} downloads failed to be removed`);
+            }
+          }
+      
+          return results;
         },
         onSuccess: (_, variables) => {
-            if (selectedId === variables.id) {
-                setSelectedId(null); // Clear the selection!
-            }
+          selection.removeDeleted(variables.ids); // Clear the selection!
         }
     });
 
     const handleRemove = () => {
-        if (selectedId === null) return;
+        if (selectedIds.length === 0) return;
 
         removeMutation.mutate({ 
-            id: selectedId, 
+            ids: selectedIds, 
             from_disk: deleteChecked 
         });
         closeModal();
