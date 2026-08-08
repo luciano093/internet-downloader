@@ -31,7 +31,18 @@ export function RemoveDownloadModal() {
             return response;
           });
       
-          return Promise.all(promises);
+          const results = await Promise.allSettled(promises);
+    
+          const failed = results.filter((r) => r.status === "rejected");
+          if (failed.length > 0) {
+            if (failed.length === 1) {
+              throw new Error(`${failed.length} download failed to be removed`);
+            } else {
+              throw new Error(`${failed.length} downloads failed to be removed`);
+            }
+          }
+      
+          return results;
         },
         onSuccess: (_, variables) => {
           selection.removeDeleted(variables.ids); // Clear the selection!

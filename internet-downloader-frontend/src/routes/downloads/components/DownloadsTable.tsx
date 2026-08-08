@@ -154,7 +154,6 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
   const selection = useDownloadDataStore((state) => state.selection);
   const selectedIds = useSelection(selection, (manager) => manager.getSelected());
   const leadId = useSelection(selection, (manager) => manager.getLead());
-  const anchorId = useSelection(selection, (manager) => manager.getAnchor());
 
   const { rows } = table.getRowModel();
   const tableContainerRef = useRef<HTMLDivElement>(null);

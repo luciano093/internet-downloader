@@ -29,7 +29,18 @@ export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: nu
         return response;
       });
 
-      return Promise.all(promises);
+      const results = await Promise.allSettled(promises);
+
+      const failed = results.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        if (failed.length === 1) {
+          throw new Error(`${failed.length} download failed to pause`);
+        } else {
+          throw new Error(`${failed.length} downloads failed to pause`);
+        }
+      }
+  
+      return results;
     },
   });
 
@@ -47,7 +58,18 @@ export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: nu
         return response;
       });
   
-      return Promise.all(promises);
+      const results = await Promise.allSettled(promises);
+
+      const failed = results.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        if (failed.length === 1) {
+          throw new Error(`${failed.length} download failed to resume`);
+        } else {
+          throw new Error(`${failed.length} downloads failed to resume`);
+        }
+      }
+  
+      return results;
     },
   });
 
