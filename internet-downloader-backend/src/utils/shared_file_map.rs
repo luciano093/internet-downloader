@@ -1,5 +1,5 @@
 use std::{fs::File, path::{Path, PathBuf}};
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 
 use tracing::warn;
 
