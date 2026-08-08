@@ -4,10 +4,11 @@ import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from "
 import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@/components/ui/table";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn, getDownloadStats } from "@/lib/utils";
-import { useDownloadStore } from "@/stores/downloadStore";
+import { useDownloadDataStore, useDownloadStore } from "@/stores/downloadStore";
 import type { DownloadItem } from "@/downloadTypes";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { formatActiveOperation, formatDownloadStatus } from "@/lib/status_utils";
+import useSelection from "@/hooks/useSelection";
 
 export function formatBytes(bytes: number, decimals = 2) {
     if (bytes === 0) return '0 B';
@@ -148,7 +149,9 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
     getRowId: (originalRow) => String(originalRow)
   });
   const [isTableFocused, setTableFocused] = useState(false);
-  const { selectedId, setSelectedId } = useDownloadStore();
+
+  const selection = useDownloadDataStore((state) => state.selection);
+  const selectedIds = useSelection(selection, (manager) => manager.getSelected());
 
   const { rows } = table.getRowModel();
   const tableContainerRef = useRef<HTMLDivElement>(null);
@@ -181,51 +184,39 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
         };
     }, []); // Only runs once when component is mounted
 
-    // Keyboard logic (Moving through table with up and down arrows)
-    useEffect(() => {
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (!selectedId) return;
+  const downloadIdsRef = useRef(downloadIds);
+  downloadIdsRef.current = downloadIds;
+  
+  // Keyboard logic (Moving through table with up and down arrows)
+  useEffect(() => {
 
-            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                event.preventDefault(); 
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!isTableFocused) return;
+      console.log(event.key);
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      if (downloadIdsRef.current.length === 0) return;
 
-                // If nothing is selected yet, select the first item and stop
-                if (!selectedId && downloadIds.length > 0) {
-                    setTableFocused(true);
-                    setSelectedId(downloadIds[0]);
-                    return;
-                }
+      event.preventDefault();
 
-                const currentIndex = downloadIds.indexOf(selectedId!);
+      const direction = event.key === "ArrowDown" ? 1 : -1;
 
-                if (currentIndex === -1) return; 
+      if (event.shiftKey) {
+          selection.extendSelection(direction, downloadIdsRef.current);
+      } else {
+          selection.moveSelection(direction, downloadIdsRef.current);
+      }
 
-                if (event.key === "ArrowDown") {
-                    // Check if we are already at the bottom
-                    if (currentIndex < downloadIds.length - 1) {
-                        setSelectedId(downloadIds[currentIndex + 1]);
-                    }
-                } 
-                
-                else if (event.key === "ArrowUp") {
-                    // Check if we are already at the top
-                    if (currentIndex > 0) {
-                        setSelectedId(downloadIds[currentIndex - 1]);
-                    }
-                }
+      setTableFocused(true);
+    };
 
-                setTableFocused(true);
-            }
-        };
+    document.addEventListener("keydown", handleKeyDown);
 
-        document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isTableFocused, selection]); 
 
-        return () => {
-            document.removeEventListener("keydown", handleKeyDown);
-        };
-    }, [isTableFocused, selectedId, downloadIds]); 
-
-    const rowVirtualizer = useVirtualizer({
+  const rowVirtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => tableContainerRef.current,
     estimateSize: () => 53,
@@ -356,11 +347,19 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
                     key={row.original}
                     ref={rowVirtualizer.measureElement} 
                     data-index={virtualRow.index}       
-                    onClick={() => setSelectedId(row.original)}
+                    onClick={(event) => {
+                      if (event.shiftKey) {
+                          selection.selectRange(row.original, downloadIdsRef.current);
+                      } else if (event.ctrlKey || event.metaKey) {
+                          selection.toggleSelect(row.original);
+                      } else {
+                          selection.selectSingle(row.original);
+                      }
+                    }}
                     className={cn(
                         `text-xs hover:bg-[#2a2d2e] transition-none`,
-                        selectedId == row.original && "outline text-foreground -outline-offset-1 outline-dotted outline-[#919191] bg-background",
-                        selectedId == row.original && isTableFocused && "bg-[#37373d] hover:bg-[#37373d]",
+                        selectedIds.includes(row.original) && "outline text-foreground -outline-offset-1 outline-dotted outline-[#919191] bg-background",
+                        selectedIds.includes(row.original) && isTableFocused && "bg-[#37373d] hover:bg-[#37373d]",
                     )}
                 >
                     {row.getVisibleCells().map((cell, index, array) => {

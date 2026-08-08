@@ -1,13 +1,14 @@
 import { createFileRoute } from '@tanstack/react-router'
 import AppLayout from '../components/AppLayout'
 import { DownloadsTable } from './downloads/components/DownloadsTable'
-import { useDownloadStore } from '@/stores/downloadStore'
+import { useDownloadDataStore, useDownloadStore } from '@/stores/downloadStore'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import DownloadsSidebar from './downloads/components/DownloadsSidebar'
 import DownloadsTopBar from './downloads/components/DownloadsTopBar'
 import BottomDetailsPane from './downloads/components/BottomDetailsPane'
 import { getFilterCategory } from './downloads/lib/filters'
 import { useDownloadSpeeds } from './downloads/hooks/useDownloadSpeeds'
+import useSelection from '@/hooks/useSelection'
 
 export const Route = createFileRoute('/')({
   component: Index,
@@ -18,10 +19,12 @@ function Index() {
   const applyDelta = useDownloadStore((store) => store.applyDelta);
   const downloadIds = useDownloadStore((store) => store.downloadIds);
   const downloads = useDownloadStore((store) => store.downloads);
-  const selectedId = useDownloadStore((store) => store.selectedId);
   const statusFilter = useDownloadStore((store) => store.statusFilter);
   const hostFilter = useDownloadStore((store) => store.hostFilter);
   const speedTracker = useDownloadSpeeds();
+
+  const selection = useDownloadDataStore((state) => state.selection);
+  const selectedId = useSelection(selection, (selection) => selection.getFirstSelected());
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);

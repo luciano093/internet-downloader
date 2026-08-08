@@ -2,31 +2,54 @@ import { Plus, Play, Pause, X, Download } from "lucide-react";
 import { TopBarButton } from "@/components/TopBarButton";
 import TopBarSearch from "@/components/TopBarSearch";
 import { useUiStore } from "@/stores/uiStore";
-import { useDownloadStore } from "@/stores/downloadStore";
+import { useDownloadDataStore } from "@/stores/downloadStore";
 import { useMutation } from "@tanstack/react-query";
 import GlobalSpeedLimit from "@/components/GlobalSpeedLimit";
+import useSelection from "@/hooks/useSelection";
 
 export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: number }) {
-    const openModal = useUiStore((state) => state.openModal);
-    const selectedId = useDownloadStore((state) => state.selectedId);
-  
-    const speedMbs = aggregateSpeed > 0 ? (aggregateSpeed / (1024 * 1024)).toFixed(2) : null;
-  
-    const pauseMutation = useMutation({
-        mutationFn: async (id: number) => {
-            return fetch(`http://localhost:3211/downloads/${id}/pause`, {
-                method: "POST",
-            });
-        },
-    });
+  const openModal = useUiStore((state) => state.openModal);
+  const selection = useDownloadDataStore((state) => state.selection);
 
-    const resumeMutation = useMutation({
-        mutationFn: async (id: number) => {
-            return fetch(`http://localhost:3211/downloads/${id}/resume`, {
-                method: "POST",
-            });
-        },
-    });
+  const selectedIds = useSelection(selection, (selection) => selection.getSelected());
+  
+  const speedMbs = aggregateSpeed > 0 ? (aggregateSpeed / (1024 * 1024)).toFixed(2) : null;
+  
+  const pauseMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const promises = ids.map(async (id) => {
+        const response = await fetch(`http://localhost:3211/downloads/${id}/pause`, {
+          method: "POST",
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to pause download ID ${id}`);
+        }
+  
+        return response;
+      });
+
+      return Promise.all(promises);
+    },
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const promises = ids.map(async (id) => {
+        const response = await fetch(`http://localhost:3211/downloads/${id}/resume`, {
+          method: "POST",
+        });
+  
+        if (!response.ok) {
+          throw new Error(`Failed to resume download ID ${id}`);
+        }
+  
+        return response;
+      });
+  
+      return Promise.all(promises);
+    },
+  });
 
   return (
       <div className="flex w-full items-center h-full relative">
@@ -42,23 +65,23 @@ export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: nu
             <TopBarButton 
             icon={<Play className="h-4 w-4"/>} 
             label="Start"
-            disabled={selectedId === null || (resumeMutation.isPending && resumeMutation.variables === selectedId)}
+            disabled={selectedIds.length === 0 || (resumeMutation.isPending)}
             onClick={() => {
-                    if (selectedId !== null) {
-                        resumeMutation.mutate(selectedId);
-                    }
-                }}
+                if (selectedIds.length !== 0) {
+                  resumeMutation.mutate(selectedIds);
+                }
+              }}
             />
 
             <TopBarButton 
             icon={<Pause className="h-4 w-4"/>} 
             label="Pause"
-            disabled={selectedId === null || (pauseMutation.isPending && pauseMutation.variables === selectedId)}
+            disabled={selectedIds.length === 0 || (pauseMutation.isPending)}
             onClick={() => {
-                    if (selectedId !== null) {
-                        pauseMutation.mutate(selectedId);
-                    }
-                }}
+              if (selectedIds.length !== 0) {
+                pauseMutation.mutate(selectedIds);
+              }
+            }}
             />
 
             <div className="h-5 w-px bg-gray-700 mx-1" /> 
@@ -66,7 +89,7 @@ export default function DownloadsTopBar({ aggregateSpeed }: { aggregateSpeed: nu
             <TopBarButton 
             icon={<X className="h-4 w-4"/>} 
             label="Remove"
-            disabled={selectedId === null}
+            disabled={selectedIds.length === 0}
             onClick={() => openModal('remove')}
             />
         </div>
