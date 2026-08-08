@@ -2,7 +2,7 @@
 
 import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from "@tanstack/react-table";
 import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@/components/ui/table";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn, getDownloadStats } from "@/lib/utils";
 import { useDownloadDataStore, useDownloadStore } from "@/stores/downloadStore";
 import type { DownloadItem } from "@/downloadTypes";
@@ -149,8 +149,12 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
     getRowId: (originalRow) => String(originalRow)
   });
 
+  const [isFocused, setIsFocused] = useState(false);
+
   const selection = useDownloadDataStore((state) => state.selection);
   const selectedIds = useSelection(selection, (manager) => manager.getSelected());
+  const leadId = useSelection(selection, (manager) => manager.getLead());
+  const anchorId = useSelection(selection, (manager) => manager.getAnchor());
 
   const { rows } = table.getRowModel();
   const tableContainerRef = useRef<HTMLDivElement>(null);
@@ -174,6 +178,8 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
 
       if (event.shiftKey) {
           selection.extendSelection(direction, downloadIdsRef.current);
+      }  else if (event.ctrlKey || event.metaKey) {
+        selection.moveLead(direction, downloadIdsRef.current);
       } else {
           selection.moveSelection(direction, downloadIdsRef.current);
       }
@@ -211,7 +217,10 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
   const columnSizingState = table.getState().columnSizing;
   
   return (
-    <div ref={tableContainerRef} tabIndex={0} className="w-full h-full overflow-auto [&:focus-within_.row-selected]:bg-[#37373d] [&:focus-within_.row-selected:hover]:bg-[#37373d]"
+    <div ref={tableContainerRef} tabIndex={0}
+      onFocus={() => setIsFocused(true)}
+      onBlur={() => setIsFocused(false)}
+      className="w-full h-full overflow-auto"
       onClick={(event) => {
         // Clear the selection if the click didn't hit a row
         if (!(event.target as HTMLElement).closest('tr[data-index]')) {
@@ -333,9 +342,15 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
                       }
                     }}
                     className={cn(
-                        `text-xs hover:bg-[#2a2d2e] transition-none`,
-                        selectedIds.includes(row.original) && "row-selected outline text-foreground -outline-offset-1 outline-dotted outline-[#919191] bg-background",
-                        selectedIds.includes(row.original) && "bg-[#37373d] hover:bg-[#37373d]",
+                      `text-xs hover:bg-[#2a2d2e] transition-none`,
+                      // Lead row: always has an outline
+                      row.original === leadId && "outline text-foreground -outline-offset-1 outline-dotted outline-[#919191]",
+                      // Selected rows: always have a background and an outline
+                      selectedIds.includes(row.original) && "outline text-foreground -outline-offset-1 outline-dotted bg-background",
+                      // Lead outside selected rows: dimmer for all selected rows
+                      selectedIds.includes(row.original) && isFocused && leadId !== null && !selectedIds.includes(leadId) && "outline-[#555555] bg-[#2a2a2e]",
+                      // Lead inside selected rows (or no lead): normal strength when focused
+                      selectedIds.includes(row.original) && isFocused && (leadId === null || selectedIds.includes(leadId)) && "outline-[#919191] bg-[#37373d] hover:bg-[#37373d]",
                     )}
                 >
                     {row.getVisibleCells().map((cell, index, array) => {

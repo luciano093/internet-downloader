@@ -95,6 +95,20 @@ export class RangeSelectionManager {
     }
   }
   
+  public moveLead(direction: 1 | -1, allIds: number[]): void {
+    if (allIds.length === 0) return;
+    
+    const currentId = this.leadId ?? this.anchorId;
+    if (currentId === null || !allIds.includes(currentId)) return;
+
+    const currentIndex = allIds.indexOf(currentId);
+    const nextIndex = (currentIndex + direction + allIds.length) % allIds.length;
+    if (nextIndex < 0 || nextIndex >= allIds.length) return;
+
+    this.leadId = allIds[nextIndex];
+    this.notify();
+  }
+  
   public extendSelection(direction: 1 | -1, allIds: number[]): void {
     if (allIds.length === 0) {
       return;
@@ -136,6 +150,14 @@ export class RangeSelectionManager {
   
   public getFocused(): number | null {
     return this.leadId ?? this.anchorId;
+  }
+
+  public getLead(): number | null {
+    return this.leadId;
+  }
+  
+  public getAnchor(): number | null {
+    return this.anchorId;
   }
 
   public clear() {
