@@ -146,6 +146,12 @@ export class RangeSelectionManager {
     this.notify();
   }
 
+  public deselectAll(): void {
+    this.selection.clear();
+    this.updateCache();
+    this.notify();
+  }
+
   public removeDeleted(ids: number[]): void {
     let changed = false;
     for (const id of ids) {

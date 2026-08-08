@@ -2,7 +2,7 @@
 
 import { useReactTable, getCoreRowModel, flexRender, createColumnHelper } from "@tanstack/react-table";
 import { TableHeader, TableRow, TableHead, TableBody, TableCell, Table } from "@/components/ui/table";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { cn, getDownloadStats } from "@/lib/utils";
 import { useDownloadDataStore, useDownloadStore } from "@/stores/downloadStore";
 import type { DownloadItem } from "@/downloadTypes";
@@ -211,7 +211,13 @@ export function DownloadsTable({ downloadIds, speeds }: { downloadIds: number[];
   const columnSizingState = table.getState().columnSizing;
   
   return (
-    <div ref={tableContainerRef} tabIndex={0} className="w-full overflow-auto [&:focus-within_.row-selected]:bg-[#37373d] [&:focus-within_.row-selected:hover]:bg-[#37373d]">
+    <div ref={tableContainerRef} tabIndex={0} className="w-full h-full overflow-auto [&:focus-within_.row-selected]:bg-[#37373d] [&:focus-within_.row-selected:hover]:bg-[#37373d]"
+      onClick={(event) => {
+        // Clear the selection if the click didn't hit a row
+        if (!(event.target as HTMLElement).closest('tr[data-index]')) {
+          selection.deselectAll();
+        }
+      }}>
       <Table 
         className="table-fixed w-full" 
         style={{ 
