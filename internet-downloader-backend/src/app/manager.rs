@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -38,7 +39,7 @@ pub enum AppManagerEvent {
 // Reload a plugin (manually)
 // Set host max connections
 pub enum AppManagerCommand {
-    QueueDownload(String),
+    QueueDownload(String, Option<String>), // url, save_path
     DownloadReady(Download),
     RemoveDownload(DownloadId, bool), // true if we want to remove from disk too
     PauseDownload(DownloadId),
@@ -156,7 +157,7 @@ impl AppManager {
                 }
                 Some(command) = self.receiver.recv() => {
                     match command {
-                        AppManagerCommand::QueueDownload(url) => {
+                        AppManagerCommand::QueueDownload(url, save_path) => {
                             debug!("registry: {:#?}", download_registry.url_map());
                             debug!("url: {}", url);
                             if download_registry.contains_url(&url) {
@@ -166,9 +167,13 @@ impl AppManager {
     
                             let download_id = download_registry.register(url.clone());
                             let sender = self.sender.clone();
+
+                            let save_path = save_path.map(|save_path| PathBuf::from(save_path))
+                                .or_else(|| app_settings.default_save_path.clone().map(|default_save_path| PathBuf::from(default_save_path)))
+                                .unwrap_or_else(|| PathBuf::from("./"));
     
                             send_to_plugin(app_context.clone(), url, async move |download_task| {
-                                let download = Download::new(*download_id, download_task);
+                                let download = Download::new(*download_id, download_task, save_path);
                                 
                                 let _ = sender.send(AppManagerCommand::DownloadReady(download)).await;
                             });
@@ -423,8 +428,8 @@ impl AppManagerHandle {
         self.snapshot_manager.take_snapshot().await
     }
 
-    pub async fn queue_download(&self, url: String) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
-        self.sender.send(AppManagerCommand::QueueDownload(url)).await
+    pub async fn queue_download(&self, url: String, save_path: Option<String>) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {
+        self.sender.send(AppManagerCommand::QueueDownload(url, save_path)).await
     }
 
     pub async fn remove_download(&self, id: DownloadId, from_disk: bool) -> Result<(), mpsc::error::SendError<AppManagerCommand>> {

@@ -300,7 +300,7 @@ impl<'a> Iterator for FolderChildItems<'a> {
 pub struct Download {
     id: DownloadId,
     url: String,
-    relative_path: PathBuf,
+    save_path: PathBuf,
     status: DownloadStatus,
     is_paused: bool,
     active_operation: Option<ActiveOperation>,
@@ -311,9 +311,7 @@ pub struct Download {
 }
 
 impl Download {
-    pub fn new(id: usize, value: DownloadTask) -> Self {
-        let relative_path = PathBuf::new();
-
+    pub fn new(id: usize, value: DownloadTask, save_path: PathBuf) -> Self {
         let mut files = IndexMap::new();
         let mut folders: IndexMap<FolderId, FolderDownload> = IndexMap::new();
         let mut current_file_id = FileId(0);
@@ -329,7 +327,7 @@ impl Download {
                     .unwrap_or_else(|| {
                     filename_from_url(&file_task.url)
                 });
-                files.insert(current_file_id, FileDownload::new(&file_task, &relative_path, current_file_id, None));
+                files.insert(current_file_id, FileDownload::new(&file_task, &save_path, current_file_id, None));
             },
             TaskType::Folder(folder_task) => {
                 let root_folder_id = current_folder_id;
@@ -340,7 +338,7 @@ impl Download {
                 // Folders need to be created bottom-up, but the data we have is top down
                 // so we gather all of the data we need to create each Folder first, and then we create them
                 let mut folder_data_stack = Vec::new();
-                let mut stack = vec![(&folder_task, relative_path, None, root_folder_id)];
+                let mut stack = vec![(&folder_task, save_path.clone(), None, root_folder_id)];
 
                 while let Some((folder_task, parent_relative_path, parent_id, folder_id)) = stack.pop() {
                     let relative_path = parent_relative_path.join(folder_task.folder_name());
@@ -404,7 +402,7 @@ impl Download {
         Self { 
             id: DownloadId(id),
             url: value.url,
-            relative_path: PathBuf::from("./"),
+            save_path,
             status: DownloadStatus::Uninitialized,
             is_paused: false,
             root_item,
@@ -450,7 +448,7 @@ impl Download {
     }
 
     pub const fn relative_path(&self) -> &PathBuf {
-        &self.relative_path
+        &self.save_path
     }
 
     pub const fn status(&self) -> DownloadStatus {
@@ -812,7 +810,7 @@ impl Download {
         let mut status = DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref())
             .unwrap_or_default();
 
-        let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
+        let save_path = PathBuf::from_io_vec(row.relative_path_raw)
             .unwrap_or_else(|| {
                 status = DownloadStatus::Failed(DownloadFailureReason::BadPath);
             
@@ -833,7 +831,7 @@ impl Download {
         Self {
             id: DownloadId(row.id as usize),
             url: row.url,
-            relative_path,
+            save_path,
             active_operation: None,
             status,
             is_paused: row.is_paused,

@@ -114,13 +114,14 @@ async fn main() {
 #[derive(Deserialize, Debug)]
 struct DownloadSettings {
     url: String,
+    save_path: Option<String>,
 }
 
 #[axum::debug_handler] 
 async fn add_download(State(manager): State<AppManagerHandle>, Json(json): Json<DownloadSettings>) -> impl IntoResponse {
     debug!(url = %json.url, "Received download query");
 
-    match manager.queue_download(json.url).await {
+    match manager.queue_download(json.url, json.save_path).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(_) => {
             StatusCode::BAD_REQUEST.into_response()

@@ -38,7 +38,8 @@ export function AddDownloadModal() {
                     "Content-Type": "application/json",
                 },
                 body: JSON.stringify({
-                    url: url
+                  url: url,
+                  save_path: savePath ?? null,
                 }),
             });
         }
