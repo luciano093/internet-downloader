@@ -32,6 +32,14 @@ export const useDownloadStore = create<DownloadState>()(
               delete state.downloads[Number(id)];
             }
           });
+
+          // Remove ids from datastore
+          const removedIds = Object.keys(state.downloads)
+            .filter(id => !newIds.has(Number(id)))
+            .map(Number);
+          if (removedIds.length > 0) {
+            useDownloadDataStore.getState().selection.removeDeleted(removedIds);
+          }
           
           state.downloadIds = items.map(i => i.id);
           
@@ -78,6 +86,7 @@ export const useDownloadStore = create<DownloadState>()(
                 delete state.downloads[delta.id];
                 const index = state.downloadIds.indexOf(delta.id);
                 state.downloadIds.splice(index, 1);
+                useDownloadDataStore.getState().selection.removeDeleted([delta.id]);
                 return;
             }
 
