@@ -340,7 +340,15 @@ impl Download {
                 let mut stack = vec![(&folder_task, save_path.clone(), None, root_folder_id)];
 
                 while let Some((folder_task, parent_relative_path, parent_id, folder_id)) = stack.pop() {
-                    let relative_path = parent_relative_path.join(folder_task.folder_name());
+                    let normalized_folder_name = {
+                        let mut name = normalize_filename(folder_task.folder_name());
+                        if name.is_empty() || is_valid_file_name(&name).is_err() {
+                            name = "folder".to_string();
+                        }
+                        name
+                    };
+                    
+                    let relative_path = parent_relative_path.join(normalized_folder_name);
 
                     let mut child_files = Vec::new();
                     let mut child_folders = Vec::new();
