@@ -223,9 +223,8 @@ pub fn is_valid_file_name(name: impl AsRef<OsStr>) -> Result<(), InvalidFilename
         }
 
         // Reserved DOS device names
-        let filename = name.split('.').next().unwrap_or(&name).to_ascii_uppercase();
-        if is_reserved_dos_name(&filename) {
-            return Err(InvalidWindowsFilename::ReservedName(filename).into());
+        if is_reserved_dos_name(&name) {
+            return Err(InvalidWindowsFilename::ReservedName(name.to_string()).into());
         }
     }
 
@@ -266,8 +265,10 @@ pub fn normalize_filename(filename: &str) -> String {
 }
 
 pub fn is_reserved_dos_name(name: &str) -> bool {
+    let name = name.split('.').next().unwrap_or(&name).to_ascii_uppercase();
+    
     matches!(
-        name,
+        name.as_str(),
         "CON" | "PRN" | "AUX" | "NUL"
         | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
         | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
