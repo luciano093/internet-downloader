@@ -224,15 +224,63 @@ pub fn is_valid_file_name(name: impl AsRef<OsStr>) -> Result<(), InvalidFilename
 
         // Reserved DOS device names
         let filename = name.split('.').next().unwrap_or(&name).to_ascii_uppercase();
-        if matches!(
-            filename.as_str(),
-            "CON" | "PRN" | "AUX" | "NUL"
-                | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-                | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
-        ) {
+        if is_reserved_dos_name(&filename) {
             return Err(InvalidWindowsFilename::ReservedName(filename).into());
         }
     }
 
     Ok(())
+}
+
+/// Normalizes the filename string to make it valid for the target OS \
+/// An empty filename will return an empty String.
+pub fn normalize_filename(filename: &str) -> String {
+    // Replace invalid chars with '_'
+    let mut filename: String = filename
+        .chars()
+        .map(|char| if is_invalid_filename_char(char) { '_' } else { char })
+        .collect();
+
+    // Truncate to 255 bytes
+    if filename.len() > 255 {
+        let mut end = 255;
+        while !filename.is_char_boundary(end) {
+            end -= 1;
+        }
+        filename.truncate(end);
+    }
+
+    #[cfg(windows)]
+    {
+        // Strip trailing dots/spaces
+        let filename = filename.trim_end_matches(|char| char == '.' || char == ' ');
+
+        // If any name is a reserved DOS name, append a '_' at the beginning (e.g. "CON" -> "_CON")
+        let mut filename = filename.to_string();
+        if is_reserved_dos_name(&filename) {
+            filename.insert(0, '_');
+        }
+    }
+
+    filename
+}
+
+pub fn is_reserved_dos_name(name: &str) -> bool {
+    matches!(
+        name,
+        "CON" | "PRN" | "AUX" | "NUL"
+        | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+        | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
+}
+
+#[cfg(windows)]
+fn is_invalid_filename_char(char: char) -> bool {
+    char == '/' || char == '\\' || char.is_ascii_control()
+        || matches!(char, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+}
+
+#[cfg(not(windows))]
+fn is_invalid_filename_char(char: char) -> bool {
+    char == '/' || char == '\0'
 }
