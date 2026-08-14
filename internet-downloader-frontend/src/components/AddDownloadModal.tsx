@@ -39,7 +39,7 @@ export function AddDownloadModal() {
                 },
                 body: JSON.stringify({
                   url: url,
-                  save_path: savePath ?? null,
+                  save_path: savePath.trim() === "" ? null : savePath,
                 }),
             });
         }
