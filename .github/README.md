@@ -19,7 +19,7 @@ The core download engine is mostly stable and can handle complex downloads (it h
 - [ ] Captcha relay to frontend for manual solving
 
 ### Download Engine
-- [ ] Custom save directories per download
+- [x] Custom save directories per download
 - [ ] Custom download categories with default paths per category
 
 ### Frontend
