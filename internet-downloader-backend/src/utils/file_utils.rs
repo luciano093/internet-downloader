@@ -255,10 +255,9 @@ pub fn normalize_filename(filename: &str) -> String {
     #[cfg(windows)]
     {
         // Strip trailing dots/spaces
-        let filename = filename.trim_end_matches(|char| char == '.' || char == ' ');
+        filename = filename.trim_end_matches(|char| char == '.' || char == ' ').to_owned();
 
         // If any name is a reserved DOS name, append a '_' at the beginning (e.g. "CON" -> "_CON")
-        let mut filename = filename.to_string();
         if is_reserved_dos_name(&filename) {
             filename.insert(0, '_');
         }
