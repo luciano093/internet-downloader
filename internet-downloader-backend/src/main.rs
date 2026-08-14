@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fmt::Display;
 use std::time::Duration;
 use std::process::exit;
 
@@ -113,6 +114,23 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+#[derive(Serialize)]
+struct ErrorBody<T> {
+    #[serde(flatten)]
+    error: T,
+    message: String,
+}
+
+fn error_response<T>(err: T) -> Json<ErrorBody<T>>
+where
+    T: Serialize + Display,
+{
+    Json(ErrorBody {
+        message: err.to_string(),
+        error: err,
+    })
+}
+
 #[derive(Deserialize, Debug)]
 struct DownloadSettings {
     url: String,
@@ -125,7 +143,7 @@ async fn add_download(State(manager): State<AppManagerHandle>, Json(json): Json<
 
     if let Some(save_path) = &json.save_path {
         if let Err(err) = validate_save_path(save_path).await {
-            return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+            return (StatusCode::BAD_REQUEST, error_response(err)).into_response();
         }
     }
 
@@ -446,5 +464,8 @@ struct ValidatePathJson {
 async fn validate_path(Json(json): Json<ValidatePathJson>) -> impl IntoResponse {
     debug!( "Received a path validation request");
 
-    Json(validate_save_path(&json.path).await.err())
+    match validate_save_path(&json.path).await {
+        Ok(()) => Json(None::<SavePathError>).into_response(),
+        Err(err) => error_response(err).into_response(),
+    }
 }
