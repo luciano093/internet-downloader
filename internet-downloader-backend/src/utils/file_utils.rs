@@ -2,6 +2,7 @@ use std::{collections::HashSet, ffi::OsStr, fs::File, io::{Read, Seek, SeekFrom}
 
 use memmap2::MmapOptions;
 use os_str_bytes::OsStrBytesExt;
+use serde::Serialize;
 use thiserror::Error;
 
 pub fn force_delete_file(path: &std::path::Path) {
@@ -133,7 +134,8 @@ pub fn hash_file_chunk(path: &Path, start: u64, length: usize) -> std::io::Resul
     Ok(output)
 }
 
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, Serialize)]
+#[serde(tag = "state", content = "value", rename_all = "snake_case")]
 pub enum InvalidFilename {
     #[error("The filename can not be empty")]
     Empty,
@@ -149,7 +151,8 @@ pub enum InvalidFilename {
     Window(#[from] InvalidWindowsFilename),
 }
 
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, Serialize)]
+#[serde(tag = "state", content = "value", rename_all = "snake_case")]
 pub enum InvalidWindowsFilename {
     #[error("The filename can not contain a backward slash '\\'")]
     ContainsBackwardSlash,

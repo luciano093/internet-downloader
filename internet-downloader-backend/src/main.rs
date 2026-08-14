@@ -16,6 +16,7 @@ use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
 
 use internet_downloader_backend::download::items::{DownloadId, FileId};
+use internet_downloader_backend::utils::valid_path::{SavePathError, validate_save_path};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
@@ -92,6 +93,7 @@ async fn main() {
         )
         .route("/settings", get(app_settings))
         .route("/settings", patch(apply_app_settings))
+        .route("/validate-path", post(validate_path))
         .with_state(app_manager)
         .layer(cors);
 
@@ -420,4 +422,16 @@ where
             (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
         }
     }
+}
+
+#[derive(Deserialize, Default, Debug)]
+struct ValidatePathJson {
+    path: String,
+}
+
+#[axum::debug_handler] 
+async fn validate_path(Json(json): Json<ValidatePathJson>) -> impl IntoResponse {
+    debug!( "Received a path validation request");
+
+    Json(validate_save_path(&json.path).await.err())
 }
