@@ -87,7 +87,6 @@ export function AddDownloadModal() {
                           setEditedSavePath(true);
                           setSavePath(event.target.value);
                         }}
-                        defaultValue={savePath}
                         className={cn(
                           "h-8 w-full rounded-sm bg-[#1A1C1E] border px-2.5 text-[13px] text-foreground focus:border-gray-500 focus:outline-none",
                           pathValidation.status === "invalid" ? "border-destructive" : "border-border",
