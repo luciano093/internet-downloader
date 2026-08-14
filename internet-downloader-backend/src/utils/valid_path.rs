@@ -84,7 +84,9 @@ pub async fn validate_save_path(path: impl AsRef<Path>) -> Result<(), SavePathEr
     // Then if the path already exists, we can say it's valid
     // otherwise, we continue 
     match tokio::fs::metadata(path.as_ref()).await {
-        Ok(meta) if meta.is_dir() => return Ok(()),
+        Ok(meta) if meta.is_dir() && check_writable(path.as_ref()).await => {
+            return Ok(())
+        },
         Ok(_) => return Err(SavePathError::NotADirectory),
         Err(err) => match err.kind() {
             std::io::ErrorKind::NotFound => {},
