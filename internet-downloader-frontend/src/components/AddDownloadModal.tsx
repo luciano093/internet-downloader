@@ -34,7 +34,9 @@ export function AddDownloadModal() {
     const handleDownload = () => {
         const linkArray = urls.split('\n').filter(link => link.trim() !== '');
 
-        for (let url of linkArray) {
+      for (let url of linkArray) {
+            const trimmed_path = savePath.trim();
+            
             fetch(`http://localhost:3211/downloads`, {
                 method: "POST",
                 headers: {
@@ -42,7 +44,7 @@ export function AddDownloadModal() {
                 },
                 body: JSON.stringify({
                   url: url,
-                  save_path: savePath.trim() === "" ? null : savePath,
+                  save_path: trimmed_path === "" ? null : trimmed_path,
                 }),
             });
         }

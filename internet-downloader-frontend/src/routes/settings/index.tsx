@@ -90,7 +90,7 @@ function Settings() {
                   <button
                     onClick={() => {
                       setEditingSavePath(false);
-                      setDefaultSavePath.mutate(savePath === "" ? null : savePath);
+                      setDefaultSavePath.mutate(savePath);
                     }}
                     className="text-brand hover:opacity-80 text-[11px] cursor-pointer"
                     disabled={setDefaultSavePath.isPending || pathValidation.status === "invalid"}
