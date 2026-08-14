@@ -7,7 +7,6 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
-use url::{Host, Url};
 
 use crate::app::limiters::{DownloadLimiterGroup, LimiterRegistry};
 use crate::app::registry::DownloadRegistry;
