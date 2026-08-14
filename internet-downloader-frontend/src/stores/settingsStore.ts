@@ -42,7 +42,7 @@ export function useSetDefaultSavePath() {
       const response = await fetch(`${API_BASE}/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ normalizedSavePath }),
+        body: JSON.stringify({ default_save_path: normalizedSavePath }),
       });
 
       if (!response.ok) throw new Error(`Failed to update default save path (${response.status})`);
