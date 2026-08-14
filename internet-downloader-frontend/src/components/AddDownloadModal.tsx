@@ -1,4 +1,6 @@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import usePathValidation from "@/hooks/usePathValidation";
+import { cn } from "@/lib/utils";
 import { useSettings } from "@/stores/settingsStore";
 import { useUiStore } from "@/stores/uiStore";
 import { useEffect, useState } from "react";
@@ -14,6 +16,7 @@ export function AddDownloadModal() {
     const [savePath, setSavePath] = useState("");
     const [editedSavePath, setEditedSavePath] = useState(false);
     const [startNow, setStartNow] = useState(true);
+    const pathValidation = usePathValidation(savePath);
   
     useEffect(() => {
       if (!editedSavePath) {
@@ -75,8 +78,8 @@ export function AddDownloadModal() {
 
                 {/* Save Location */}
                 <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-medium text-gray-300">Save Path</label>
-                    <div className="flex items-center gap-2">
+                  <label className="text-xs font-medium text-gray-300">Save Path</label>
+                  <div className="flex items-center gap-2">
                     <input
                         type="text"
                         value={savePath}
@@ -85,9 +88,16 @@ export function AddDownloadModal() {
                           setSavePath(event.target.value);
                         }}
                         defaultValue={savePath}
-                        className="h-8 w-full rounded-sm bg-[#1A1C1E] border border-border px-2.5 text-[13px] text-foreground focus:border-gray-500 focus:outline-none"
+                        className={cn(
+                          "h-8 w-full rounded-sm bg-[#1A1C1E] border px-2.5 text-[13px] text-foreground focus:border-gray-500 focus:outline-none",
+                          pathValidation.status === "invalid" ? "border-destructive" : "border-border",
+                        )}
                     />
-                    </div>
+                  </div>
+
+                  {pathValidation.status === "invalid" && (
+                    <p className="text-[11px] text-destructive">{pathValidation.message}</p>
+                  )}
                 </div>    
 
                 {/* Additional Options */}
