@@ -123,6 +123,12 @@ struct DownloadSettings {
 async fn add_download(State(manager): State<AppManagerHandle>, Json(json): Json<DownloadSettings>) -> impl IntoResponse {
     debug!(url = %json.url, "Received download query");
 
+    if let Some(save_path) = &json.save_path {
+        if let Err(err) = validate_save_path(save_path).await {
+            return (StatusCode::BAD_REQUEST, Json(err)).into_response();
+        }
+    }
+
     match manager.queue_download(json.url, json.save_path).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(_) => {
@@ -277,7 +283,14 @@ async fn apply_app_patch(manager: AppManagerHandle, settings: AppSettingsPatch) 
     match settings.default_save_path {
         PatchValue::Unchanged => Ok(()),
         PatchValue::Clear => manager.set_default_save_path(None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
-        PatchValue::Set(default_save_path) => manager.set_default_save_path(Some(default_save_path)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        PatchValue::Set(default_save_path) => {
+            if let Err(err) = validate_save_path(&default_save_path).await {
+                return Err((StatusCode::BAD_REQUEST, err.to_string()));
+            }
+            
+            manager.set_default_save_path(Some(default_save_path)).await
+                .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+        }
     }?;
     
     if let Some(host_settings_map) = settings.host_settings {
