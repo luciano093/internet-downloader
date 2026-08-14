@@ -15,10 +15,14 @@ export function useSetGlobalSettings() {
   
   return useMutation({
     mutationFn: async ({ speed_limit, default_save_path }: { speed_limit?: number | null, default_save_path?: string | null }) => {
+      // We make sure to send null instead of empty strings
+      const trimmed_path = default_save_path?.trim();
+      const normalizedSavePath = trimmed_path === "" ? null : (trimmed_path ?? null);
+      
       const response = await fetch(`${API_BASE}/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ global_speed_limit: speed_limit, default_save_path }),
+        body: JSON.stringify({ global_speed_limit: speed_limit, default_save_path: normalizedSavePath }),
       });
 
       if (!response.ok) throw new Error(`Failed to update settings (${response.status})`);
@@ -32,10 +36,13 @@ export function useSetDefaultSavePath() {
   
   return useMutation({
     mutationFn: async (default_save_path: string | null) => {
+      const trimmed_path = default_save_path?.trim();
+      const normalizedSavePath = trimmed_path === "" ? null : (trimmed_path ?? null);
+      
       const response = await fetch(`${API_BASE}/settings`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ default_save_path }),
+        body: JSON.stringify({ default_save_path: normalizedSavePath }),
       });
 
       if (!response.ok) throw new Error(`Failed to update default save path (${response.status})`);

@@ -18,6 +18,7 @@ use crate::download::hosts::{DownloadTask, FileTask, FolderTask, TaskType};
 use crate::download::status::{DownloadStatus, FileStatus, StatusBucket, StateBucketCounters};
 use crate::download::error::{serialize_hash, serialize_chunks};
 use crate::download::supervisor::{BLOCK_SIZE, HASH_CHUNK_SIZE};
+use crate::utils::file_utils::{is_valid_file_name, normalize_filename};
 
 #[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
 pub enum FileSize {
@@ -300,7 +301,7 @@ impl<'a> Iterator for FolderChildItems<'a> {
 pub struct Download {
     id: DownloadId,
     url: String,
-    relative_path: PathBuf,
+    save_path: PathBuf,
     status: DownloadStatus,
     is_paused: bool,
     active_operation: Option<ActiveOperation>,
@@ -311,9 +312,7 @@ pub struct Download {
 }
 
 impl Download {
-    pub fn new(id: usize, value: DownloadTask) -> Self {
-        let relative_path = PathBuf::new();
-
+    pub fn new(id: usize, value: DownloadTask, save_path: PathBuf) -> Self {
         let mut files = IndexMap::new();
         let mut folders: IndexMap<FolderId, FolderDownload> = IndexMap::new();
         let mut current_file_id = FileId(0);
@@ -324,26 +323,32 @@ impl Download {
         match value.task_type {
             TaskType::File(file_task) => {
                 root_item = ItemId::File(current_file_id);
-                name = file_task.file_name()
-                    .map(|file_name| file_name.to_string())
-                    .unwrap_or_else(|| {
-                    filename_from_url(&file_task.url)
-                });
-                files.insert(current_file_id, FileDownload::new(&file_task, &relative_path, current_file_id, None));
+
+                let file_download = FileDownload::new(&file_task, &save_path, current_file_id, None);
+                name = file_download.file_name.clone();
+                
+                files.insert(current_file_id, file_download);
             },
             TaskType::Folder(folder_task) => {
                 let root_folder_id = current_folder_id;
                 root_item = ItemId::Folder(root_folder_id);
-                name = folder_task.folder_name().clone();
                 *current_folder_id += 1;
 
                 // Folders need to be created bottom-up, but the data we have is top down
                 // so we gather all of the data we need to create each Folder first, and then we create them
                 let mut folder_data_stack = Vec::new();
-                let mut stack = vec![(&folder_task, relative_path, None, root_folder_id)];
+                let mut stack = vec![(&folder_task, save_path.clone(), None, root_folder_id)];
 
                 while let Some((folder_task, parent_relative_path, parent_id, folder_id)) = stack.pop() {
-                    let relative_path = parent_relative_path.join(folder_task.folder_name());
+                    let normalized_folder_name = {
+                        let mut name = normalize_filename(folder_task.folder_name());
+                        if name.is_empty() || is_valid_file_name(&name).is_err() {
+                            name = "folder".to_string();
+                        }
+                        name
+                    };
+                    
+                    let relative_path = parent_relative_path.join(normalized_folder_name);
 
                     let mut child_files = Vec::new();
                     let mut child_folders = Vec::new();
@@ -398,13 +403,15 @@ impl Download {
 
                     folders.insert(folder_id, folder);
                 }
+
+                name = folders.get(&root_folder_id).map_or_else(|| "folder".to_string(), |folder| folder.folder_name.clone());
             },
         }
 
         Self { 
             id: DownloadId(id),
             url: value.url,
-            relative_path: PathBuf::from("./"),
+            save_path,
             status: DownloadStatus::Uninitialized,
             is_paused: false,
             root_item,
@@ -450,7 +457,7 @@ impl Download {
     }
 
     pub const fn relative_path(&self) -> &PathBuf {
-        &self.relative_path
+        &self.save_path
     }
 
     pub const fn status(&self) -> DownloadStatus {
@@ -812,7 +819,7 @@ impl Download {
         let mut status = DownloadStatus::from_db_columns(&row.status, row.failure_reason.as_deref())
             .unwrap_or_default();
 
-        let relative_path = PathBuf::from_io_vec(row.relative_path_raw)
+        let save_path = PathBuf::from_io_vec(row.relative_path_raw)
             .unwrap_or_else(|| {
                 status = DownloadStatus::Failed(DownloadFailureReason::BadPath);
             
@@ -833,7 +840,7 @@ impl Download {
         Self {
             id: DownloadId(row.id as usize),
             url: row.url,
-            relative_path,
+            save_path,
             active_operation: None,
             status,
             is_paused: row.is_paused,
@@ -1121,11 +1128,16 @@ impl Debug for FileDownload {
 
 impl FileDownload {
     pub(super) fn new(file_task: &FileTask, relative_path: &Path, id: FileId, parent_id: Option<FolderId>) -> Self {
-        let file_name = file_task.file_name()
+        let original_name = file_task.file_name()
             .map(|file_name| file_name.to_string())
             .unwrap_or_else(|| {
             filename_from_url(&file_task.url)
         });
+
+        let mut file_name = normalize_filename(&original_name);
+        if file_name.is_empty() || is_valid_file_name(&file_name).is_err() {
+            file_name = "download".to_string();
+        }
         
         let relative_path = relative_path.join(&file_name);
         
@@ -1427,7 +1439,14 @@ impl FolderDownload {
         child_folders: Vec<(FolderId, StatusBucket)>,
         parent_id: Option<FolderId>
     ) -> Self {
-        let relative_path = parent_relative_path.join(folder_task.folder_name());
+        let original_name = folder_task.folder_name().to_owned();
+
+        let mut folder_name = normalize_filename(&original_name);
+        if folder_name.is_empty() || is_valid_file_name(&folder_name).is_err() {
+            folder_name = "folder".to_string();
+        }
+        
+        let relative_path = parent_relative_path.join(&folder_name);
 
         let mut bucket_counters = StateBucketCounters::new();
         
@@ -1447,7 +1466,7 @@ impl FolderDownload {
         Self { 
             parent_id,
             id,
-            folder_name: folder_task.folder_name().to_owned(),
+            folder_name: folder_name,
             relative_path,
             status: DownloadStatus::Uninitialized,
             is_paused: false,

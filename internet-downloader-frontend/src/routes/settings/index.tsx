@@ -6,6 +6,8 @@ import { HostRulesTable } from './components/HostRulesTable';
 import EditableBytesLimit from '@/components/EditableLimit';
 import SettingsSidebar from './components/SettingsSidebar';
 import SettingsTopBar from './components/SettingsTopBar';
+import usePathValidation from '@/hooks/usePathValidation';
+import { cn } from '@/lib/utils';
 
 export const Route = createFileRoute('/settings/')({
   component: Settings,
@@ -19,6 +21,7 @@ function Settings() {
   const [savePath, setSavePath] = useState(settings?.default_save_path ?? null);
   const [editingLimit, setEditingLimit] = useState(false);
   const [editingSavePath, setEditingSavePath] = useState(false);
+  const pathValidation = usePathValidation(savePath ?? "");
 
   useEffect(() => {
     if (!editingSavePath) {
@@ -79,7 +82,10 @@ function Settings() {
                       setEditingSavePath(false);
                     }}
                     placeholder="/downloads/completed/"
-                    className="w-48 bg-background border border-border focus:border-brand text-foreground outline-none px-2 py-0.5 rounded-sm text-xs font-mono"
+                    className={cn(
+                      "w-48 bg-background border focus:border-brand text-foreground outline-none px-2 py-0.5 rounded-sm text-xs font-mono",
+                      pathValidation.status === "invalid" ? "border-destructive" : "border-border",
+                    )}
                   />
                   <button
                     onClick={() => {
@@ -87,7 +93,7 @@ function Settings() {
                       setDefaultSavePath.mutate(savePath);
                     }}
                     className="text-brand hover:opacity-80 text-[11px] cursor-pointer"
-                    disabled={setDefaultSavePath.isPending}
+                    disabled={setDefaultSavePath.isPending || pathValidation.status === "invalid"}
                   >
                     Save
                   </button>
@@ -97,6 +103,9 @@ function Settings() {
                 <p className="text-[11px] text-destructive mt-1">
                   Failed to save path. {setDefaultSavePath.error?.message}
                 </p>
+              )}
+              {pathValidation.status === "invalid" && (
+                <p className="text-[11px] text-destructive mt-1">{pathValidation.message}</p>
               )}
               <p className="text-[11px] text-muted mt-1">Default location where files will be downloaded.</p>
             </div>

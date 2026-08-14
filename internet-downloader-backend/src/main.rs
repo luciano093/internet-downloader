@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fmt::Display;
 use std::time::Duration;
 use std::process::exit;
 
@@ -16,6 +17,7 @@ use internet_downloader_backend::client_state_manager::DownloadSnapshot;
 use internet_downloader_backend::db::state_manager::StateManager;
 
 use internet_downloader_backend::download::items::{DownloadId, FileId};
+use internet_downloader_backend::utils::valid_path::{SavePathError, validate_save_path};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
@@ -92,6 +94,7 @@ async fn main() {
         )
         .route("/settings", get(app_settings))
         .route("/settings", patch(apply_app_settings))
+        .route("/validate-path", post(validate_path))
         .with_state(app_manager)
         .layer(cors);
 
@@ -111,16 +114,40 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+#[derive(Serialize)]
+struct ErrorBody<T> {
+    #[serde(flatten)]
+    error: T,
+    message: String,
+}
+
+fn error_response<T>(err: T) -> Json<ErrorBody<T>>
+where
+    T: Serialize + Display,
+{
+    Json(ErrorBody {
+        message: err.to_string(),
+        error: err,
+    })
+}
+
 #[derive(Deserialize, Debug)]
 struct DownloadSettings {
     url: String,
+    save_path: Option<String>,
 }
 
 #[axum::debug_handler] 
 async fn add_download(State(manager): State<AppManagerHandle>, Json(json): Json<DownloadSettings>) -> impl IntoResponse {
     debug!(url = %json.url, "Received download query");
 
-    match manager.queue_download(json.url).await {
+    if let Some(save_path) = &json.save_path {
+        if let Err(err) = validate_save_path(save_path).await {
+            return (StatusCode::BAD_REQUEST, error_response(err)).into_response();
+        }
+    }
+
+    match manager.queue_download(json.url, json.save_path).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(_) => {
             StatusCode::BAD_REQUEST.into_response()
@@ -274,7 +301,14 @@ async fn apply_app_patch(manager: AppManagerHandle, settings: AppSettingsPatch) 
     match settings.default_save_path {
         PatchValue::Unchanged => Ok(()),
         PatchValue::Clear => manager.set_default_save_path(None).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
-        PatchValue::Set(default_save_path) => manager.set_default_save_path(Some(default_save_path)).await.map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
+        PatchValue::Set(default_save_path) => {
+            if let Err(err) = validate_save_path(&default_save_path).await {
+                return Err((StatusCode::BAD_REQUEST, err.to_string()));
+            }
+            
+            manager.set_default_save_path(Some(default_save_path)).await
+                .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+        }
     }?;
     
     if let Some(host_settings_map) = settings.host_settings {
@@ -418,5 +452,20 @@ where
             tracing::error!("Failed to get settings: {}", error);
             (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
         }
+    }
+}
+
+#[derive(Deserialize, Default, Debug)]
+struct ValidatePathJson {
+    path: String,
+}
+
+#[axum::debug_handler] 
+async fn validate_path(Json(json): Json<ValidatePathJson>) -> impl IntoResponse {
+    debug!( "Received a path validation request");
+
+    match validate_save_path(&json.path).await {
+        Ok(()) => Json(None::<SavePathError>).into_response(),
+        Err(err) => error_response(err).into_response(),
     }
 }

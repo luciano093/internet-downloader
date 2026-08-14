@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use reqwest::Client;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, warn};
+use tracing::debug;
 use url::{Host, Url};
 
 use crate::{app::{limiters::LimiterRegistry, manager::AppManagerCommand, settings::AppSettings}, client_state_manager::UiManagerHandle, download::{hosts::manager::HostHandle, writer::DownloadWriterManager}, utils::network_utils::BandwidthLimiter};
