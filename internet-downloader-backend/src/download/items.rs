@@ -308,7 +308,6 @@ pub struct Download {
     root_item: ItemId,
     files: IndexMap<FileId, FileDownload>,
     folders: IndexMap<FolderId, FolderDownload>,
-    name: String,
 }
 
 impl Download {
@@ -318,14 +317,12 @@ impl Download {
         let mut current_file_id = FileId(0);
         let mut current_folder_id = FolderId(0);
         let root_item;
-        let name;
 
         match value.task_type {
             TaskType::File(file_task) => {
                 root_item = ItemId::File(current_file_id);
 
                 let file_download = FileDownload::new(&file_task, &save_path, current_file_id, None);
-                name = file_download.file_name.clone();
                 
                 files.insert(current_file_id, file_download);
             },
@@ -403,8 +400,6 @@ impl Download {
 
                     folders.insert(folder_id, folder);
                 }
-
-                name = folders.get(&root_folder_id).map_or_else(|| "folder".to_string(), |folder| folder.folder_name.clone());
             },
         }
 
@@ -417,7 +412,6 @@ impl Download {
             root_item,
             files,
             folders,
-            name,
             active_operation: None,
         }
     }
@@ -472,8 +466,11 @@ impl Download {
         self.is_paused
     }
 
-    pub const fn name(&self) -> &String {
-        &self.name
+    pub fn name(&self) -> &str {
+        match self.root_item {
+            ItemId::File(id) => self.files[&id].name(),
+            ItemId::Folder(id) => &self.folders[&id].folder_name,
+        }
     }
 
     pub fn is_completed(&self) -> bool {
@@ -847,20 +844,21 @@ impl Download {
             root_item,
             files,
             folders,
-            name: row.name,
         }
     }
 }
 
 impl From<Download> for DownloadSnapshot {
         fn from(download: Download) -> DownloadSnapshot {
+            let download_name = download.name().to_owned();
+            
             let files: IndexMap<FileId, FileSnapshot> = download.files.into_iter().map(|(id, file)| {
                 (id, file.into())
             }).collect();
         
             DownloadSnapshot {
                 id: download.id,
-                name: download.name,
+                name: download_name,
                 url: download.url,
                 status: download.status,
                 active_operation: download.active_operation,
@@ -873,6 +871,8 @@ impl From<Download> for DownloadSnapshot {
 
 impl From<&Download> for DownloadSnapshot {
     fn from(download: &Download) -> DownloadSnapshot {
+        let download_name = download.name().to_owned();
+        
         let files: IndexMap<FileId, FileSnapshot> = download.files
             .iter()
             .map(|(id, file)| (*id, file.into()))
@@ -880,7 +880,7 @@ impl From<&Download> for DownloadSnapshot {
     
         DownloadSnapshot {
             id: download.id,
-            name: download.name.clone(),
+            name: download_name,
             url: download.url.clone(),
             status: download.status,
             active_operation: download.active_operation,
@@ -1061,7 +1061,7 @@ pub struct FileDownload {
     id: FileId,
     url: Arc<String>,
     host: Arc<Host>,
-    file_name: String,
+    filename: FileName,
     relative_path: PathBuf,
     status: FileStatus,
     is_paused: bool,
@@ -1096,7 +1096,7 @@ impl DownloadItem for FileDownload {
     }
 
     fn name(&self) -> &str {
-        &self.file_name
+        &self.filename
     }
 
     fn active_operation(&self) -> Option<ActiveOperation> {
@@ -1117,7 +1117,7 @@ impl Debug for FileDownload {
         f.debug_struct("FileDownload")
             .field("id", &self.id)
             .field("url", &self.url)
-            .field("file_name", &self.file_name)
+            .field("file_name", &self.filename)
             .field("relative_path", &self.relative_path)
             .field("status", &self.status)
             .field("hash", &self.hash)
@@ -1128,18 +1128,9 @@ impl Debug for FileDownload {
 
 impl FileDownload {
     pub(super) fn new(file_task: &FileTask, relative_path: &Path, id: FileId, parent_id: Option<FolderId>) -> Self {
-        let original_name = file_task.file_name()
-            .map(|file_name| file_name.to_string())
-            .unwrap_or_else(|| {
-            filename_from_url(&file_task.url)
-        });
-
-        let mut file_name = normalize_filename(&original_name);
-        if file_name.is_empty() || is_valid_file_name(&file_name).is_err() {
-            file_name = "download".to_string();
-        }
+        let filename = FileName::new(&file_task.url, file_task.file_name.clone());
         
-        let relative_path = relative_path.join(&file_name);
+        let relative_path = relative_path.join(filename.as_str());
         
         let host = Url::parse(&file_task.url)
             .ok()
@@ -1151,7 +1142,7 @@ impl FileDownload {
             id,
             url: Arc::new(file_task.url.clone()),
             host: Arc::new(host),
-            file_name: file_name,
+            filename,
             relative_path,
             status: FileStatus::Uninitialized,
             is_paused: false,
@@ -1165,6 +1156,10 @@ impl FileDownload {
     }
 
     pub fn from_db(row: DownloadFileRow, mut chunk_hashes: Vec<Option<[u8; 16]>>) -> Self {
+        // Recosntruct the filename
+        let mut filename = FileName::new(&row.url, row.plugin_hint);
+        filename.set_server_name(row.server_name);
+        
         // Reconstruct the FileSize
         let size = match row.size_type.as_deref() {
             Some("known") => row
@@ -1217,7 +1212,7 @@ impl FileDownload {
             id: FileId(row.file_id as usize),
             url: Arc::new(row.url),
             host: Arc::new(host),
-            file_name: row.name,
+            filename,
             relative_path,
             status,
             is_paused: row.is_paused,
@@ -1294,12 +1289,16 @@ impl FileDownload {
         self.retries = 0;
     }
 
-    pub fn set_file_name(&mut self, file_name: String) {
+    pub fn set_file_name(&mut self, filename: String) {
+        self.filename.set_server_name(Some(filename));
+        
         if let Some(parent_path) = self.relative_path.parent() {
-            self.relative_path = parent_path.join(&file_name);
+            self.relative_path = parent_path.join(&self.filename.as_str());
         }
-            
-        self.file_name = file_name;
+    }
+    
+    pub const fn filename(&self) -> &FileName {
+        &self.filename
     }
 
     pub fn calculate_initial_bytes(&self, chunk_size: u64) -> u64 {
@@ -1382,7 +1381,7 @@ impl From<FileDownload> for FileSnapshot {
             id: file.id,
             parent_id:
             file.parent_id,
-            file_name: file.file_name,
+            file_name: file.filename.as_str().to_owned(),
             relative_path: file.relative_path,
             size: file.size,
             bytes_downloaded,
@@ -1400,7 +1399,7 @@ impl From<&FileDownload> for FileSnapshot {
         FileSnapshot {
             id: file.id,
             parent_id: file.parent_id,
-            file_name: file.file_name.clone(),
+            file_name: file.filename.as_str().to_owned(),
             relative_path: file.relative_path.clone(),
             size: file.size,
             bytes_downloaded: file.calculate_initial_bytes(BLOCK_SIZE as u64),
@@ -1712,13 +1711,80 @@ impl DownloadItem for FolderDownload {
     }
 }
 
-fn filename_from_url(url: &str) -> String {
+fn filename_from_url(url: &str) -> Option<String> {
     let url_base = url
         .split('#').next().unwrap_or(url)
         .split('?').next().unwrap_or(url)
         .rsplit('/')
-        .find(|segment| !segment.is_empty())
-        .unwrap_or("unknown");
+        .find(|segment| !segment.is_empty());
 
-    url_base.to_string()
+    url_base.map(|url_base| url_base.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileName {
+    plugin_hint: Option<String>,
+    server_name: Option<String>,
+    url_hint: Option<String>,
+}
+
+impl FileName {
+    fn new(url: &str, plugin_hint: Option<String>) -> Self {
+        // We normalize all names
+        // if they are invalid we set them to None
+        let url_hint = filename_from_url(url).and_then(|url_hint| Self::normalize_hint(url_hint));
+        let plugin_hint = plugin_hint.and_then(|plugin_hint| Self::normalize_hint(plugin_hint));
+        
+        Self {
+            plugin_hint,
+            server_name: None,
+            url_hint,
+        }
+    }
+
+    fn normalize_hint(name: String) -> Option<String> {
+        // We make sure the filename is normalized so it works on the underlying os
+        let name = normalize_filename(&name);
+
+        // Might be unnecessary due to normalization, but just in case, we make sure
+        // the file name is valid after being normalized, (is not an empty string, no null byte, etc.)
+        (!name.is_empty() && is_valid_file_name(&name).is_ok()).then_some(name)
+    } 
+
+    pub fn set_server_name(&mut self, name: Option<String>) {
+        self.server_name = name.and_then(Self::normalize_hint);
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.plugin_hint.as_deref()
+            .or_else(|| self.server_name.as_deref())
+            .or_else(|| self.url_hint.as_deref())
+            .unwrap_or_else(|| "download")
+    }
+
+    pub fn plugin_hint(&self) -> Option<&str> {
+        self.plugin_hint.as_deref()
+    }
+    
+    pub fn server_name(&self) -> Option<&str> {
+        self.server_name.as_deref()
+    }
+    
+    pub fn url_hint(&self) -> Option<&str> {
+        self.url_hint.as_deref()
+    }
+}
+
+impl Deref for FileName {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for FileName {
+    fn as_ref(&self) -> &str {
+        self.deref()
+    }
 }

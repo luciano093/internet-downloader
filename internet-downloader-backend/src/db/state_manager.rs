@@ -469,6 +469,9 @@ impl StateManager {
                 failure_reason TEXT,
                 
                 -- File-specific fields
+                plugin_hint TEXT,
+                server_name TEXT,
+                url_hint TEXT,
                 url TEXT NOT NULL,
                 hash BLOB,
                 chunks_raw BLOB,
@@ -660,6 +663,7 @@ impl StateManager {
                     download_id, file_id, parent_folder_id,
                     name, relative_path_raw, relative_path, 
                     status, is_paused, failure_reason, 
+                    plugin_hint, server_name, url_hint,
                     url, hash, chunks_raw, chunks_len, size_type, size_bytes, retries
                 ) "
             );
@@ -688,6 +692,9 @@ impl StateManager {
                     .push_bind(status)
                     .push_bind(file.is_paused())
                     .push_bind(reason)
+                    .push_bind(file.filename().plugin_hint()) 
+                    .push_bind(file.filename().server_name())
+                    .push_bind(file.filename().url_hint()) 
                     .push_bind(file.url_ref()) 
                     .push_bind(hash)
                     .push_bind(file.blocks().as_raw_slice())   
@@ -706,6 +713,9 @@ impl StateManager {
                 status = excluded.status, 
                 is_paused = excluded.is_paused, 
                 failure_reason = excluded.failure_reason,
+                plugin_hint = excluded.plugin_hint,
+                server_name = excluded.server_name,
+                url_hint = excluded.url_hint,
                 url = excluded.url,
                 hash = excluded.hash,
                 chunks_raw = excluded.chunks_raw,

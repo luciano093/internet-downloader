@@ -8,7 +8,6 @@ use crate::download::{items::{Download, FileDownload, FileId, FolderDownload, Fo
 pub struct DownloadRow {
     pub id: i64,
     pub url: String,
-    pub name: String,
     pub relative_path_raw: Vec<u8>,
     pub relative_path: String,
     pub status: String,
@@ -46,7 +45,6 @@ pub struct DownloadFileRow {
     pub download_id: i64,
     pub file_id: i64,
     pub parent_folder_id: Option<i64>,
-    pub name: String,
     pub relative_path_raw: Vec<u8>,
     pub relative_path: String,
     pub status: String,
@@ -54,6 +52,9 @@ pub struct DownloadFileRow {
     pub failure_reason: Option<String>,
     
     // File specific
+    pub plugin_hint: Option<String>,
+    pub server_name: Option<String>,
+    pub url_hint: Option<String>,
     pub url: String,
     pub hash: Option<Vec<u8>>,
     pub chunks_raw: Option<Vec<u8>>,
