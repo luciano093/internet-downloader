@@ -555,7 +555,13 @@ impl HostScheduler {
     pub async fn next(&mut self, permits_available: usize, permits_total: usize) -> NextJob {
         loop {
             if !self.has_work() {
-                self.notify.notified().await;
+                let notified = self.notify.notified();
+                tokio::pin!(notified);
+                
+                if !self.has_work() {
+                    notified.as_mut().enable();
+                    (&mut notified).await;
+                }
             }
             
             // Retries first (metadata > stream > range)
