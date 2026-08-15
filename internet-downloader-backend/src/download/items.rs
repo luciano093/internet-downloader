@@ -1128,7 +1128,7 @@ impl Debug for FileDownload {
 
 impl FileDownload {
     pub(super) fn new(file_task: &FileTask, relative_path: &Path, id: FileId, parent_id: Option<FolderId>) -> Self {
-        let filename = FileName::new(file_task.url.clone(), file_task.file_name.clone());
+        let filename = FileName::new(&file_task.url, file_task.file_name.clone());
         
         let relative_path = relative_path.join(filename.as_str());
         
@@ -1157,7 +1157,7 @@ impl FileDownload {
 
     pub fn from_db(row: DownloadFileRow, mut chunk_hashes: Vec<Option<[u8; 16]>>) -> Self {
         // Recosntruct the filename
-        let mut filename = FileName::new(row.url.clone(), row.plugin_hint);
+        let mut filename = FileName::new(&row.url, row.plugin_hint);
         filename.set_server_name(row.server_name);
         
         // Reconstruct the FileSize
@@ -1729,17 +1729,11 @@ pub struct FileName {
 }
 
 impl FileName {
-    fn new(url: String, plugin_hint: Option<String>) -> Self {
+    fn new(url: &str, plugin_hint: Option<String>) -> Self {
         // We normalize all names
-        // and make sure they are not empty
-        // if they are empty, they are set back to None
-        let url_hint = filename_from_url(&url)
-            .map(|url_hint| normalize_filename(&url_hint))
-            .filter(|url_hint| !url_hint.is_empty());
-        
-        let plugin_hint = plugin_hint
-            .map(|plugin_hint| normalize_filename(&plugin_hint))
-            .filter(|plugin_hint| !plugin_hint.is_empty());     
+        // if they are invalid we set them to None
+        let url_hint = filename_from_url(url).and_then(|url_hint| Self::normalize_hint(url_hint));
+        let plugin_hint = plugin_hint.and_then(|plugin_hint| Self::normalize_hint(plugin_hint));
         
         Self {
             plugin_hint,
@@ -1748,12 +1742,17 @@ impl FileName {
         }
     }
 
+    fn normalize_hint(name: String) -> Option<String> {
+        // We make sure the filename is normalized so it works on the underlying os
+        let name = normalize_filename(&name);
+
+        // Might be unnecessary due to normalization, but just in case, we make sure
+        // the file name is valid after being normalized, (is not an empty string, no null byte, etc.)
+        (!name.is_empty() && is_valid_file_name(&name).is_ok()).then_some(name)
+    } 
+
     pub fn set_server_name(&mut self, name: Option<String>) {
-        let server_name = name
-            .map(|name| normalize_filename(&name))
-            .filter(|server_name| !server_name.is_empty());
-        
-        self.server_name = server_name;
+        self.server_name = name.and_then(Self::normalize_hint);
     }
 
     pub fn as_str(&self) -> &str {
