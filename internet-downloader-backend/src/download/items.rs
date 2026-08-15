@@ -1290,11 +1290,11 @@ impl FileDownload {
     }
 
     pub fn set_file_name(&mut self, filename: String) {
-        if let Some(parent_path) = self.relative_path.parent() {
-            self.relative_path = parent_path.join(&filename);
-        }
-            
         self.filename.set_server_name(Some(filename));
+        
+        if let Some(parent_path) = self.relative_path.parent() {
+            self.relative_path = parent_path.join(&self.filename.as_str());
+        }
     }
     
     pub const fn filename(&self) -> &FileName {
