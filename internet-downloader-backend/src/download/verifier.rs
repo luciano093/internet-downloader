@@ -249,43 +249,51 @@ impl Verifier {
             // Otherwise we check individual chunk hashes to see how much of the file we truly have 
             else {
                 if let Some(FileSize::Known(size)) = file.size() {
-                    // either we should be able to pass a vector of ranges
-                    // or we should have a function where we can pass a file size, chunk size,
-                    // and returns a vector of hashes
-                    let path = file.relative_path().to_path_buf();
-                    let chunks_to_check = file.chunk_hashes().to_owned();
-
-                    if !chunks_to_check.is_empty() {
-                        let task_cancel_flag = task_cancel_flag.clone();
-
-                        let failed_indices = tokio::task::spawn_blocking(move || {
-                            Self::verify_file_chunks(&path, HASH_CHUNK_SIZE, size as usize, chunks_to_check, task_cancel_flag)
-                        }).await;
-
-                        match failed_indices {
-                            Ok(Ok(failed_indices)) => {
-                                if !failed_indices.is_empty() {
-                                    failed_chunks = Some(failed_indices);
-                                }   
-                            },
-                            // File chunk hashing error
-                            Ok(Err(error)) => {
-                                if error.kind() == std::io::ErrorKind::NotFound {
-                                    warn!("Failed to find file {} during verification: {}", file.name(), error);
-                                    new_status = Some(FileStatus::NotFound); 
-                                } else {
-                                    warn!("Failed to read file {} during verification: {}", file.name(), error);
-                                    new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
-                                }
-                            },
-                            // Task error
-                            Err(error) => {
-                                if error.is_cancelled() {
-                                    warn!("Hashing task was cancelled.");
-                                    new_status = Some(FileStatus::Failed(FileFailureReason::ClientError));
-                                } else {
-                                    warn!("Hashing task panicked: {}", error);
-                                    new_status = Some(FileStatus::Failed(FileFailureReason::ClientError)); 
+                    // If the filesize is already 0, there is nothing to hash/verify but
+                    // it might still be marked as non-Completed after a crash.
+                    if size == 0 {
+                        if file.status() != FileStatus::Completed {
+                            new_status = Some(FileStatus::Completed);
+                        }
+                    } else {
+                        // either we should be able to pass a vector of ranges
+                        // or we should have a function where we can pass a file size, chunk size,
+                        // and returns a vector of hashes
+                        let path = file.relative_path().to_path_buf();
+                        let chunks_to_check = file.chunk_hashes().to_owned();
+    
+                        if !chunks_to_check.is_empty() {
+                            let task_cancel_flag = task_cancel_flag.clone();
+    
+                            let failed_indices = tokio::task::spawn_blocking(move || {
+                                Self::verify_file_chunks(&path, HASH_CHUNK_SIZE, size as usize, chunks_to_check, task_cancel_flag)
+                            }).await;
+    
+                            match failed_indices {
+                                Ok(Ok(failed_indices)) => {
+                                    if !failed_indices.is_empty() {
+                                        failed_chunks = Some(failed_indices);
+                                    }   
+                                },
+                                // File chunk hashing error
+                                Ok(Err(error)) => {
+                                    if error.kind() == std::io::ErrorKind::NotFound {
+                                        warn!("Failed to find file {} during verification: {}", file.name(), error);
+                                        new_status = Some(FileStatus::NotFound); 
+                                    } else {
+                                        warn!("Failed to read file {} during verification: {}", file.name(), error);
+                                        new_status = Some(FileStatus::Failed(FileFailureReason::DiskError)); 
+                                    }
+                                },
+                                // Task error
+                                Err(error) => {
+                                    if error.is_cancelled() {
+                                        warn!("Hashing task was cancelled.");
+                                        new_status = Some(FileStatus::Failed(FileFailureReason::ClientError));
+                                    } else {
+                                        warn!("Hashing task panicked: {}", error);
+                                        new_status = Some(FileStatus::Failed(FileFailureReason::ClientError)); 
+                                    }
                                 }
                             }
                         }

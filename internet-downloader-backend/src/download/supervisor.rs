@@ -486,11 +486,23 @@ impl DownloadSupervisor {
 
                                     if let Some(job) = jobs.get(0) {
                                         debug!("Download supervisor is queuing {} range jobs for file {} from download {}", jobs.len(), job.file_id, job.download_id);
+
+                                        let _ = handle.queue_ranges(jobs).await;
                                     } else {
-                                        debug!("Download supervisor is sending request to queue {} range jobs", jobs.len());
+                                        // We have no ranges to download, meaining we either have a finished download
+                                        // or a 0-byte download, in either case, we should update the file to completed.
+                                        debug!("Download supervisor has no range jobs to queue for file {} from download {}", file_id, download_id);
+
+                                        if let Some(changed_items) = self.download.set_file_status(file_id, FileStatus::Completed) {
+                                            self.app_context.ui_handle.update_statuses(self.download.id(), changed_items);
+                                        }
+
+                                        chunked_files.remove(&file_id);
+                                        
+                                        if self.download.is_completed() {
+                                            let _ = self.sender.send(DownloadCommand::Finish).await;
+                                        }
                                     }
-                                    
-                                    let _ = handle.queue_ranges(jobs).await;
                                 },
                             }
                         },
