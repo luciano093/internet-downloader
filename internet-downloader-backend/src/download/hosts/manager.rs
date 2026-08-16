@@ -1250,6 +1250,7 @@ impl HostManager {
             match response.content_length() {
                 Some(length) if length == 0 => { 
                     // Content-Length 0 on HEAD is suspicious, we fall through to GET
+                    // In many cases, HEAD says 0 but GET says the actual size
                 }
                 Some(length) => {
                     if accepts_ranges {
@@ -1300,6 +1301,13 @@ impl HostManager {
                         .unwrap_or(FileSize::Unknown);
                     
                     Ok(MetadataResult::Stream { file_size, file_name })
+                }
+                StatusCode::RANGE_NOT_SATISFIABLE => {
+                    // Server has an actual 0 byte file that it tried to give to us
+                    Ok(MetadataResult::Chunked {
+                        file_size: 0,
+                        file_name: Self::extract_filename(&response, url),
+                    })
                 }
                 status => Err(MetadataError::HttpStatus(status)),
             }
