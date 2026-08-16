@@ -1303,11 +1303,20 @@ impl HostManager {
                     Ok(MetadataResult::Stream { file_size, file_name })
                 }
                 StatusCode::RANGE_NOT_SATISFIABLE => {
-                    // Server has an actual 0 byte file that it tried to give to us
-                    Ok(MetadataResult::Chunked {
-                        file_size: 0,
-                        file_name: Self::extract_filename(&response, url),
-                    })
+                    // 416 with "bytes */0" means we have a genuinely empty file. 
+                    // Anything else is a real error.
+                    let is_empty = response.headers()
+                        .get(header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(Self::parse_content_range)
+                        .map(|content_range| content_range == 0)
+                        .unwrap_or(false);
+            
+                    if is_empty {
+                        Ok(MetadataResult::Chunked { file_size: 0, file_name: Self::extract_filename(&response, url) })
+                    } else {
+                        Err(MetadataError::HttpStatus(StatusCode::RANGE_NOT_SATISFIABLE))
+                    }
                 }
                 status => Err(MetadataError::HttpStatus(status)),
             }
