@@ -552,7 +552,7 @@ impl HostScheduler {
         self.notify.notify_waiters();
     }
 
-    pub async fn next(&mut self, permits_available: usize, permits_total: usize) -> NextJob {
+    pub async fn next(&mut self, permits: Arc<Semaphore>, permits_total: usize) -> (NextJob, OwnedSemaphorePermit) {
         loop {
             if !self.has_work() {
                 let notified = self.notify.notified();
@@ -563,22 +563,32 @@ impl HostScheduler {
                     (&mut notified).await;
                 }
             }
+
+            // We get the number permits available *before* we claim a permit
+            // otherwise we might think there is 0 permits when in reality we hold the last one
+            // and do our prioritizations wrong
+            let permits_available = permits.available_permits();
+
+            // It's important that this permit is acquired only where there is a confirmed job
+            // otherwise starvation is possible (we claim a permit, realize there is no work, park,
+            // and another worker runs and does the same as us)
+            let _permit = permits.clone().acquire_owned().await.unwrap();
             
             // Retries first (metadata > stream > range)
             if let Some(job) = self.take_from_retry_metadata() {
-                return NextJob::Metadata(job);
+                return (NextJob::Metadata(job), _permit);
             }
             if let Some(job) = self.take_from_retry_stream() {
-                return NextJob::Stream(job);
+                return (NextJob::Stream(job), _permit);
             }
             if let Some(job) = self.take_from_retry_range() {
-                return NextJob::Range(job);
+                return (NextJob::Range(job), _permit);
             }
     
             // If we only have one permit left, prioritize metadata
             if permits_available == 1 {
                 if let Some(job) = self.take_metadata() {
-                    return NextJob::Metadata(job);
+                    return (NextJob::Metadata(job), _permit);
                 }
             }
     
@@ -589,18 +599,18 @@ impl HostScheduler {
             // If more than half of our permits are taken, prefer metadata
             if busy_ratio > 0.5 {
                 if let Some(job) = self.take_metadata() {
-                    return NextJob::Metadata(job);
+                    return (NextJob::Metadata(job), _permit);
                 }
             }
             
             if let Some(job) = self.take_stream() {
-                return NextJob::Stream(job);
+                return (NextJob::Stream(job), _permit);
             }
             if let Some(job) = self.take_range() {
-                return NextJob::Range(job);
+                return (NextJob::Range(job), _permit);
             }
             if let Some(job) = self.take_metadata() {
-                return NextJob::Metadata(job);
+                return (NextJob::Metadata(job), _permit);
             }
         }
     }
@@ -692,14 +702,9 @@ impl HostManager {
     pub async fn run(mut self) {  
         loop {
             tokio::select! {
-                result = async {          
+                result = async {                
                     // Ask the scheduler if we have a next job
-                    let job = self.scheduler.next(
-                        self.permits.available_permits(),
-                        self.max_permits,
-                    ).await;
-                    
-                    let _permit = self.permits.clone().acquire_owned().await.unwrap();
+                    let (job, _permit) = self.scheduler.next(self.permits.clone(), self.max_permits).await;
                     
                     (job, _permit)
                 } => {
