@@ -330,6 +330,12 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 
+        // If every limiter is unlimited, we don't need to verify anything
+        // this reduces a lot of overhead in the fast path.
+        if this.limiters.iter().all(|limiter| limiter.is_unlimited()) {
+            return this.inner.as_mut().poll_next(cx);
+        }
+
         let mut settings_changed = false;
 
         for receiver in this.receivers.iter_mut() {
