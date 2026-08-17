@@ -1526,7 +1526,7 @@ async fn download_range(
             let buffer_to_write = buffer.split().freeze();
             let bytes_to_write = buffer_to_write.len() as u64;
 
-            hasher.update_rayon(&buffer_to_write[..]);
+            hasher.update(&buffer_to_write[..]);
             let full_hash = hasher.finalize();
             let mut hash_arr = [0u8; 16];
             hash_arr.copy_from_slice(&full_hash.as_bytes()[..16]);
