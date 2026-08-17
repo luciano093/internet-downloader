@@ -1471,7 +1471,6 @@ async fn download_range(
     let mut buffer_start_offset = current_offset;
 
     let mut in_flight_acks: VecDeque<(u64, oneshot::Receiver<std::io::Result<()>>)> = VecDeque::new();
-    const MAX_IN_FLIGHT: usize = 4; // Max 4MB in RAM per worker before we apply backpressure
 
     // Chunk hashing variables
     let mut hashes = Vec::new();
@@ -1549,38 +1548,6 @@ async fn download_range(
 
             in_flight_acks.push_back((bytes_to_write, ack_receiver));
             buffer_start_offset = current_offset; 
-
-
-            if in_flight_acks.len() >= MAX_IN_FLIGHT {
-                let (bytes_written, receiver) = in_flight_acks.pop_front().unwrap();
-
-                receiver.await
-                    .map_err(|_| RangeDownloadError::DiskPoolDropped)? 
-                    .map_err(RangeDownloadError::DiskWriteError)?; 
-                
-                let mut reportable_bytes = bytes_written;
-
-                if bytes_to_skip_reporting > 0 {
-                    let skip = reportable_bytes.min(bytes_to_skip_reporting);
-                    bytes_to_skip_reporting -= skip;
-                    reportable_bytes -= skip;
-                }
-
-                if reportable_bytes > 0 {
-                    current_progress = range_progress.add(reportable_bytes);
-                    unnotified_bytes += reportable_bytes;
-
-                    if unnotified_bytes >= CHANNEL_UPDATE_THRESHOLD {
-                        let update = FileUpdate::BytesDownloaded { 
-                            id: range_job.file_id,
-                            len: current_progress, 
-                        };
-
-                        ui_handle.update_file(range_job.download_id, update);
-                        unnotified_bytes = 0; 
-                    }
-                }
-            }
         }
     }
 
