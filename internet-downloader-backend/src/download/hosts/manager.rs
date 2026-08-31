@@ -1456,7 +1456,7 @@ async fn download_range(
     let throttled_stream = ThrottledStream::new(raw_stream, limiters);
     tokio::pin!(throttled_stream);
 
-    let mut current_offset = start_byte;
+    let mut buffer_start_offset = start_byte;
     let mut bytes_received = 0; 
 
     let mut range_progress = RangeProgress::new(range_job.progress.clone());
@@ -1468,7 +1468,6 @@ async fn download_range(
     // Disk IO variables
     let buffer_capacity: usize = HASH_CHUNK_SIZE; // 1 MB (same as hash chunk)
     let mut buffer = BytesMut::with_capacity(buffer_capacity);
-    let mut buffer_start_offset = current_offset;
 
     let mut in_flight_acks: VecDeque<(u64, oneshot::Receiver<std::io::Result<()>>)> = VecDeque::new();
 
@@ -1517,11 +1516,10 @@ async fn download_range(
             }
         }
 
-        current_offset += chunk_len;
         bytes_received += chunk_len;
 
         // Disk IO sending logic
-        if buffer.len() >= buffer_capacity {
+        while buffer.len() >= buffer_capacity {
             // Swap full buffer for an empty one
             let buffer_to_write = buffer.split_to(buffer_capacity).freeze();
             let bytes_to_write = buffer_to_write.len() as u64;
