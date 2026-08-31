@@ -1568,7 +1568,7 @@ async fn download_range(
         let file_chunk = FileChunk {
             file_map: range_job.file_map.clone(),
             offset: buffer_start_offset,
-            data: buffer.split().freeze(),
+            data: tail,
             ack: ack_sender,
         };
 
