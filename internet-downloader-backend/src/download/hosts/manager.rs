@@ -1523,7 +1523,7 @@ async fn download_range(
         // Disk IO sending logic
         if buffer.len() >= buffer_capacity {
             // Swap full buffer for an empty one
-            let buffer_to_write = buffer.split().freeze();
+            let buffer_to_write = buffer.split_to(buffer_capacity).freeze();
             let bytes_to_write = buffer_to_write.len() as u64;
 
             hasher.update(&buffer_to_write[..]);
@@ -1547,7 +1547,7 @@ async fn download_range(
             io_sender.send_async(file_chunk).await.map_err(|_| RangeDownloadError::DiskPoolDropped)?;
 
             in_flight_acks.push_back((bytes_to_write, ack_receiver));
-            buffer_start_offset = current_offset; 
+            buffer_start_offset += bytes_to_write; 
         }
     }
 
